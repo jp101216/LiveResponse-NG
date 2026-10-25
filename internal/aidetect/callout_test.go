@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -74,6 +75,74 @@ func TestInspect(t *testing.T) {
 				t.Fatalf("got %s/%s, want %s/%s (%s)", got.Rule, got.Severity, tc.wantRule, tc.wantSev, got.Detail)
 			}
 		})
+	}
+}
+
+// TestInspectLinuxNames covers the Linux shapes of a process: the allowlist and
+// the script-host escalation are keyed on the executable's file name (no
+// ".exe"), because comm is the script's name for a #! script and can be set to
+// anything with prctl.
+func TestInspectLinuxNames(t *testing.T) {
+	d := newTestDetector()
+	cases := []struct {
+		name     string
+		conn     Conn
+		wantRule string
+		wantSev  string
+	}{
+		{"browser by its Linux executable",
+			Conn{Remote: llmIP, Process: "firefox", PID: 10, ImagePath: "/usr/lib/firefox/firefox"}, "", ""},
+		{"comm renamed to a browser, exe is python",
+			Conn{Remote: llmIP, Process: "firefox", PID: 11, ImagePath: "/usr/bin/python3.11"}, "ai.llm_callout", SevCritical},
+		{"#! python script: comm is the script, exe the interpreter",
+			Conn{Remote: llmIP, Process: "beacon.py", PID: 12, ImagePath: "/usr/bin/python3.12"}, "ai.llm_callout", SevCritical},
+		{"#! shell script",
+			Conn{Remote: llmIP, Process: "update.sh", PID: 13, ImagePath: "/usr/bin/bash"}, "ai.llm_callout", SevCritical},
+		{"curl",
+			Conn{Remote: llmIP, Process: "curl", PID: 14, ImagePath: "/usr/bin/curl"}, "ai.llm_callout", SevCritical},
+		{"unknown Linux daemon",
+			Conn{Remote: llmIP, Process: "svcd", PID: 15, ImagePath: "/usr/sbin/svcd"}, "ai.llm_callout", SevSuspect},
+		{"allowlisted name from /tmp",
+			Conn{Remote: llmIP, Process: "code", PID: 16, ImagePath: "/tmp/.x/code", UnusualPath: true},
+			"ai.llm_callout_unusual_path", SevSuspect},
+		{"deleted interpreter after an upgrade is still the interpreter",
+			Conn{Remote: llmIP, Process: "agent", PID: 17, ImagePath: "/usr/bin/python3.11 (deleted)"}, "ai.llm_callout", SevCritical},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := d.Inspect(tc.conn)
+			if tc.wantRule == "" {
+				if got != nil {
+					t.Fatalf("unexpected finding: %+v", got)
+				}
+				return
+			}
+			if got == nil || got.Rule != tc.wantRule || got.Severity != tc.wantSev {
+				t.Fatalf("got %+v, want %s/%s", got, tc.wantRule, tc.wantSev)
+			}
+		})
+	}
+	// The detail names both identities when they differ.
+	got := d.Inspect(Conn{Remote: llmIP, Process: "firefox", PID: 11, ImagePath: "/usr/bin/python3.11"})
+	if got == nil || !strings.Contains(got.Detail, "firefox [python3.11]") {
+		t.Fatalf("detail should show comm and exe: %+v", got)
+	}
+}
+
+func TestIsScriptHostOrLOLBin(t *testing.T) {
+	for _, n := range []string{"powershell.exe", "python.exe", "python3.exe", "python3.12.exe", "bash", "sh",
+		"python3", "python3.12", "perl5.36.0", "php8.2", "lua5.4", "pypy3", "node", "nc", "wget"} {
+		if !isScriptHostOrLOLBin(n) {
+			t.Errorf("%q should be a script host / LOLBin", n)
+		}
+	}
+	for _, n := range []string{"", "chrome.exe", "nginx", "php-fpm8.2", "sh2", "python-config", "3.12", "svchost.exe"} {
+		if isScriptHostOrLOLBin(n) {
+			t.Errorf("%q should not be a script host / LOLBin", n)
+		}
+	}
+	if got := normalizeName("/usr/bin/Python3.11 (deleted)"); got != "python3.11" {
+		t.Errorf("normalizeName = %q", got)
 	}
 }
 

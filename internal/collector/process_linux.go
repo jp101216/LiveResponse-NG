@@ -56,6 +56,7 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 
 		exe, exeErr := os.Readlink(base + "/exe")
 		cmd := parseCmdline(readFileSafe(base + "/cmdline"))
+		pst, havePst := parseProcStat(readFileSafe(base + "/stat"))
 
 		fields := map[string]any{"pid": pid, "name": name}
 		if st.PPID >= 0 {
@@ -64,14 +65,31 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 		if st.State != "" {
 			fields["state"] = st.State
 		}
+		// A kernel thread is told by the kernel's PF_KTHREAD flag. Without
+		// /proc/<pid>/stat, fall back to "no exe target and no argv" — which a
+		// zombie also matches, so the flag is preferred whenever it can be read.
 		kernel := false
-		if exeErr == nil && exe != "" {
+		switch {
+		case havePst:
+			kernel = pst.kernelThread()
+		case os.IsNotExist(exeErr) && cmd == "":
+			kernel = true
+		}
+		replaced := false
+		switch {
+		case exeErr == nil && exe != "":
 			fields["image_path"] = exe
 			fields["suspicious_path"] = unixSuspiciousPath(exe)
-		} else if os.IsNotExist(exeErr) {
-			kernel = true // no exe target: a kernel thread (or it just exited)
+			if replacedSystemFile(exe, procRootExists(pid)) {
+				replaced = true
+				fields["image_replaced"] = true
+			}
+		case kernel:
 			fields["kernel"] = true
-		} else if exeErr != nil {
+		case os.IsNotExist(exeErr):
+			// A zombie has lost its exe link, and a process that exited after
+			// /proc was listed has no entry left: neither is a read failure.
+		case exeErr != nil:
 			fields["query_errors"] = []string{"exe: " + exeErr.Error()}
 		}
 		if cmd != "" {
@@ -83,14 +101,15 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 				fields["user"] = u
 			}
 		}
-		if ticks, ok := parseStarttimeTicks(readFileSafe(base + "/stat")); ok && haveBtime {
-			fields["created_at"] = time.Unix(btime+int64(ticks)/linuxClockTick, 0).UTC()
+		if havePst && haveBtime {
+			fields["created_at"] = time.Unix(btime+int64(pst.StartTicks)/linuxClockTick, 0).UTC()
 		}
 		self := opts.isSelf(uint32(pid), exe)
 		if self {
 			fields["lrng_component"] = true
 		}
-		rows = append(rows, linuxProcRow{pid: pid, st: st, exe: exe, cmd: cmd, kernel: kernel, self: self, fields: fields})
+		rows = append(rows, linuxProcRow{pid: pid, st: st, exe: exe, cmd: cmd, kernel: kernel,
+			kernelKnown: havePst, replaced: replaced, self: self, fields: fields})
 	}
 
 	// Parent names from the PID->name map gathered above.
@@ -109,9 +128,11 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 		if !r.self {
 			findings = linuxProcessFindings(r)
 		}
-		if opts.Hasher != nil && hashableImage(r.exe) && ctx.Err() == nil {
-			opts.Hasher.Fields(ctx, r.fields, "image", r.exe)
-			if _, ok := r.fields["image_sha256"]; ok {
+		// Hash the executable through /proc/<pid>/exe, not the path text: that
+		// reaches the file the process really runs — a deleted or memfd payload
+		// included, and the right file for a process in a container.
+		if opts.Hasher != nil && r.exe != "" && !r.kernel && ctx.Err() == nil {
+			if hashProcessImage(ctx, opts.Hasher, r.pid, r.fields) {
 				hashed++
 			}
 		}
@@ -128,21 +149,17 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 	return res.Finish(), nil
 }
 
-// hashableImage reports whether an exe path points at a real on-disk file worth
-// hashing (not a deleted image or an anonymous memfd, which have no file).
-func hashableImage(exe string) bool {
-	return exe != "" && !strings.HasSuffix(exe, " (deleted)") && !strings.Contains(exe, "memfd:")
-}
-
 // linuxProcRow is one process as gathered from /proc, before findings.
 type linuxProcRow struct {
-	pid    int
-	st     procStatus
-	exe    string
-	cmd    string
-	kernel bool
-	self   bool
-	fields map[string]any
+	pid         int
+	st          procStatus
+	exe         string
+	cmd         string
+	kernel      bool
+	kernelKnown bool // kernel came from the PF_KTHREAD flag, not a guess
+	replaced    bool // exe is deleted, but a new file sits at its system path
+	self        bool
+	fields      map[string]any
 }
 
 // linuxProcessFindings judges one process by its image location, its fileless
@@ -152,12 +169,19 @@ func linuxProcessFindings(r linuxProcRow) []Finding {
 	var out []Finding
 
 	switch {
-	case strings.Contains(r.exe, "memfd:"):
+	case isMemfdPath(r.exe):
 		out = append(out, Finding{
 			Rule: "process.memfd_exec", Severity: SevSuspect, Technique: "T1620", Confidence: 80,
 			Detail: fmt.Sprintf("%s runs from an anonymous in-memory file (%s) — fileless execution, nothing on disk to inspect", label, r.exe),
 		})
-	case strings.HasSuffix(r.exe, " (deleted)"):
+	case r.replaced:
+		out = append(out, Finding{
+			Rule: "process.binary_replaced", Severity: SevNotable, Technique: "T1554", Confidence: 30,
+			Detail: fmt.Sprintf("%s still runs an executable that has since been replaced on disk (%s; a new file now sits at that path) — "+
+				"usually a package upgrade the process hasn't been restarted after, but a trojanized system binary is installed "+
+				"the same way: verify the file with the package manager (dpkg -V / rpm -V)", label, r.exe),
+		})
+	case strings.HasSuffix(r.exe, deletedSuffix):
 		out = append(out, Finding{
 			Rule: "process.deleted_binary", Severity: SevSuspect, Technique: "T1070.004", Confidence: 70,
 			Detail: fmt.Sprintf("%s is running from a deleted executable (%s) — self-deleting malware removes the file but keeps running", label, r.exe),
@@ -176,13 +200,19 @@ func linuxProcessFindings(r linuxProcRow) []Finding {
 		}
 	}
 
-	// A userland process wearing a kernel-thread name is masquerading: real
-	// kernel threads have no executable, so anything with an exe whose name looks
-	// like "kworker/…" (bare, or the bracketed form ps prints) is suspect.
-	if !r.kernel && r.exe != "" && looksLikeKernelThreadName(r.st.Name) {
+	// A userland process wearing a kernel-thread name is masquerading. The
+	// PF_KTHREAD flag settles it without root (another user's exe link can't be
+	// read unprivileged); without the flag, an executable is the giveaway, since
+	// real kernel threads have none. The name may be bare ("kworker/0:1") or the
+	// bracketed form ps prints.
+	if !r.kernel && looksLikeKernelThreadName(r.st.Name) && (r.kernelKnown || r.exe != "") {
+		what := "its executable couldn't be read"
+		if r.exe != "" {
+			what = "it runs " + r.exe
+		}
 		out = append(out, Finding{
 			Rule: "process.kthread_masquerade", Severity: SevSuspect, Technique: "T1036.004", Confidence: 70,
-			Detail: fmt.Sprintf("%s has a kernel-thread name but a real executable (%s) — real kernel threads have none", label, r.exe),
+			Detail: fmt.Sprintf("%s has a kernel-thread name but is a userland process (%s) — real kernel threads have no executable", label, what),
 		})
 	}
 

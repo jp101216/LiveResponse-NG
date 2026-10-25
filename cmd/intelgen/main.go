@@ -78,18 +78,44 @@ func main() {
 		verbose:   *verbose,
 	}
 
-	w := os.Stdout
-	if *outPath != "" {
-		f, err := os.Create(*outPath)
-		if err != nil {
+	if *outPath == "" {
+		if err := generate(os.Stdout, cfg); err != nil {
 			fail(err)
 		}
-		defer f.Close()
-		w = f
+		return
 	}
-	if err := generate(w, cfg); err != nil {
+	if err := writeFileAtomic(*outPath, func(w io.Writer) error { return generate(w, cfg) }); err != nil {
 		fail(err)
 	}
+}
+
+// writeFileAtomic writes path through a temporary file in the same directory,
+// renamed into place only once write has succeeded. The usual -out target is
+// the dataset lrng embeds, so a failed run (a missing or truncated input) must
+// leave the existing file untouched rather than empty or half-written.
+func writeFileAtomic(path string, write func(io.Writer) error) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	err = write(tmp)
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(name, 0o644) // a checked-in data file, not a secret
+	}
+	if err == nil {
+		err = os.Rename(name, path)
+	}
+	if err != nil {
+		_ = os.Remove(name)
+	}
+	return err
 }
 
 func fail(err error) {

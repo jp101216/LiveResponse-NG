@@ -53,3 +53,32 @@ func TestHasPathPrefix(t *testing.T) {
 		t.Error("/tmpfoo is not under /tmp")
 	}
 }
+
+func TestReplacedSystemFile(t *testing.T) {
+	present := map[string]bool{"/usr/lib/x86_64-linux-gnu/libssl.so.3": true, "/usr/sbin/sshd": true, "/tmp/x": true}
+	exists := func(p string) bool { return present[p] }
+	cases := map[string]bool{
+		"/usr/lib/x86_64-linux-gnu/libssl.so.3 (deleted)": true,  // upgraded, restart pending
+		"/usr/sbin/sshd (deleted)":                        true,  // upgraded binary
+		"/usr/lib/libgone.so (deleted)":                   false, // deleted, nothing replaced it
+		"/tmp/x (deleted)":                                false, // replaced, but not a system location
+		"/memfd:x (deleted)":                              false, // never a file
+		"/usr/sbin/sshd":                                  false, // not deleted at all
+		"/usrlocal/x (deleted)":                           false, // not under /usr
+		" (deleted)":                                      false,
+	}
+	for p, want := range cases {
+		if got := replacedSystemFile(p, exists); got != want {
+			t.Errorf("replacedSystemFile(%q) = %v, want %v", p, got, want)
+		}
+	}
+}
+
+func TestHomePathRiskRootIsAComponent(t *testing.T) {
+	if lvl, _ := unixPathRisk("/rootfs/.cache/x"); lvl != riskNone {
+		t.Errorf("/rootfs is not root's home, got %v", lvl)
+	}
+	if lvl, _ := unixPathRisk("/root/.cache/x"); lvl != riskLow {
+		t.Errorf("a hidden dir in /root should be low risk, got %v", lvl)
+	}
+}

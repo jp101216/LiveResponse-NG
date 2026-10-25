@@ -115,15 +115,6 @@ func any2(c *cmdInput, subs ...string) bool {
 	return false
 }
 
-func all2(c *cmdInput, subs ...string) bool {
-	for _, s := range subs {
-		if !c.has(s) {
-			return false
-		}
-	}
-	return true
-}
-
 // cradle reports a download primitive in the command line or decoded payload.
 func cradle(c *cmdInput) bool {
 	t := c.text()

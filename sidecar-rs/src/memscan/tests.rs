@@ -321,6 +321,55 @@ fn linux_fileless_execution_is_flagged() {
 }
 
 #[test]
+fn library_replaced_by_an_upgrade_is_info_not_a_deleted_payload() {
+    let present = |p: &str| p == "/usr/lib/x86_64-linux-gnu/libssl.so.3" || p == "/tmp/x";
+    let upgraded = region_heuristic_with(
+        &region(
+            "file",
+            "r-xp",
+            "/usr/lib/x86_64-linux-gnu/libssl.so.3 (deleted)",
+        ),
+        &[0u8; 64],
+        &present,
+    )
+    .expect("replaced");
+    assert_eq!(
+        (upgraded.rule.as_str(), upgraded.severity.as_str()),
+        ("memory.replaced_file_exec", "info")
+    );
+    // Nothing in its place: still a deleted file.
+    let gone = region_heuristic_with(
+        &region("file", "r-xp", "/usr/lib/libgone.so (deleted)"),
+        &[0u8; 64],
+        &present,
+    )
+    .expect("deleted");
+    assert_eq!(gone.rule, "memory.deleted_file_exec");
+    // Replaced, but outside the package tree (/tmp): still a deleted file.
+    let tmp = region_heuristic_with(
+        &region("file", "r-xp", "/tmp/x (deleted)"),
+        &[0u8; 64],
+        &present,
+    )
+    .expect("tmp");
+    assert_eq!(tmp.rule, "memory.deleted_file_exec");
+    assert!(under_system_prefix("/usr/lib/a.so") && under_system_prefix("/opt/x/y"));
+    assert!(!under_system_prefix("/usrlocal/a.so") && !under_system_prefix("/tmp/usr/a.so"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn process_root_lookup_sees_real_files() {
+    let me = std::process::id();
+    assert!(
+        exists_in_process_root(me, "/proc/self/status")
+            || exists_in_process_root(me, "/etc/hostname")
+            || exists_in_process_root(me, "/bin/sh")
+    );
+    assert!(!exists_in_process_root(me, "/definitely/not/here/lrng"));
+}
+
+#[test]
 fn scan_reports_unbacked_exec_stats() {
     let child = spawn("sleep", &[]);
     let resp = run(Request {

@@ -19,9 +19,12 @@ type connView struct {
 	Remote     netip.Addr
 	RemotePort uint16
 	PID        uint32
-	Process    string // image name, lower or mixed case
+	Process    string // image name (Linux: comm), lower or mixed case
 	ImagePath  string // "" when unknown
 	Self       bool
+	// Inbound marks an established connection accepted on one of the host's
+	// own listening sockets (a client of a local server). Set on Linux.
+	Inbound bool
 }
 
 // listenerHosts are interpreters and LOLBins that don't normally accept

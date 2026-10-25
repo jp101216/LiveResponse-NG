@@ -7,8 +7,8 @@ cmd/lrng/              CLI entry point (flags, validation, exit codes)
 cmd/intelgen/          Offline dataset generator for internal/intel (dev tool)
 internal/
   collector/           Collector interface, registry, parallel dispatcher,
-                       the Windows collectors and the portable analytics
-                       they share (see "Analytics" below), the EVTX reader
+                       the Windows and Linux collectors and the portable
+                       analytics they share (see "Analytics" below), the EVTX reader
                        and Sigma engine, and the post-collection passes
                        (correlation, super-timeline, indicator export,
                        endpoint-intelligence attribution)
@@ -78,10 +78,25 @@ standard config files; their text parsers follow the same "no build tag, bounds-
 checked, unit-tested on any OS" rule as the Windows decoders — `procfs.go`
 (`/proc/<pid>` status/stat, passwd/group/shadow), `procnet.go`
 (`/proc/net/{tcp,udp}` hex rows), `procmaps.go` (`/proc/<pid>/maps`) and
-`persist_unix.go` (cron, systemd, .desktop). The Linux heuristics live in
-`paths_unix.go` and `cmdline_unix.go`, the counterparts to `paths.go` and
-`cmdline.go`; AI module A (`internal/aidetect`) is OS-agnostic and the Linux
-`network` collector feeds it directly.
+`persist_unix.go` (cron, systemd, .desktop, ld.so.preload). The Linux
+heuristics live in `paths_unix.go`, `cmdline_unix.go`, `netrules_unix.go`,
+`modulerules_unix.go` and `accountrules_unix.go`, the counterparts to
+`paths.go`, `cmdline.go` and the `*rules.go` files; AI module A
+(`internal/aidetect`) is OS-agnostic and the Linux `network` collector feeds it
+directly.
+
+Two Linux specifics shape those collectors. A process's name (`comm`) is the
+script's name for a `#!` script and can be set to anything with `prctl`, so the
+heuristics judge a process by its executable's name as well, and module A's
+allowlist by the executable. And the path `readlink /proc/<pid>/exe` returns is
+only a label in the process's own mount namespace, so `procexe_linux.go` reads
+through the magic links instead: images are hashed by opening
+`/proc/<pid>/exe` (reaching a deleted or memfd payload, and a container's own
+file), keyed by device and inode so a shared binary is read once, and "is there
+a file at this path now?" — how an upgraded binary or library is told from a
+self-deleting one — is asked under `/proc/<pid>/root`. Kernel threads are told
+by the `PF_KTHREAD` flag in `/proc/<pid>/stat`, which every user can read and
+which (unlike a missing exe link) a zombie doesn't have.
 
 Anything that's pure data handling stays out of the `_windows.go` files so it
 can be unit-tested on any OS: the TCP- and UDP-table decoders (`tcptable.go`,
@@ -161,7 +176,8 @@ Downloads folder must not get findings about lrng.
 The dispatcher runs collectors through a bounded worker pool and returns
 results in the order the collectors were requested, so reports diff cleanly.
 
-Each collector runs in its own goroutine under its own `context` deadline:
+Each collector runs in its own goroutine under its own `context` deadline
+(Ctrl+C and SIGTERM cancel the shared context; a second signal exits at once):
 
 1. If it returns in time, its result is used.
 2. If the deadline passes, it gets a grace period (default 2s) to return
@@ -187,8 +203,8 @@ takes minutes, not seconds).
 ### Memory collector
 
 1. List processes (Toolhelp + image paths on Windows, `/proc` on Linux).
-2. Skip lrng itself, its sidecar binary (by path), and kernel-only processes;
-   honour `-mem-pids`.
+2. Skip lrng itself, its sidecar binary (by path), kernel-only processes and
+   (Linux) zombies, which have exited and hold no memory; honour `-mem-pids`.
 3. Split the targets round-robin across `-mem-workers` sidecars. Each gets one
    `scan_memory` request with its PID list, compiles the rules once, and
    streams back one line per PID.
@@ -208,20 +224,33 @@ The `eventlog` collector reads the targeted channels from
 `%SystemRoot%\System32\winevt\Logs`: Security, System, Application, both
 PowerShell logs, TaskScheduler, WMI-Activity, Defender, the two
 TerminalServices logs and Sysmon. A channel the host doesn't have is counted
-in `meta.logs_missing`, not reported as an error. Each log is read whole, up
-to a 512 MiB cap; a larger one, or one the EventLog service won't let it read,
-is reported and skipped (copy it off-host, or take it from a shadow copy, and
-parse it offline). The tag-free reader in `evtx.go` walks the 64 KiB chunks,
-resolves templates and decodes each record's binary XML into a normalised
-event.
+in `meta.logs_missing`, not reported as an error; one the EventLog service
+won't let lrng open is reported and skipped (take it from a shadow copy or
+image and parse it offline). The tag-free reader in `evtx.go` reads the file one
+64 KiB chunk at a time through an `io.ReaderAt` — constant memory, whatever the
+log's size — resolves templates and decodes each record's binary XML into a
+normalised event. A full log is circular (the newest chunks overwrite the
+oldest at the front of the file), so chunks are visited in the order of their
+first record identifier, not file order; the live collector walks them newest
+first, records reversed within each chunk too, and polls its context between
+chunks, so a log its time budget can't finish yields its latest records plus a
+`cancelled` error instead of nothing. A chunk with a bad signature is skipped,
+not taken as the end of the log.
 
 Every event is classified (`eventlog.go`) and, when `-sigma` loaded rules,
 matched against them as well; a Sigma match keeps an event the built-in rules
 would have dropped. Aggregation and `near` rules hold state across the whole
-run and flush once the last log is read. Retention is bounded: each log keeps
-its most recent 50,000 kept records, and parsing stops at 100,000 across the
-run (`records_truncated`). The result's `meta` says what was read
-(`logs_read`, `records_scanned`, `records_kept`, `parse_warnings`), each
+run and flush once the last log is read (they sort their observations, so the
+chunk order doesn't matter). Retention is bounded, in two budgets so that
+volume can't displace evidence: records without a finding (the always-kept
+low-volume events — less the 4672s of SYSTEM, the service accounts and the
+DWM/UMFD virtual accounts, which are skipped as noise) keep the most recent
+50,000 per log and 100,000 across the run; records with a finding are kept
+first, up to 100,000 across the run, and every log is still parsed after the
+finding-less budget is spent. Kept records are reported oldest first
+(`records_truncated`, `records_dropped`). The result's `meta` says what was read
+(`logs_read`, `records_scanned`, `records_kept`, `records_with_findings`,
+`parse_warnings`), each
 channel's record-id and time span (`channel_ranges`, which correlation
 measures a log clear against), and what the Sigma engine could and couldn't
 run (`sigma`: counts, each skipped rule with its reason, and each file that
@@ -292,8 +321,9 @@ endpoint intelligence add roll up into `summary` like any other.
 
 1. Create `yourthing.go` with the type, `Name()`, `Platforms()`, and
    `func init() { Register(&yourThing{}) }`.
-2. Put the real logic in `yourthing_windows.go` and a stub in
-   `yourthing_other.go`. Keep parsing in a tag-free file with tests.
+2. Put the real logic in `yourthing_windows.go` (and `yourthing_linux.go`)
+   and a stub in `yourthing_other.go` for the remaining OSes. Keep parsing in
+   a tag-free file with tests.
 3. Check `ctx.Err()` in loops and return partial results on cancellation.
 4. If it needs run options (the hasher, the LLM allowlist, self-exclusion),
    implement `Configurable`.
@@ -453,7 +483,7 @@ Schema 1.2 also covers the memory collector: one record per process with
 plus `results[].meta.yara` for the rule set. Findings from YARA have rules
 named `yara:<rule>`.
 
-v0.7 through v0.9 keep schema 1.2: everything they add fits inside the envelope.
+v0.7 through v0.10 keep schema 1.2: everything they add fits inside the envelope.
 That covers the `eventlog` result (with `meta.sigma` and `meta.channel_ranges`),
 Sigma findings (`sigma.<rule>`, and synthetic records with `source_log`
 `sigma:aggregation`), correlation findings and annotations, the `timeline`

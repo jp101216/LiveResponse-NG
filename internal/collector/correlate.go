@@ -58,7 +58,8 @@ func correlateServiceInstalls(results []Result, el *Result) {
 		}
 	}
 
-	present, absent := 0, 0
+	partial := inventoryPartial(svc)
+	present, absent, unverified := 0, 0, 0
 	for i := range el.Records {
 		rec := &el.Records[i]
 		if intField(rec.Fields, "event_id") != 7045 {
@@ -71,6 +72,10 @@ func correlateServiceInstalls(results []Result, el *Result) {
 		if live[strings.ToLower(name)] {
 			rec.Fields["service_still_present"] = true
 			present++
+			continue
+		}
+		if partial {
+			unverified++ // the services walk stopped early: it may just not have got there
 			continue
 		}
 		rec.Fields["service_still_present"] = false
@@ -88,8 +93,13 @@ func correlateServiceInstalls(results []Result, el *Result) {
 				name, len(svc.Records)),
 		})
 	}
-	if present+absent > 0 {
-		el.SetMeta("service_install_correlation", map[string]any{"still_present": present, "absent": absent})
+	if present+absent+unverified > 0 {
+		m := map[string]any{"still_present": present, "absent": absent}
+		if unverified > 0 {
+			m["unverified"] = unverified
+			m["note"] = "the services collector was cancelled before it finished, so installs it didn't list weren't judged absent"
+		}
+		el.SetMeta("service_install_correlation", m)
 	}
 }
 
@@ -111,7 +121,8 @@ func correlateScheduledTasks(results []Result, el *Result) {
 		}
 	}
 
-	present, absent := 0, 0
+	partial := inventoryPartial(st)
+	present, absent, unverified := 0, 0, 0
 	for i := range el.Records {
 		rec := &el.Records[i]
 		if id := intField(rec.Fields, "event_id"); id != 4698 && id != 106 {
@@ -126,6 +137,10 @@ func correlateScheduledTasks(results []Result, el *Result) {
 			present++
 			continue
 		}
+		if partial {
+			unverified++
+			continue
+		}
 		rec.Fields["task_still_present"] = false
 		absent++
 		rec.Findings = append(rec.Findings, Finding{
@@ -137,9 +152,27 @@ func correlateScheduledTasks(results []Result, el *Result) {
 				name),
 		})
 	}
-	if present+absent > 0 {
-		el.SetMeta("task_register_correlation", map[string]any{"still_present": present, "absent": absent})
+	if present+absent+unverified > 0 {
+		m := map[string]any{"still_present": present, "absent": absent}
+		if unverified > 0 {
+			m["unverified"] = unverified
+			m["note"] = "the scheduledtasks collector was cancelled before it finished, so registrations it didn't list weren't judged absent"
+		}
+		el.SetMeta("task_register_correlation", m)
 	}
+}
+
+// inventoryPartial reports whether a live collector stopped before it had
+// listed everything (its time budget ran out, or the run was interrupted), so
+// something missing from its records may simply not have been reached. Such a
+// gap must not become an "installed, then removed" finding.
+func inventoryPartial(r *Result) bool {
+	for _, e := range r.Errors {
+		if strings.HasPrefix(e, "cancelled") {
+			return true
+		}
+	}
+	return false
 }
 
 // normTaskName normalizes a task path for comparison: drop the leading "\" and

@@ -138,11 +138,30 @@ func parseDesktopFile(data []byte) desktopEntry {
 	return d
 }
 
+// parseLdPreload returns the libraries named in an /etc/ld.so.preload dump,
+// parsed the way glibc's dynamic linker reads the file: '#' starts a comment
+// that runs to the end of the line, and entries are separated by whitespace or
+// ':'. (Reading a commented-out line as libraries would raise findings for
+// words in the comment; reading "a.so:b.so" as one entry would hide b.so.)
+func parseLdPreload(data []byte) []string {
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		out = append(out, strings.FieldsFunc(line, func(r rune) bool {
+			return r == ':' || r == ' ' || r == '\t' || r == '\r' || r == '\n'
+		})...)
+	}
+	return out
+}
+
 // firstProgram returns the program a command line runs (its first real token),
 // for grading an ExecStart/cron command's path.
 func firstProgram(cmd string) string {
 	for _, f := range strings.Fields(cmd) {
-		if strings.HasPrefix(f, "-") || (strings.ContainsRune(f, '=') && !strings.ContainsRune(f, '/')) {
+		f = strings.Trim(f, `"'`) // ExecStart="/opt/x/run" and quoted crontab programs
+		if f == "" || strings.HasPrefix(f, "-") || (strings.ContainsRune(f, '=') && !strings.ContainsRune(f, '/')) {
 			continue
 		}
 		if cmdWrappers[unixBaseName(f)] {

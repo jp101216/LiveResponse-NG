@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,14 +35,22 @@ func (c *eventLogCollector) Collect(ctx context.Context) (Result, error) {
 
 func init() { Register(&eventLogCollector{}) }
 
-const (
-	// evtxReadCap skips a single log larger than this; copy it off-host and
-	// parse it offline instead of reading a gigabyte into memory on a live box.
-	evtxReadCap = 512 << 20
-	// evtxMaxPerFile bounds the most-recent kept records retained per log.
+// Retention bounds. Logs are parsed whole, newest record first (a log of any
+// size streams through in constant memory); what is bounded is how many
+// records are kept. A record that carries a finding is never displaced by one
+// that doesn't: routine always-recorded events (logons with special
+// privileges, task runs) have their own budget, so a busy server's volume of
+// them can't push a log clear or a service install out of the report, or stop
+// a later log (Defender, Sysmon) from being read. (Variables only so tests
+// can shrink them.)
+var (
+	// evtxMaxPerFile bounds the most recent finding-less records kept per log.
 	evtxMaxPerFile = 50000
-	// evtxMaxKept bounds the kept records across the whole run.
+	// evtxMaxKept bounds the finding-less records kept across the whole run.
 	evtxMaxKept = 100000
+	// evtxMaxFlagged bounds the records with findings kept across the run (a
+	// guard against a Sigma rule broad enough to match everything).
+	evtxMaxFlagged = 100000
 )
 
 // eventLogSource is one log to triage.
@@ -78,52 +87,52 @@ func ParseEventLogFiles(ctx context.Context, files []string, sigma *SigmaRuleset
 // rather than an error (a targeted channel a host simply doesn't have is
 // normal; a path the analyst named is not).
 func collectEventLogSources(ctx context.Context, res *Result, sources []eventLogSource, quietMissing bool, sigma *SigmaRuleset) {
-	logsRead, logsMissing, scanned, kept, totalWarn := 0, 0, 0, 0, 0
-	truncated := false
+	logsRead, logsMissing, scanned, totalWarn := 0, 0, 0, 0
+	keptPlain, keptFlagged, dropped := 0, 0, 0
 	ranges := map[string]*channelRange{}
 	agg := sigma.newAggregator() // nil unless a Sigma rule has an aggregation or a "near"
+	cancelled := false
 
 	for _, src := range sources {
 		if err := ctx.Err(); err != nil {
-			res.Fail("cancelled: " + err.Error())
+			cancelled = true
 			break
 		}
-		if kept >= evtxMaxKept {
-			truncated = true
-			break
-		}
-		info, err := os.Stat(src.path)
+		f, err := os.Open(src.path)
 		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
 				logsMissing++
 				if !quietMissing {
 					res.Fail(src.label + ": file not found")
 				}
-			} else {
-				res.Fail(src.label + ": " + err.Error())
+			default:
+				// A live log held open by the EventLog service can refuse a
+				// read; point the analyst at a shadow copy or image.
+				res.Fail(fmt.Sprintf("%s: %v (read it from a shadow copy or image)", src.label, err))
 			}
 			continue
 		}
-		if info.IsDir() {
+		info, err := f.Stat()
+		switch {
+		case err != nil:
+			res.Fail(src.label + ": " + err.Error())
+			f.Close()
+			continue
+		case info.IsDir():
 			res.Fail(src.label + ": is a directory, not an .evtx file")
-			continue
-		}
-		if info.Size() > evtxReadCap {
-			res.Fail(fmt.Sprintf("%s: %d bytes exceeds the %d-byte read cap; copy it off-host and parse offline",
-				src.label, info.Size(), evtxReadCap))
-			continue
-		}
-		data, err := os.ReadFile(src.path)
-		if err != nil {
-			// A live log held open by the EventLog service can refuse a read;
-			// point the analyst at a shadow-copy or image instead of failing.
-			res.Fail(fmt.Sprintf("%s: %v (read it from a shadow copy or image)", src.label, err))
+			f.Close()
 			continue
 		}
 		logsRead++
 
-		var fileKept []Record
-		warns, perr := parseEvtxStream(data, func(rec evtxRecord) bool {
+		// Newest first, so a log the time budget can't finish yields its
+		// latest records, and "keep the most recent N" is "keep the first N".
+		plainBudget := min(evtxMaxPerFile, evtxMaxKept-keptPlain)
+		var plain, flagged []Record
+		warns, stopped, perr := parseEvtxReader(f, info.Size(), true, func() bool {
+			return ctx.Err() != nil
+		}, func(rec evtxRecord) bool {
 			scanned++
 			ev := newWinEvent(rec)
 			if ev.Channel == "" {
@@ -132,18 +141,27 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 			trackChannelRange(ranges, ev) // every scanned record, for log-clear correlation
 			agg.observe(ev)               // feed Sigma aggregations and "near" rules (no-op if none)
 			fields, findings, keepIt := classifyWinEvent(ev, sigma)
-			if keepIt {
-				fields["source_log"] = src.label
-				fileKept = append(fileKept, Record{Fields: fields, Findings: findings})
-				if len(fileKept) > evtxMaxPerFile { // retain the most recent
-					fileKept = fileKept[len(fileKept)-evtxMaxPerFile:]
-				}
+			if !keepIt {
+				return true
 			}
-			return kept+len(fileKept) < evtxMaxKept
+			fields["source_log"] = src.label
+			switch {
+			case len(findings) > 0 && keptFlagged+len(flagged) < evtxMaxFlagged:
+				flagged = append(flagged, Record{Fields: fields, Findings: findings})
+			case len(findings) == 0 && len(plain) < plainBudget:
+				plain = append(plain, Record{Fields: fields})
+			default:
+				dropped++
+			}
+			return true
 		})
+		f.Close()
 		if perr != nil {
 			res.Fail(src.label + ": " + perr.Error())
 			continue
+		}
+		if stopped {
+			cancelled = true
 		}
 		totalWarn += len(warns)
 		for i, w := range warns {
@@ -153,28 +171,41 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 			}
 			res.Fail(w)
 		}
-		for _, r := range fileKept {
+		// Report the kept records oldest first, as they happened.
+		kept := append(flagged, plain...)
+		sort.SliceStable(kept, func(i, j int) bool {
+			return recordIDOf(kept[i]) < recordIDOf(kept[j])
+		})
+		for _, r := range kept {
 			res.Add(r.Fields, r.Findings...)
-			kept++
 		}
+		keptPlain += len(plain)
+		keptFlagged += len(flagged)
+		if stopped {
+			break
+		}
+	}
+	if cancelled {
+		res.Fail("cancelled: " + ctx.Err().Error() + " (each log is read newest first, so what was read is the latest activity)")
 	}
 
 	// Flush the Sigma aggregations and "near" rules: one synthetic record per
 	// group that crossed its threshold (or co-occurrence found) over the run.
 	for _, r := range agg.flush() {
-		if kept >= evtxMaxKept {
-			truncated = true
-			break
+		if keptFlagged >= evtxMaxFlagged {
+			dropped++
+			continue
 		}
 		r.Fields["source_log"] = "sigma:aggregation"
 		res.Add(r.Fields, r.Findings...)
-		kept++
+		keptFlagged++
 	}
 
 	res.SetMeta("logs_read", logsRead)
 	res.SetMeta("logs_missing", logsMissing)
 	res.SetMeta("records_scanned", scanned)
-	res.SetMeta("records_kept", kept)
+	res.SetMeta("records_kept", keptPlain+keptFlagged)
+	res.SetMeta("records_with_findings", keptFlagged)
 	if len(ranges) > 0 {
 		res.SetMeta("channel_ranges", ranges)
 	}
@@ -184,9 +215,19 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 	if totalWarn > 0 {
 		res.SetMeta("parse_warnings", totalWarn)
 	}
-	if truncated {
+	if dropped > 0 {
 		res.SetMeta("records_truncated", true)
+		res.SetMeta("records_dropped", dropped)
+		res.SetMeta("truncation_note", fmt.Sprintf("kept the most recent %d finding-less records per log (%d across the run) "+
+			"and up to %d records with findings; older finding-less records were dropped first", evtxMaxPerFile, evtxMaxKept, evtxMaxFlagged))
 	}
+}
+
+// recordIDOf is an event record's identifier, for putting kept records back in
+// log order.
+func recordIDOf(r Record) uint64 {
+	id, _ := r.Fields["record_id"].(uint64)
+	return id
 }
 
 // sigmaMetaListMax bounds the skipped/failed lists in meta.sigma; loading a
@@ -369,10 +410,35 @@ func classifyWinEvent(ev winEvent, sigma *SigmaRuleset) (fields map[string]any, 
 	if sigma != nil {
 		findings = append(findings, sigma.match(ev)...)
 	}
-	if !alwaysRecord(ev.EventID) && len(findings) == 0 {
+	if len(findings) == 0 && !recordUnflagged(ev) {
 		return nil, nil, false
 	}
 	return ev.fields(), findings, true
+}
+
+// recordUnflagged reports whether an event without a finding is still worth
+// keeping: one of the low-volume security events alwaysRecord lists — except a
+// 4672 ("special privileges assigned to new logon") for the system's own
+// service and virtual accounts, which Windows writes at every service logon and
+// which on a busy server is the bulk of the Security log.
+func recordUnflagged(ev winEvent) bool {
+	if !alwaysRecord(ev.EventID) {
+		return false
+	}
+	return ev.EventID != 4672 || !systemLogonAccount(evData(ev, "SubjectUserSid"), evData(ev, "SubjectUserName"))
+}
+
+// systemLogonAccount reports whether a logon belongs to the operating system
+// itself: LocalSystem, LocalService, NetworkService, the Window Manager
+// (DWM-n) and Font Driver Host (UMFD-n) virtual accounts, or a computer
+// account (NAME$).
+func systemLogonAccount(sid, name string) bool {
+	switch sid {
+	case "S-1-5-18", "S-1-5-19", "S-1-5-20":
+		return true
+	}
+	return strings.HasPrefix(sid, "S-1-5-90-") || strings.HasPrefix(sid, "S-1-5-96-") ||
+		strings.HasSuffix(name, "$")
 }
 
 // channelRange is the record-id and time span of every record seen in one

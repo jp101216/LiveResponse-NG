@@ -132,7 +132,7 @@ const DEFS: &[Def] = &[
         weight: 30,
         secret: None,
         // Keep in step with internal/aidetect/llm_endpoints.go.
-        pattern: r"(?i-u)(?:api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis\.com|(?:[a-z0-9-]+-)?aiplatform\.googleapis\.com|api\.cohere\.(?:ai|com)|api\.mistral\.ai|api\.groq\.com|api\.together\.xyz|api\.perplexity\.ai|openrouter\.ai|api\.deepseek\.com|api\.x\.ai|api\.fireworks\.ai|api\.replicate\.com|api-inference\.huggingface\.co|router\.huggingface\.co|models\.inference\.ai\.azure\.com|api\.ai21\.com|api\.deepinfra\.com|api\.cerebras\.ai|api\.sambanova\.ai|api\.moonshot\.(?:ai|cn)|dashscope(?:-intl)?\.aliyuncs\.com|integrate\.api\.nvidia\.com|api\.novita\.ai|api\.hyperbolic\.xyz|[a-z0-9-]+\.openai\.azure\.com|[a-z0-9-]+\.cognitiveservices\.azure\.com|[a-z0-9-]+\.services\.ai\.azure\.com|bedrock-(?:agent-)?runtime(?:-fips)?\.[a-z0-9-]+\.amazonaws\.com)",
+        pattern: r"(?i-u)(?:api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis\.com|(?:[a-z0-9-]+-)?aiplatform\.googleapis\.com|api\.cohere\.(?:ai|com)|api\.mistral\.ai|api\.groq\.com|api\.together\.xyz|api\.perplexity\.ai|openrouter\.ai|api\.deepseek\.com|api\.x\.ai|api\.fireworks\.ai|api\.replicate\.com|api-inference\.huggingface\.co|router\.huggingface\.co|models\.inference\.ai\.azure\.com|api\.ai21\.com|api\.deepinfra\.com|api\.cerebras\.ai|api\.sambanova\.ai|api\.moonshot\.(?:ai|cn)|dashscope(?:-intl)?\.aliyuncs\.com|integrate\.api\.nvidia\.com|api\.novita\.ai|api\.hyperbolic\.xyz|[a-z0-9-]+\.openai\.azure\.com|[a-z0-9-]+\.cognitiveservices\.azure\.com|[a-z0-9-]+\.services\.ai\.azure\.com|[a-z0-9-]+\.models\.ai\.azure\.com|bedrock-(?:agent-)?runtime(?:-fips)?\.[a-z0-9-]+\.amazonaws\.com)",
     },
     Def {
         rule: "secret.anthropic_key",
@@ -773,6 +773,7 @@ mod tests {
             "bedrock-runtime-fips.us-gov-west-1.amazonaws.com",
             "us-central1-aiplatform.googleapis.com",
             "x.services.ai.azure.com",
+            "mistral-large-abc.eastus2.models.ai.azure.com",
             "dashscope-intl.aliyuncs.com",
         ] {
             let r = rules(&analyze(host.as_bytes())).join(",");

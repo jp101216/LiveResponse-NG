@@ -11,18 +11,23 @@ import (
 )
 
 // Gather collects what the host readily says about itself (Linux: os-release,
-// kernel, boot time). The collectors are Windows-only; this keeps the report
-// envelope meaningful for the sidecar-backed commands on other systems.
+// kernel, boot time, time zone), for the report envelope.
 func Gather() Info {
 	var in Info
-	if f, err := os.Open("/etc/os-release"); err == nil {
+	// os-release(5): /etc/os-release, falling back to /usr/lib/os-release;
+	// values may be double- or single-quoted.
+	f, err := os.Open("/etc/os-release")
+	if err != nil {
+		f, err = os.Open("/usr/lib/os-release")
+	}
+	if err == nil {
 		sc := bufio.NewScanner(f)
 		for sc.Scan() {
 			k, v, ok := strings.Cut(sc.Text(), "=")
 			if !ok {
 				continue
 			}
-			v = strings.Trim(v, `"`)
+			v = strings.Trim(strings.TrimSpace(v), `"'`)
 			switch k {
 			case "PRETTY_NAME":
 				in.OSName = v

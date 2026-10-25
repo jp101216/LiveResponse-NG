@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -261,5 +263,34 @@ func TestGenerateCountriesMode(t *testing.T) {
 	info, ok := db.Lookup(netip.MustParseAddr("203.0.113.7"))
 	if !ok || info.Country != "DE" {
 		t.Errorf("countries mode should attribute country: got %+v ok=%v", info, ok)
+	}
+}
+
+// TestWriteFileAtomicKeepsOldFileOnFailure: a failed regeneration must leave
+// the existing dataset in place, not truncated.
+func TestWriteFileAtomicKeepsOldFileOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "endpoints.tsv")
+	if err := os.WriteFile(out, []byte("old dataset\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := writeFileAtomic(out, func(w io.Writer) error {
+		_, _ = io.WriteString(w, "half a new data")
+		return errors.New("ip2asn: unexpected EOF")
+	})
+	if err == nil {
+		t.Fatal("the write error was swallowed")
+	}
+	if b, _ := os.ReadFile(out); string(b) != "old dataset\n" {
+		t.Fatalf("existing dataset was clobbered: %q", b)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Fatalf("temporary file left behind: %v", ents)
+	}
+	if err := writeFileAtomic(out, func(w io.Writer) error { _, err := io.WriteString(w, "new\n"); return err }); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(out); string(b) != "new\n" {
+		t.Fatalf("successful write not in place: %q", b)
 	}
 }

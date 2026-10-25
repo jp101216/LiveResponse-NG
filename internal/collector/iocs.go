@@ -57,6 +57,7 @@ var (
 	reHex64          = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 	reHex40          = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 	reFilePathPrefix = regexp.MustCompile(`^(?:[A-Za-z]:\\|\\\\[^\\?.])`) // drive path or UNC share
+	rePosixPath      = regexp.MustCompile(`^/[^/\x00]+(?:/[^/\x00]+)+$`)  // absolute, at least two components
 	reDomainName     = regexp.MustCompile(`^(?i)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}\.?$`)
 )
 
@@ -67,6 +68,7 @@ var (
 var iocPathFields = map[string]bool{
 	"image_path": true, "image_path_raw": true, "image": true,
 	"path": true, "program": true, "server": true, "dll": true,
+	"library": true, "suspicious_modules": true, "deleted_modules": true,
 }
 
 // iocLocalAddrFields hold the host's own endpoint of a socket, not a remote
@@ -117,6 +119,9 @@ func ExtractIOCs(results []Result) Result {
 				continue // detection-linked only
 			}
 			rules, sev, rank := recordRulesAndSeverity(rec)
+			if rank < sevRank(SevNotable) {
+				continue // info-level annotations don't make an artifact an indicator
+			}
 			emit := func(typ, norm, display, field string) {
 				key := typ + "\x00" + norm
 				a := aggs[key]
@@ -249,9 +254,21 @@ func classifyIOC(collectorName, field, s string, emit func(typ, norm, display, f
 	}
 
 	// On-disk path: a dropper or payload location, from a path-bearing field.
-	if iocPathFields[field] && reFilePathPrefix.MatchString(v) {
-		emit(iocFilePath, strings.ToLower(v), v, field)
+	// Windows paths are case-insensitive, so they dedupe case-folded; POSIX
+	// paths are case-sensitive and dedupe as written. A Linux path the kernel
+	// marked " (deleted)" is the location the payload ran from, so the marker
+	// is dropped; a memfd is no location at all.
+	if !iocPathFields[field] {
 		return
+	}
+	switch {
+	case reFilePathPrefix.MatchString(v):
+		emit(iocFilePath, strings.ToLower(v), v, field)
+	case strings.HasPrefix(v, "/"):
+		p := strings.TrimSuffix(v, deletedSuffix)
+		if !isMemfdPath(p) && rePosixPath.MatchString(p) {
+			emit(iocFilePath, p, p, field)
+		}
 	}
 }
 

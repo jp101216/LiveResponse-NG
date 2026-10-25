@@ -223,13 +223,25 @@ func (d *Detector) Inspect(c Conn) *Callout {
 		}
 	}
 
+	// Judge by the image file's name when it is known. On Windows that is the
+	// process name anyway; on Linux the process name (comm) is the script's
+	// name for a script run through its #! line, and any process can rename
+	// itself, so the executable is the trustworthy identity.
 	name := normalizeName(c.Process)
+	img := normalizeName(c.ImagePath)
+	who := name
+	if img != "" {
+		who = img
+	}
 	label := c.Process
-	if label == "" {
+	switch {
+	case label == "":
 		label = fmt.Sprintf("pid %d (exited before its name was read)", c.PID)
+	case img != "" && img != name:
+		label = c.Process + " [" + img + "]"
 	}
 
-	if d.allow[name] {
+	if d.allow[who] {
 		if !c.UnusualPath {
 			return nil // allowlisted caller from a normal location: expected
 		}
@@ -248,7 +260,7 @@ func (d *Detector) Inspect(c Conn) *Callout {
 	// script host or a binary abused to run code is a far stronger signal than
 	// an unknown-but-plausible application.
 	sev, conf := SevSuspect, 60
-	if isScriptHostOrLOLBin(name) {
+	if isScriptHostOrLOLBin(name) || isScriptHostOrLOLBin(img) {
 		sev, conf = SevCritical, 85
 	}
 	where := ""
@@ -306,9 +318,11 @@ var nonPublicPrefixes = []netip.Prefix{
 func publicAddr(ip netip.Addr) bool { return PublicAddr(ip) }
 
 // normalizeName lowercases a process name and strips any directory part, so
-// "-allow C:\Tools\MyApp.exe" and "-allow myapp.exe" mean the same thing.
+// "-allow C:\Tools\MyApp.exe" and "-allow myapp.exe" mean the same thing. The
+// " (deleted)" Linux appends to the exe link of a deleted binary is dropped.
 func normalizeName(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.TrimSuffix(s, " (deleted)")
 	if i := strings.LastIndexAny(s, `\/`); i >= 0 {
 		s = s[i+1:]
 	}
@@ -316,7 +330,9 @@ func normalizeName(s string) string {
 }
 
 // scriptHostsAndLOLBins are interpreters and signed binaries attackers abuse to
-// run code. A callout to an LLM endpoint from one of these is high-signal.
+// run code — the Windows image names, and their Linux counterparts (shells,
+// script interpreters, downloaders, netcat). A callout to an LLM endpoint from
+// one of these is high-signal.
 var scriptHostsAndLOLBins = map[string]bool{
 	"powershell.exe": true,
 	"pwsh.exe":       true,
@@ -332,6 +348,27 @@ var scriptHostsAndLOLBins = map[string]bool{
 	"python.exe":     true,
 	"pythonw.exe":    true,
 	"node.exe":       true,
+	// Linux
+	"sh": true, "bash": true, "dash": true, "zsh": true, "ksh": true, "ash": true,
+	"busybox": true, "pwsh": true, "python": true, "perl": true, "ruby": true,
+	"php": true, "node": true, "nodejs": true, "lua": true, "curl": true,
+	"wget": true, "nc": true, "ncat": true, "netcat": true, "socat": true,
 }
 
-func isScriptHostOrLOLBin(name string) bool { return scriptHostsAndLOLBins[name] }
+// interpreterBases are script interpreters whose binaries carry a version in
+// their name (python3.12, perl5.36.0, php8.2, lua5.4, pypy3).
+var interpreterBases = map[string]bool{
+	"python": true, "pythonw": true, "pypy": true, "perl": true, "ruby": true,
+	"php": true, "lua": true, "node": true,
+}
+
+func isScriptHostOrLOLBin(name string) bool {
+	if name == "" {
+		return false
+	}
+	if scriptHostsAndLOLBins[name] {
+		return true
+	}
+	base := strings.TrimRight(strings.TrimSuffix(name, ".exe"), "0123456789.")
+	return base != "" && interpreterBases[base]
+}

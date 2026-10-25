@@ -183,3 +183,44 @@ func TestCorrelateLogClearRange(t *testing.T) {
 		t.Errorf("clear finding detail not enriched with the surviving range: %q", f.Detail)
 	}
 }
+
+// TestCorrelatePartialInventoryIsNotAbsence: a services walk that ran out of
+// time lists only some services; one it never reached must not be reported as
+// "installed, then removed".
+func TestCorrelatePartialInventoryIsNotAbsence(t *testing.T) {
+	el := Result{Collector: "eventlog", Records: []Record{
+		svcInstallRecord("Updater", `C:\Users\Public\x.exe`),
+		svcInstallRecord("Spooler", `C:\Windows\System32\spoolsv.exe`),
+	}}
+	svc := Result{Collector: "services",
+		Records: []Record{{Fields: map[string]any{"name": "Spooler"}}},
+		Errors:  []string{"cancelled: context deadline exceeded"},
+	}
+	tasks := Result{Collector: "scheduledtasks",
+		Records: []Record{{Fields: map[string]any{"task_path": `\Other`}}},
+		Errors:  []string{"cancelled: context deadline exceeded"},
+	}
+	el.Records = append(el.Records, Record{Fields: map[string]any{
+		"event_id": 4698, "channel": "Security", "event_data": map[string]string{"TaskName": `\Updater`},
+	}})
+	results := []Result{el, svc, tasks}
+	Correlate(results)
+
+	for _, rec := range results[0].Records {
+		for _, f := range rec.Findings {
+			if strings.HasPrefix(f.Rule, "correlate.") {
+				t.Errorf("a partial inventory produced %s: %s", f.Rule, f.Detail)
+			}
+		}
+	}
+	if results[0].Records[1].Fields["service_still_present"] != true {
+		t.Error("a service the partial walk did list is still annotated present")
+	}
+	m, _ := results[0].Meta["service_install_correlation"].(map[string]any)
+	if m["unverified"] != 1 || m["absent"] != 0 {
+		t.Errorf("service correlation meta = %v, want 1 unverified, 0 absent", m)
+	}
+	if tm, _ := results[0].Meta["task_register_correlation"].(map[string]any); tm["unverified"] != 1 {
+		t.Errorf("task correlation meta = %v, want 1 unverified", tm)
+	}
+}

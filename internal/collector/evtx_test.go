@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"bytes"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -455,3 +456,6 @@ func TestParseRealEvtxIfPresent(t *testing.T) {
 		t.Logf("%s: %d records, %d warnings, %d with EventID", path, len(recs), len(warns), withEventID)
 	}
 }
+
+// bytesReaderAt adapts an in-memory image for parseEvtxReader.
+func bytesReaderAt(b []byte) *bytes.Reader { return bytes.NewReader(b) }

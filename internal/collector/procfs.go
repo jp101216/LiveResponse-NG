@@ -50,22 +50,54 @@ func parseProcStatus(data []byte) procStatus {
 	return s
 }
 
-// parseStarttimeTicks returns field 22 (starttime, in clock ticks since boot)
-// from /proc/<pid>/stat. The comm field (field 2) is wrapped in parentheses and
-// may itself contain spaces or ')', so parsing starts after the last ')'.
-func parseStarttimeTicks(stat []byte) (uint64, bool) {
+// pfKthread is the PF_KTHREAD bit in /proc/<pid>/stat's flags field: set for
+// kernel threads and nothing else.
+const pfKthread = 0x00200000
+
+// procStat is the subset of /proc/<pid>/stat the collectors use.
+type procStat struct {
+	State      string // single-letter state, as in /proc/<pid>/status
+	Flags      uint64 // the kernel's per-task PF_* flags (field 9)
+	StartTicks uint64 // start time in clock ticks since boot (field 22)
+}
+
+// kernelThread reports whether the task is a kernel thread. This is the
+// kernel's own flag, so unlike "no /proc/<pid>/exe target" it doesn't mistake a
+// zombie (which has lost its exe link) for a kernel thread, and it can be read
+// for every process without root.
+func (s procStat) kernelThread() bool { return s.Flags&pfKthread != 0 }
+
+// parseProcStat reads state, flags and starttime from /proc/<pid>/stat. The
+// comm field (field 2) is wrapped in parentheses and may itself contain spaces
+// or ')', so parsing starts after the last ')'.
+func parseProcStat(stat []byte) (procStat, bool) {
 	s := string(stat)
 	i := strings.LastIndexByte(s, ')')
 	if i < 0 || i+1 >= len(s) {
-		return 0, false
+		return procStat{}, false
 	}
 	fields := strings.Fields(s[i+1:])
-	// After ')': [0]=state [1]=ppid ... [19]=starttime (overall field 22).
+	// After ')': [0]=state [1]=ppid ... [6]=flags (field 9) ... [19]=starttime
+	// (field 22).
 	if len(fields) < 20 {
-		return 0, false
+		return procStat{}, false
 	}
-	v, err := strconv.ParseUint(fields[19], 10, 64)
-	return v, err == nil
+	flags, err := strconv.ParseUint(fields[6], 10, 64)
+	if err != nil {
+		return procStat{}, false
+	}
+	start, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return procStat{}, false
+	}
+	return procStat{State: fields[0], Flags: flags, StartTicks: start}, true
+}
+
+// parseStarttimeTicks returns field 22 (starttime, in clock ticks since boot)
+// from /proc/<pid>/stat.
+func parseStarttimeTicks(stat []byte) (uint64, bool) {
+	st, ok := parseProcStat(stat)
+	return st.StartTicks, ok
 }
 
 // parseBtime returns the boot time (seconds since the epoch) from /proc/stat.

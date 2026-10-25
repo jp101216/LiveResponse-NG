@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -82,5 +83,32 @@ func TestFileHasherCancelledIsRetried(t *testing.T) {
 	}
 	if r := h.Hash(context.Background(), p); r.SHA256 == "" {
 		t.Fatalf("cancelled result was cached: %+v", r)
+	}
+}
+
+// TestFileHasherCaseSensitivity: on a case-sensitive file system /tmp/A and
+// /tmp/a are two files and must not share a cache entry.
+func TestFileHasherCaseSensitivity(t *testing.T) {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		t.Skip("case-insensitive file system by default")
+	}
+	dir := t.TempDir()
+	upper, lower := filepath.Join(dir, "Tool"), filepath.Join(dir, "tool")
+	if err := os.WriteFile(upper, []byte("benign"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lower, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := NewFileHasher()
+	a, b := h.Hash(context.Background(), upper), h.Hash(context.Background(), lower)
+	if a.SHA256 == "" || a.SHA256 == b.SHA256 {
+		t.Fatalf("two different files got one hash: %+v %+v", a, b)
+	}
+	// HashAs caches by identity: two names for one file are read once.
+	c := h.HashAs(context.Background(), "same-file", upper)
+	d := h.HashAs(context.Background(), "same-file", lower) // served from the cache
+	if c.SHA256 != a.SHA256 || d.SHA256 != c.SHA256 {
+		t.Fatalf("HashAs did not cache by key: %+v %+v", c, d)
 	}
 }

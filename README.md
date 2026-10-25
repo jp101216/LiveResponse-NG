@@ -11,9 +11,9 @@ persistence) behind the same interface.
 > **Status:** v0.10. On **Linux**, a default run covers processes, network
 > (TCP + UDP, with per-socket process attribution via `/proc`), loaded modules,
 > local accounts, and persistence (cron, systemd, ld.so.preload, rc.local, XDG
-> autostart) — judged by Linux-specific path and command-line heuristics, with AI
-> module A (LLM-callout detection) running too; see
-> [Platform support](#platform-support).
+> autostart) — judged by about 30 Linux-specific path, process, network and
+> command-line detections, with AI module A (LLM-callout detection) running too;
+> see [Platform support](#platform-support).
 >
 > On **Windows**, a default run covers processes (with a process-tree,
 > command-line analysis and offline Authenticode verification that names the
@@ -115,8 +115,9 @@ with just the Go toolchain.
 Every collector runs in its own goroutine under its own timeout. A collector
 that panics becomes an error result. A collector that hangs (stuck in a system
 call, say) is abandoned after its timeout plus a short grace period. Either way
-the run finishes and the report gets written; Ctrl+C writes whatever was
-collected so far, and collectors that hadn't started are listed as not run.
+the run finishes and the report gets written; Ctrl+C (or SIGTERM) writes
+whatever was collected so far, and collectors that hadn't started are listed as
+not run.
 
 ---
 
@@ -235,12 +236,18 @@ processes, services and task actions, so an encoded-PowerShell or
 download-cradle payload is caught whether it is running now or only logged. Each
 record carries the normalised `System` fields (provider, event id, level, the
 `TimeCreated` timestamp, computer, the actor SID, process/thread id) and the
-`EventData`/`UserData` values. A log held open by the event-log service, or one
-larger than the read cap, is reported and skipped — read it from a shadow copy
-or image then. The same parser also runs **offline** on a supplied `.evtx` (or a
-directory of them) with `-evtx`, on any OS, applying the identical
-classification — for an exported log, a Volume Shadow Copy, or a file pulled
-from a disk image.
+`EventData`/`UserData` values. Each log streams through 64 KiB at a time, so a
+log of any size is read in constant memory, newest record first: if the time
+budget runs out part-way through a huge log, what was read is the latest
+activity, and the result says it was cut short. A record that carries a finding
+is never displaced by a routine one (the always-kept events have their own
+budget, and the system's own 4672 service logons are skipped as volume), so a
+log clear or a service install can't be pushed out of the report by a busy
+server's noise. A log the event-log service won't let lrng open is reported and
+skipped — read it from a shadow copy or image then. The same parser also runs
+**offline** on a supplied `.evtx` (or a directory of them) with `-evtx`, on any
+OS, applying the identical classification — for an exported log, a Volume Shadow
+Copy, or a file pulled from a disk image.
 
 **`memory`** *(opt-in)* — YARA rules, the module-B prompt scan and memory
 structure heuristics over the live memory of every process (or the ones you
@@ -278,7 +285,10 @@ against both malicious and ordinary examples.
 | **Logon sessions** (event log) | `logon.remote_interactive` (4624 type 10 / RDP — suspect from a public source address, T1021.001), `logon.network_external` (4624 type 3 from an external address, T1021), `logon.failed_external` (4625 from an external address, T1110) |
 | **Correlation** (event log × live state) | `correlate.service_installed_absent` (a 7045 service install with no matching live service — installed then removed, T1070.009), `correlate.task_registered_absent` (a 4698/106 task registration with no matching live task — deleted or hidden, T1070.009); and the `defense.clear_event_logs` finding is annotated with the surviving record-id/time range left by the clear |
 | **Sigma** (`-sigma`) | `sigma.<rule>` for each matching Sigma rule, carrying the rule's level (→ severity) and first `attack.t*` tag (→ technique) — the analyst's own detections, run beside the built-in ones |
-| **Memory** (opt-in) | `yara:<rule>`, `memory.pe_in_private` (reflective/manual-mapped PE), `memory.elf_in_anonymous`, `memory.memfd_exec`, `memory.deleted_file_exec`, and module B's `prompt.*`, `api.*`, `model.*` and `secret.*` (below) |
+| **Linux processes & modules** | `process.unusual_exec_path` (`/tmp`, `/dev/shm`, a hidden home dir), `process.deleted_binary` (self-deleting, T1070.004), `process.memfd_exec` (fileless, T1620), `process.kthread_masquerade` (a userland task named like `kworker/…`, T1036.004), `process.binary_replaced` (*notable*: the executable was replaced on disk — usually an upgrade pending a restart, T1554); `modules.unusual_path` (T1574.006), `modules.deleted_file`, `modules.memfd_exec`, `modules.replaced_on_disk` (*info*: upgraded system libraries) |
+| **Linux network** | `network.shell_listener` (a shell or netcat listening: bind shell), `network.shell_outbound` (a shell or netcat talking to a public address: reverse shell), `network.interpreter_listener` / `network.interpreter_outbound` (*notable*: an interpreter as a server or client), `network.unusual_path_outbound` — judged by the process name *and* its executable's name, so a reverse shell run as `./update.sh` is still a shell, and a client connected to a local server isn't counted as outbound |
+| **Linux command lines, persistence & accounts** | `exec.download_pipe_shell` (`curl … \| sh`), `exec.reverse_shell` (`/dev/tcp`, `nc -e`, socat `EXEC`, interpreter one-liners), `exec.base64_decode`, `exec.chmod_suspicious`, `persistence.ssh_authorized_keys`, `persistence.cron_install`, `persistence.shell_profile`, `persistence.boot_or_preload`; `persistence.ld_preload`, `persistence.unusual_path` (cron, systemd units and drop-ins, rc.local, XDG autostart); `accounts.uid0_nonroot`, `accounts.empty_password`, `accounts.system_account_login_shell`, `accounts.duplicate_uid`, `accounts.root_equiv_group` |
+| **Memory** (opt-in) | `yara:<rule>`, `memory.pe_in_private` (reflective/manual-mapped PE), `memory.elf_in_anonymous`, `memory.memfd_exec`, `memory.deleted_file_exec`, `memory.replaced_file_exec` (*info*: a system library replaced by an upgrade), and module B's `prompt.*`, `api.*`, `model.*` and `secret.*` (below) |
 | **Endpoint intelligence** (`-intel`) | `intel.tor_endpoint` (a remote address that is Tor infrastructure, T1090.003), `intel.anonymizer_endpoint` (a known anonymising VPN/proxy, T1090.002) — from the offline ASN/country/category attribution of the run's public remote addresses |
 
 **False-positive discipline.** Path heuristics grade locations: temporary,
@@ -532,9 +542,11 @@ out of the run, deduplicated and ranked, so what an analyst does *after* triage
 search these domains in the DNS logs — is a copy-and-go list rather than a
 scrape through nested records.
 
-Scope is deliberately tight: only records that **carry a finding** contribute,
-so the result is the set of indicators tied to something the tool actually
-flagged, not a full host inventory. Each indicator is deduplicated across every
+Scope is deliberately tight: only records that **carry a finding** (at
+*notable* or above — an *info* annotation such as an upgraded library doesn't
+make an artifact an indicator) contribute, so the result is the set of
+indicators tied to something the tool actually flagged, not a full host
+inventory. Each indicator is deduplicated across every
 record it appeared in — including across collectors, so the address a
 connection beaconed to and the same address sitting in the DNS cache become one
 entry — and ranked by the highest severity of the detections that referenced
@@ -545,7 +557,7 @@ it, so the ones worth acting on first sort to the top.
 | `ipv4` / `ipv6` | any address field (a connection's `remote_addr`, a resolved `addresses`, a logon's `IpAddress`) | the address is **public** (same `aidetect.PublicAddr` test the rest of the tool uses) and not the socket's own local side — a host never lists itself or RFC1918 space |
 | `domain` | fields that hold a hostname (the DNS cache's `name`, a connection's correlated `remote_hosts`) | it has the shape of a DNS name — so a process merely *named* like a domain isn't swept up |
 | `sha256` / `sha1` | any field (`image_sha256`, AmCache `sha1`, …) | the value is bare hex of the exact length |
-| `filepath` | path-bearing fields (`image_path`, `program`, COM `server`, …) | the value has a drive-letter or UNC shape — so a registry key or a task path is never mistaken for a file |
+| `filepath` | path-bearing fields (`image_path`, `program`, COM `server`, `library`, `suspicious_modules`, …) | the value has a drive-letter or UNC shape, or is an absolute POSIX path — so a registry key or a task path is never mistaken for a file. Windows paths dedupe case-insensitively, POSIX paths as written; a Linux path's ` (deleted)` marker is dropped (it's where the payload ran from) and a memfd, which is no location, is skipped |
 
 Each record carries the indicator's `type` and `value`, the `max_severity` and
 the distinct `rules` of the detections that referenced it, a `source_count`, and
@@ -618,7 +630,11 @@ contact with Tor infrastructure raises `intel.tor_endpoint` (T1090.003,
 *suspect*) and a contact with a known anonymising VPN/proxy raises
 `intel.anonymizer_endpoint` (T1090.002, *notable*) — both classic anonymised-C2
 and exfiltration channels. `cloud` / `cdn` / `hosting` / `dns` are context on the
-record only; flagging them would drown the report.
+record only; flagging them would drown the report. The bundled dataset carries
+Tor but **no anonymizer entries** (commercial VPN egress mostly sits in ordinary
+hosting ASNs, so it can't be tagged by ASN without flagging the hosting
+provider); to use the category, map the ASNs you trust with `intelgen -cats`, or
+supply your own dataset with `-intel-db`.
 
 **It enriches the IOC set.** With `-iocs` as well, each IP indicator in the
 `iocs` result gains `intel_asn` / `intel_org` / `intel_country` /
@@ -643,7 +659,7 @@ visible as such.
     "address": "128.31.0.39", "version": "ipv4", "attributed": true,
     "prefix": "128.31.0.39/32", "asn": 3, "country": "US",
     "org": "Tor directory authority (moria1)", "categories": ["tor"],
-    "co_max_severity": "suspect", "co_rules": ["net.beacon_regular"],
+    "co_max_severity": "suspect", "co_rules": ["network.lolbin_outbound"],
     "source_count": 1,
     "sources": [ { "collector": "network", "record": 0, "field": "remote_addr" } ] },
   "findings": [ { "rule": "intel.tor_endpoint", "severity": "suspect",
@@ -736,14 +752,22 @@ set that compiles and runs is exactly the set `-list` shows on that host.
 | `autoruns` (persistence) | ✅ | ✅ | ld.so.preload, cron, systemd, rc.local, XDG autostart, shell profiles |
 | AI module A (LLM callouts) | ✅ | ✅ | runs on the Linux `network` collector (OS-agnostic) |
 | `memory` (opt-in) | ✅ | ✅ | the Rust sidecar reads `/proc/<pid>/{maps,mem}` |
-| `eventlog`, `sigma`, `-timeline`, `-iocs`, `-intel` | ✅ | ✅ | portable (Sigma and the event log are fed Windows `.evtx`, live or via `-evtx`) |
+| `eventlog`, `sigma`, `-timeline`, `-iocs`, `-intel` | ✅ | ✅ | portable — on Linux the event log is Windows `.evtx` triaged offline with `-evtx` (there is no live Windows log to read) |
 | `amcache`, `authenticode`, `comhijack`, `prefetch`, `shimcache`, `wmi`, `dnscache`, `services`, `scheduledtasks` | ✅ | — | Windows-specific concepts; on Linux, service and scheduled-task persistence is covered by `autoruns` (systemd and cron) |
 
 On Linux the heuristics are Linux-shaped: path risk grades `/tmp`, `/dev/shm`,
 `memfd`, deleted images and home hidden dirs, and the command-line analytics
 catch reverse shells (`/dev/tcp`, netcat `-e`, socat EXEC, interpreter
 one-liners), fetch-and-run (`curl … | sh`), base64-pipe-to-shell and persistence
-writes. `lrng` targets Windows and Linux; on any other OS the collectors are
+writes. A process is judged by its executable as well as its name (`comm`),
+which on Linux is the script's name for a `#!` script and can be set to
+anything, and module A's allowlist knows the Linux executables of the browsers
+and editors it allows. Executables are hashed through `/proc/<pid>/exe`, so a
+deleted or memfd payload still gets a hash, and a container's process is hashed
+from its own filesystem. A binary or library that was replaced on disk by a
+package upgrade (the running copy shows as deleted, a new file sits at its
+path) is told apart from a self-deleting payload and reported at low severity —
+a patched-but-not-rebooted server doesn't light up. `lrng` targets Windows and Linux; on any other OS the collectors are
 stubbed out (so the tree still builds) and simply don't appear in `-list`.
 
 - **Older hosts.** Go 1.21+ and Rust 1.78+ binaries don't run on Windows
@@ -772,8 +796,9 @@ leaves behind, so you can account for it in your notes:
   the report says so), or select `dnscache`, which snapshots the cache before
   any lookup (`meta.taken_before_module_a_lookups`).
 - **File reads.** Hashing opens the binaries the report names (process
-  images, third-party and flagged service/autostart binaries) — each file at
-  most once, up to 128 MiB. Use `-no-hash` to skip it.
+  images, third-party and flagged service/autostart binaries; on Linux, process
+  images through `/proc/<pid>/exe` and flagged persistence programs) — each file
+  at most once, up to 128 MiB. Use `-no-hash` to skip it.
 - **Signature checks.** Verifying a process image opens it (to hash it for a
   catalog lookup) and queries the system catalog database. Verification is
   offline — no revocation traffic, so no network footprint — and each distinct
@@ -941,6 +966,9 @@ lrng -evtx Security.evtx -fail-on critical       # offline triage of one exporte
 plus `memory` when `-yara` or `-mem-pids` is given. The sidecar commands
 (`-ping-sidecar`, `-prompt-scan`) work on any OS; `-mem-scan` works on Windows
 and Linux. Exit status: `0` success, `1` error, `2` bad usage, `3` `-fail-on` threshold met.
+Ctrl+C — or SIGTERM, which `timeout`, systemd and `kill` send — stops collection
+and still writes the report (marked `run.interrupted`); a second one aborts at
+once with status `130`.
 
 ---
 

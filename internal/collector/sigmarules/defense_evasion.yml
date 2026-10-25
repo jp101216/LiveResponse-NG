@@ -1,0 +1,92 @@
+# lrng starter pack — defense evasion.
+title: Event Log Cleared Via Wevtutil
+id: lrng-def-0020
+status: stable
+description: wevtutil used to clear an event log from the command line.
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        CommandLine|contains: 'wevtutil'
+    verbs:
+        CommandLine|contains:
+            - ' cl '
+            - ' clear-log'
+    condition: selection and verbs
+tags:
+    - attack.defense_evasion
+    - attack.t1070.001
+level: high
+---
+title: Shadow Copy Deletion
+id: lrng-def-0021
+status: stable
+description: Volume Shadow Copies deleted from the command line (a ransomware precursor).
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        CommandLine|contains|all:
+            - 'vssadmin'
+            - 'delete'
+            - 'shadows'
+    condition: selection
+tags:
+    - attack.impact
+    - attack.t1490
+level: high
+---
+title: Microsoft Defender Disabled Via PowerShell
+id: lrng-def-0022
+status: stable
+description: Set-MpPreference used to turn off a Defender protection.
+logsource:
+    service: powershell
+detection:
+    selection:
+        ScriptBlockText|contains: 'Set-MpPreference'
+    flags:
+        ScriptBlockText|contains:
+            - 'DisableRealtimeMonitoring'
+            - 'DisableBehaviorMonitoring'
+            - 'DisableScriptScanning'
+            - 'DisableIOAVProtection'
+    condition: selection and flags
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+level: high
+---
+title: Event Log Cleared Near A Service Install
+id: lrng-def-0023
+status: experimental
+description: A Security/System event-log clear within minutes of a service install — the install-then-wipe sequence of hands-on-keyboard anti-forensics. Temporal correlation; both halves are low-volume, so a co-occurrence is notable.
+detection:
+    install:
+        EventID: 7045
+    cleared:
+        - EventID: 1102
+        - EventID: 104
+    timeframe: 5m
+    condition: install | near cleared
+tags:
+    - attack.defense_evasion
+    - attack.t1070.001
+level: high
+---
+title: Microsoft Defender Real-Time Protection Change
+id: lrng-def-0024
+status: stable
+description: Microsoft Defender logged a real-time-protection availability change (event 5001) — raised when real-time protection is turned off, a common precursor to dropping further tooling. Covers the Defender Operational channel, which the built-in rules otherwise don't flag.
+logsource:
+    service: windefend
+detection:
+    selection:
+        EventID: 5001
+    condition: selection
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+level: high

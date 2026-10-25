@@ -1,0 +1,25 @@
+# Repo-root Cargo config. It lives here, not in sidecar-rs/, because Cargo finds
+# config by walking up from the *current directory*, not from --manifest-path,
+# so `make sidecar` (run from the repo root) would never see sidecar-rs/.cargo/.
+
+# Link the C runtime statically into the Windows sidecar so it runs on hosts that
+# don't have the VC++ redistributable installed (common on servers you're triaging).
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# Cross-compiling the Windows sidecars from a non-Windows host with mingw-w64.
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+
+[target.i686-pc-windows-gnu]
+linker = "i686-w64-mingw32-gcc"
+
+# The Linux release sidecars are fully static musl binaries (crt-static is the
+# musl default; stated here so the intent is explicit), so one binary runs on any
+# distro. They build through cargo-zigbuild, which supplies zig as the C compiler
+# and linker — see the sidecar-linux targets in the Makefile.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]

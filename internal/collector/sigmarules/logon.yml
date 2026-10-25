@@ -1,0 +1,26 @@
+# lrng starter pack — remote logons (Security 4624). Uses the |cidr modifier to
+# separate internal from internet-facing source addresses.
+title: External RDP Logon
+id: lrng-logon-0050
+status: stable
+description: An interactive RDP logon (type 10) from a source address outside the RFC1918 / loopback / link-local ranges — remote desktop reached from the internet.
+logsource:
+    service: security
+detection:
+    selection:
+        EventID: 4624
+        LogonType: 10
+    internal:
+        IpAddress|cidr:
+            - '10.0.0.0/8'
+            - '172.16.0.0/12'
+            - '192.168.0.0/16'
+            - '127.0.0.0/8'
+            - '::1/128'
+            - 'fc00::/7'
+            - 'fe80::/10'
+    condition: selection and not internal
+tags:
+    - attack.lateral_movement
+    - attack.t1021.001
+level: medium

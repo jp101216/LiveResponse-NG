@@ -1,0 +1,62 @@
+# lrng starter pack — service persistence / lateral tooling (System 7045).
+title: PsExec Service Installation
+id: lrng-svc-0010
+status: stable
+description: A service installed by PsExec or a clone (PSEXESVC), a common remote-exec footprint.
+logsource:
+    service: system
+detection:
+    selection:
+        EventID: 7045
+    names:
+        - ServiceName|contains: 'psexec'
+        - ServiceName|contains: 'paexec'
+        - ImagePath|contains: '\psexesvc'
+    condition: selection and names
+tags:
+    - attack.lateral_movement
+    - attack.t1021.002
+    - attack.t1569.002
+level: high
+---
+title: Service Binary In Suspicious Path
+id: lrng-svc-0011
+status: stable
+description: A service whose image runs from a temporary, public or user-writable path.
+logsource:
+    service: system
+detection:
+    selection:
+        EventID: 7045
+    paths:
+        ImagePath|contains:
+            - '\temp\'
+            - '\users\public\'
+            - '\appdata\local\temp\'
+            - '\downloads\'
+            - '\$recycle.bin\'
+    condition: selection and paths
+tags:
+    - attack.persistence
+    - attack.t1543.003
+level: high
+---
+title: Smbexec-style Service Command
+id: lrng-svc-0012
+status: stable
+description: A service ImagePath that runs a cmd one-liner writing to a named pipe (Impacket smbexec).
+logsource:
+    service: system
+detection:
+    selection:
+        EventID: 7045
+        ImagePath|contains|all:
+            - 'cmd'
+            - '/c'
+            - 'echo'
+            - '\pipe\'
+    condition: selection
+tags:
+    - attack.lateral_movement
+    - attack.t1021.002
+level: high

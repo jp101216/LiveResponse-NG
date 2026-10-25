@@ -1,0 +1,51 @@
+[package]
+name = "lrng-sidecar"
+version = "0.10.5"
+edition = "2021"
+rust-version = "1.93" # yara-x 1.21
+description = "Live Response NG sidecar: memory-safe hostile-input scanning (prompt artifacts, YARA over process memory)."
+license = "MIT"
+
+[[bin]]
+name = "lrng-sidecar"
+path = "src/main.rs"
+
+[features]
+default = ["yara"]
+# YARA-X (pure-Rust YARA) for scan_memory rules. Without it, scan_memory
+# still runs the module-B prompt scan but rejects rules_path.
+yara = ["dep:yara-x"]
+# 32-bit x86 has no Cranelift JIT backend; use wasmtime's portable Pulley
+# interpreter there instead (slower rule evaluation, same results).
+yara-pulley = ["yara", "yara-x/pulley"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+yara-x = { version = "1.21", optional = true }
+
+# Windows memory access. Also pulled in under the lrng_typecheck_windows cfg so
+# the Windows code can be type-checked from Linux (see Makefile: check-windows-rs).
+[target.'cfg(any(windows, lrng_typecheck_windows))'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Memory",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_ProcessStatus",
+    "Win32_Storage_FileSystem",
+] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(lrng_typecheck_windows)'] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1      # smaller, faster binary; build time is not a concern
+strip = true
+overflow-checks = true # hostile input: an offset overflow panics (and is
+                       # caught) instead of silently wrapping to a wrong answer
+panic = "unwind"       # keep unwinding: main.rs catches a panic on a malformed
+                       # sample and returns an error line; "abort" would defeat that

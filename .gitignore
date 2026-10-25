@@ -1,0 +1,28 @@
+# Go build output
+/lrng
+/lrng.exe
+/lrng-x86.exe
+/intelgen
+/intelgen.exe
+*.test
+
+# Rust build output
+/sidecar-rs/target/
+
+# Reports / scratch
+*.report.json
+/tmp/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Release output
+/dist/
+*.sha256
+/lrng-sidecar
+/lrng-sidecar.exe
+
+# Windows test binaries
+*.test.exe

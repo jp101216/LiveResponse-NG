@@ -1,0 +1,121 @@
+# lrng starter pack — execution. Mapped to the channels lrng collects
+# (process_creation = Security 4688 or Sysmon 1). Uses only the Sigma subset
+# lrng's engine supports.
+title: Encoded PowerShell Command Line
+id: lrng-exec-0001
+status: stable
+description: PowerShell launched with an encoded command, a common obfuscated launcher.
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    image:
+        - NewProcessName|endswith: '\powershell.exe'
+        - NewProcessName|endswith: '\pwsh.exe'
+        - Image|endswith: '\powershell.exe'
+        - Image|endswith: '\pwsh.exe'
+    encoded:
+        CommandLine|contains:
+            - ' -enc'
+            - ' -ec '
+            - ' -encodedcommand'
+    condition: image and encoded
+tags:
+    - attack.execution
+    - attack.t1059.001
+level: high
+---
+title: Certutil Download Or Decode
+id: lrng-exec-0002
+status: stable
+description: certutil.exe used to fetch a remote file or decode an encoded payload (LOLBin).
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        CommandLine|contains: 'certutil'
+    actions:
+        CommandLine|contains:
+            - 'urlcache'
+            - 'verifyctl'
+            - '-decode'
+            - '/decode'
+            - '-decodehex'
+    condition: selection and actions
+tags:
+    - attack.defense_evasion
+    - attack.t1140
+    - attack.t1105
+level: medium
+---
+title: MSHTA Executing Remote Or Inline Script
+id: lrng-exec-0003
+status: stable
+description: mshta.exe running a remote URL or inline script (signed binary proxy execution).
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    image:
+        - NewProcessName|endswith: '\mshta.exe'
+        - Image|endswith: '\mshta.exe'
+    payload:
+        CommandLine|contains:
+            - 'http://'
+            - 'https://'
+            - 'javascript:'
+            - 'vbscript:'
+    condition: image and payload
+tags:
+    - attack.defense_evasion
+    - attack.t1218.005
+level: high
+---
+title: Base64-Encoded Command Indicator
+id: lrng-exec-0004
+status: stable
+description: A command line carrying a suspicious token base64-encoded at any byte alignment.
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        CommandLine|base64offset|contains:
+            - 'powershell'
+            - 'Invoke-Expression'
+            - 'DownloadString'
+            - 'FromBase64String'
+    condition: selection
+tags:
+    - attack.execution
+    - attack.defense_evasion
+    - attack.t1027
+    - attack.t1059.001
+level: medium
+---
+title: PowerShell Stealth Flags (Dash Variants)
+id: lrng-exec-0005
+status: stable
+description: PowerShell launched hidden or with execution policy bypassed, matching '/' and Unicode-dash flag variants used to dodge naive detection.
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    image:
+        - NewProcessName|endswith: '\powershell.exe'
+        - NewProcessName|endswith: '\pwsh.exe'
+        - Image|endswith: '\powershell.exe'
+        - Image|endswith: '\pwsh.exe'
+    flags:
+        CommandLine|windash|contains:
+            - ' -w hidden'
+            - ' -windowstyle hidden'
+            - ' -ep bypass'
+            - ' -executionpolicy bypass'
+            - ' -noprofile'
+    condition: image and flags
+tags:
+    - attack.execution
+    - attack.t1059.001
+level: medium

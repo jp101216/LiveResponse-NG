@@ -1,0 +1,38 @@
+# lrng starter pack — account manipulation.
+title: Local Administrator Added Via Net Command
+id: lrng-acct-0040
+status: stable
+description: net.exe / net1.exe adding an account to a local group from the command line.
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        CommandLine|contains|all:
+            - 'localgroup'
+            - '/add'
+    groups:
+        CommandLine|contains:
+            - 'administrators'
+            - 'remote desktop users'
+    condition: selection and groups
+tags:
+    - attack.persistence
+    - attack.t1098
+level: medium
+---
+title: Hidden Or Machine-like Account Created
+id: lrng-acct-0041
+status: stable
+description: A local account whose name ends with '$' was created (hidden / machine-like).
+logsource:
+    service: security
+detection:
+    selection:
+        EventID: 4720
+        TargetUserName|endswith: '$'
+    condition: selection
+tags:
+    - attack.persistence
+    - attack.t1136.001
+level: medium

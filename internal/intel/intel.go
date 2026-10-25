@@ -1,0 +1,226 @@
+// Package intel is the offline endpoint-intelligence engine: a dependency-free,
+// air-gapped lookup from an IP address to who owns it (ASN and organisation),
+// where it is allocated (country), and what kind of infrastructure it is (a
+// cloud platform, a CDN, a hosting/VPS provider, a public DNS resolver, Tor, an
+// anonymising VPN/proxy).
+//
+// Why offline. A live-response host is often network-contained or air-gapped by
+// the time a responder reaches it, so a WHOIS/geo/ASN lookup over the wire is
+// exactly what isn't available — and reaching out would also tip off an attacker
+// watching the box. So the data is compiled ahead of time and bundled into the
+// binary: every lookup is a pure in-memory longest-prefix match, no sockets, no
+// DNS, no files at run time.
+//
+// Why it matters for triage. The other collectors surface *that* a host talked
+// to 185.220.101.47; this package says *that address is a Tor exit* or *that's
+// an OVH VPS in France* or *that's just AWS* — the context that turns a list of
+// remote addresses into leads. It carries the attribution onto the indicator
+// (IOC) set too, so a blocklist ships with the "why" attached.
+//
+// Honesty about the data. Attribution is only ever as good and as fresh as the
+// dataset. The bundled dataset is a curated *seed* — the major, stable cloud /
+// CDN / hosting / resolver allocations plus Tor directory infrastructure — meant
+// to be useful out of the box and then refreshed from authoritative sources with
+// the `intelgen` tool (see cmd/intelgen). Every result records the dataset's
+// source and generation date so a stale lookup is visible as such; a miss is
+// reported as "not attributed", never guessed.
+package intel
+
+import (
+	"bytes"
+	_ "embed"
+	"net/netip"
+	"sort"
+	"strings"
+	"sync"
+)
+
+// Category classifies the kind of infrastructure an address belongs to. It is a
+// bitset so one address can be, say, both a CDN and a public DNS resolver
+// (1.1.1.1 is), kept to a single byte so a large dataset stays compact.
+type Category uint8
+
+const (
+	CatCloud      Category = 1 << iota // IaaS / general cloud compute (AWS, Azure, GCP, Oracle)
+	CatCDN                             // content-delivery / edge (Cloudflare, Fastly, Akamai)
+	CatHosting                         // hosting / VPS / dedicated-server providers (OVH, Hetzner, DigitalOcean)
+	CatDNS                             // public recursive DNS resolvers (Quad9, OpenDNS, Google/Cloudflare DNS)
+	CatTor                             // Tor network infrastructure (exit, relay, directory authority)
+	CatAnonymizer                      // commercial VPN / open-proxy / anonymising egress
+)
+
+// catOrder is the canonical order categories are reported in, so output is
+// stable across runs and datasets.
+var catOrder = []struct {
+	bit  Category
+	name string
+}{
+	{CatCloud, "cloud"},
+	{CatCDN, "cdn"},
+	{CatHosting, "hosting"},
+	{CatDNS, "dns"},
+	{CatTor, "tor"},
+	{CatAnonymizer, "anonymizer"},
+}
+
+var catByName = func() map[string]Category {
+	m := make(map[string]Category, len(catOrder))
+	for _, c := range catOrder {
+		m[c.name] = c.bit
+	}
+	return m
+}()
+
+// ParseCategory maps a category name to its bit; the second result is false for
+// an unknown name (the loader skips those, so an older binary tolerates a newer
+// dataset that adds a category).
+func ParseCategory(name string) (Category, bool) {
+	c, ok := catByName[strings.ToLower(strings.TrimSpace(name))]
+	return c, ok
+}
+
+// Has reports whether set contains c.
+func (set Category) Has(c Category) bool { return set&c != 0 }
+
+// Names returns the category names in set, in canonical order.
+func (set Category) Names() []string {
+	var out []string
+	for _, c := range catOrder {
+		if set.Has(c.bit) {
+			out = append(out, c.name)
+		}
+	}
+	return out
+}
+
+// Info is what a successful lookup returns: the matched prefix and everything
+// the dataset records about it. A zero ASN or empty Country/Org means the
+// dataset didn't carry that field for the match, not that it's zero.
+type Info struct {
+	Prefix     netip.Prefix // the matched (most-specific) dataset prefix
+	ASN        uint32       // origin AS number, 0 if unknown
+	Country    string       // ISO-3166 alpha-2, upper-case, "" if unknown
+	Categories Category     // infrastructure classification bitset
+	Org        string       // AS / owner name, "" if unknown
+}
+
+// CategoryNames is the Info's categories in canonical order.
+func (i Info) CategoryNames() []string { return i.Categories.Names() }
+
+// Meta describes the dataset a DB was built from, so a report can show its
+// provenance and a reader can judge its freshness.
+type Meta struct {
+	Source    string // where the data came from, e.g. "curated-seed" or "iptoasn.com"
+	Generated string // generation date as recorded in the dataset (free-form, usually YYYY-MM-DD)
+	Notes     string // any free-form note the dataset carried
+	Entries   int    // number of prefix entries loaded
+	Builtin   bool   // true when this is the embedded dataset, false when loaded from a file
+}
+
+// entry is one dataset row. Prefix is stored masked (network address only).
+type entry struct {
+	prefix netip.Prefix
+	asn    uint32
+	cc     string
+	cats   Category
+	org    string
+}
+
+// DB is a compiled, read-only endpoint-intelligence dataset. Build one with
+// Load or Builtin, then call Lookup. A DB is safe for concurrent use.
+type DB struct {
+	entries []entry
+	v4      table4
+	v6      table6
+	meta    Meta
+}
+
+// Meta returns the dataset's provenance.
+func (d *DB) Meta() Meta { return d.meta }
+
+// Lookup returns what the dataset knows about ip via a longest-prefix match: the
+// most specific prefix that contains ip wins. The second result is false when no
+// prefix matches (the address is "not attributed"). IPv4-mapped IPv6 addresses
+// are matched as IPv4.
+func (d *DB) Lookup(ip netip.Addr) (Info, bool) {
+	if !ip.IsValid() {
+		return Info{}, false
+	}
+	ip = ip.Unmap()
+	var idx int32 = -1
+	if ip.Is4() {
+		idx = d.v4.lookup(ip.As4())
+	} else {
+		idx = d.v6.lookup(ip.As16())
+	}
+	if idx < 0 {
+		return Info{}, false
+	}
+	e := d.entries[idx]
+	return Info{
+		Prefix:     e.prefix,
+		ASN:        e.asn,
+		Country:    e.cc,
+		Categories: e.cats,
+		Org:        e.org,
+	}, true
+}
+
+// insert adds one prefix to the right table. Prefixes are masked so the stored
+// key is the network address; a later duplicate of the same prefix overwrites
+// the earlier one (last wins), which lets an overlay refine a base dataset.
+func (d *DB) insert(p netip.Prefix, asn uint32, cc string, cats Category, org string) {
+	p = p.Masked()
+	addr := p.Addr().Unmap()
+	p = netip.PrefixFrom(addr, p.Bits())
+	idx := int32(len(d.entries))
+	d.entries = append(d.entries, entry{prefix: p, asn: asn, cc: cc, cats: cats, org: org})
+	if addr.Is4() {
+		d.v4.insert(addr.As4(), p.Bits(), idx)
+	} else {
+		d.v6.insert(addr.As16(), p.Bits(), idx)
+	}
+}
+
+// finish precomputes each table's descending length list for lookup.
+func (d *DB) finish() {
+	d.v4.finish()
+	d.v6.finish()
+	d.meta.Entries = len(d.entries)
+}
+
+//go:embed data/endpoints.tsv
+var builtinData []byte
+
+var (
+	builtinOnce sync.Once
+	builtinDB   *DB
+	builtinErr  error
+)
+
+// Builtin returns the dataset embedded in the binary, parsed once and cached. It
+// is marked Builtin in its Meta. A malformed embedded dataset is a build-time
+// mistake, so the error is surfaced rather than panicked.
+func Builtin() (*DB, error) {
+	builtinOnce.Do(func() {
+		builtinDB, builtinErr = Load(bytes.NewReader(builtinData))
+		if builtinDB != nil {
+			builtinDB.meta.Builtin = true
+		}
+	})
+	return builtinDB, builtinErr
+}
+
+// sortDescUnique returns xs sorted high-to-low with duplicates removed.
+func sortDescUnique(xs []int) []int {
+	sort.Sort(sort.Reverse(sort.IntSlice(xs)))
+	out := xs[:0]
+	last := -1
+	for _, x := range xs {
+		if x != last {
+			out = append(out, x)
+			last = x
+		}
+	}
+	return out
+}

@@ -91,6 +91,7 @@ def go_test(_args):
 
     output = {}  # (package, test) -> output lines
     failed = []  # (package, test) in the order they failed
+    passed, skipped = [], []
     for raw in sys.stdin:
         try:
             ev = json.loads(raw)
@@ -109,7 +110,20 @@ def go_test(_args):
         # A package whose build failed is reported by its build-fail event.
         if action == "build-fail" or (action == "fail" and not ev.get("FailedBuild")):
             failed.append(key)
+        elif key[1] and action in ("pass", "skip"):
+            (passed if action == "pass" else skipped).append(key)
     sys.stdout.flush()
+
+    # One notice with the counts and every skipped test's reason: a test that
+    # skips on the runner (say, one that needs files the host doesn't have)
+    # passes silently otherwise.
+    if passed or skipped:
+        notes = []
+        for pkg, test in skipped:
+            why = [l.strip() for l in output.get((pkg, test), []) if not l.startswith(GO_MARKERS + ("--- SKIP",))]
+            notes.append("%s %s: %s" % (pkg_dir(pkg) or pkg, test, " ".join(why) or "skipped"))
+        title = "go test: %d passed, %d skipped" % (len(passed), len(skipped))
+        print("::notice title=%s::%s" % (escape_prop(title), escape_data(clip("\n".join(notes) or title))))
 
     tests = [k for k in failed if k[1]]
     failures = []

@@ -859,13 +859,25 @@ produced it.
 **CI** (`.github/workflows/ci.yml`) runs the Linux checks above, then the full
 Go suite — including a sweep of every collector — on a real Windows runner,
 and an integration job that builds the agent and sidecar on Windows and finds
-a YARA marker in a live process's memory. A Linux release job builds the
-Linux release set with the same `make` recipes `make release` uses, fails if any
-artifact is dynamically linked or built for the wrong architecture, then runs
-the static agent and sidecar together: a default triage, a prompt scan, and a
-live memory scan that must find a YARA marker assembled at runtime in another
-process's heap. Both runners' triage reports are kept as build artifacts: a
-clean runner is a useful false-positive baseline.
+a YARA marker in a live process's memory. On Windows the hand-written parsers
+are checked against Windows itself: the Xpress Huffman decompressor against
+ntdll's own codec, and the event-log parser against `wevtutil`'s rendering of
+the runner's live System log. Failing tests and lints show on the pull request
+as annotations, with each Go test step's skipped tests and why. A Linux release
+job builds the Linux release set with the same `make` recipes `make release`
+uses, fails if any artifact is dynamically linked or built for the wrong
+architecture, then runs the static agent and sidecar together: a default
+triage, a prompt scan, and a live memory scan that must find a YARA marker
+assembled at runtime in another process's heap. Both runners' triage reports
+are kept as build artifacts: a clean runner is a useful false-positive
+baseline.
+
+To check the prefetch decoder against real files from any OS, copy some `.pf`
+files from a Windows 10 or later host and run:
+
+```bash
+LRNG_PREFETCH_SAMPLES=/path/to/pf-folder go test ./internal/collector -run PrefetchSamples -v
+```
 
 **Linux release sidecars** are fully static musl binaries, so one build runs on
 any distro — glibc of any age, or musl (Alpine) — for the same reason the

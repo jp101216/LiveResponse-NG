@@ -153,7 +153,10 @@ that no Windows 10+ prefetch body had ever been decoded. Schema stays at 1.2.
   their output through `.github/scripts/ci-annotate.py`. It turns each failing
   Go test, rustc or clippy diagnostic, or PowerShell error into an annotation
   with its file and line, so a failure on the Windows runner no longer means
-  digging through the raw log. Actions moved to their Node 24 releases, and
+  digging through the raw log. Each Go test step also posts its pass and skip
+  counts with every skip's reason: the test that decodes the runner's own
+  prefetch files skips on Server SKUs, and that silence is how the prefetch
+  bug stayed hidden. Actions moved to their Node 24 releases, and
   setup-go's module cache is off: it never restored for a stdlib-only module,
   and warned on every run.
 - Report output is buffered (JSONL was one write per event — slow on USB media

@@ -68,6 +68,21 @@ func TestDefaultCollectorsOnWindows(t *testing.T) {
 			t.Errorf("%s: %d records, want at least %d", name, got, n)
 		}
 	}
+	// The event-log collector keeps only targeted events, so a clean host may
+	// keep none -- but it must have read the host's logs (there is always a
+	// System log). TestEvtxParserMatchesWevtutil checks what it made of them.
+	if el := byName["eventlog"]; el.Meta["records_scanned"] == nil || el.Meta["records_scanned"] == 0 {
+		t.Errorf("eventlog: read no records from the host's logs (logs read %v, missing %v; errors %q)",
+			el.Meta["logs_read"], el.Meta["logs_missing"], el.Errors)
+	}
+	// The registry's AppCompatCache is real Windows data in a format we parse
+	// by hand; a parse error on it is a parser bug, not a host quirk.
+	for _, e := range byName["shimcache"].Errors {
+		if strings.HasPrefix(e, "appcompatcache:") {
+			t.Errorf("shimcache: %s (value %v bytes)", e, byName["shimcache"].Meta["value_bytes"])
+		}
+	}
+	t.Logf("shimcache: %v entries from %v bytes", byName["shimcache"].Meta["entry_count"], byName["shimcache"].Meta["value_bytes"])
 
 	hashed, lsassOK := 0, false
 	for _, rec := range byName["processes"].Records {

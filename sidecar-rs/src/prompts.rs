@@ -318,9 +318,9 @@ fn narrow_utf16le(buf: &[u8], align: usize, out: &mut Vec<u8>) -> usize {
     out.clear();
     out.reserve(src.len() / 2);
     let (mut run, mut longest) = (0usize, 0usize);
-    for pair in src.chunks_exact(2) {
-        if pair[1] == 0 && is_text(pair[0]) {
-            out.push(pair[0]);
+    for &[lo, hi] in src.as_chunks::<2>().0 {
+        if hi == 0 && is_text(lo) {
+            out.push(lo);
             run += 1;
             longest = longest.max(run);
         } else {

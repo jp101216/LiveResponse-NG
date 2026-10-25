@@ -117,24 +117,9 @@ func TestDecodeRealPrefetch(t *testing.T) {
 		if err != nil {
 			continue
 		}
-		pf, err := decodePrefetchFile(raw)
-		if err != nil {
-			t.Errorf("%s: decode failed: %v", e.Name(), err)
-			continue
+		if checkPrefetchSample(t, e.Name(), raw) {
+			decoded++
 		}
-		switch pf.Version {
-		case 23, 26, 30, 31:
-		default:
-			t.Errorf("%s: unexpected format version %d", e.Name(), pf.Version)
-		}
-		if pf.Executable == "" {
-			t.Errorf("%s: no executable name decoded", e.Name())
-		}
-		// The filename encodes the executable; the decoded header must agree.
-		if base, _, ok := prefetchExecutable(e.Name()); ok && !strings.EqualFold(base, pf.Executable) {
-			t.Errorf("%s: filename exe %q != decoded exe %q", e.Name(), base, pf.Executable)
-		}
-		decoded++
 		if decoded >= 25 {
 			break // a representative sample is enough
 		}

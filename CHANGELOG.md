@@ -8,9 +8,30 @@ headline fixes: a patched-but-not-restarted server no longer floods the report
 with *suspect* findings, Linux hashes are taken from the binary the process
 actually runs, AI module A and the network heuristics see through a `#!`
 script's name, and event-log retention can no longer drop a log clear in
-favour of routine events. Schema stays at 1.2.
+favour of routine events. The first CI run on a real Windows host also found
+that no Windows 10+ prefetch body had ever been decoded. Schema stays at 1.2.
 
 ### Fixed
+- **Prefetch bodies weren't decoded on Windows 10 and later.** The Xpress
+  Huffman decompressor misread two parts of the [MS-XCA] format. A match length
+  of 18 or more continues in raw bytes of the byte stream, but it read them
+  from the bit stream. And the reader keeps a 16-bit word of lookahead, which
+  decides where those bytes and the next 64 KiB block's table sit, but it
+  placed them at the next word boundary. Its tests used an encoder built on
+  the same misreading, so they passed. On real files (every Windows 10+ `.pf`
+  is compressed) decoding failed, and the collector listed prefetch files
+  without run counts, run times, referenced files or
+  `execution.prefetch_unusual_path`. The decompressor now follows the spec,
+  including matches that run past a block and the 32-bit length form. It is
+  checked against Windows' own codec: the Windows CI job decodes
+  `RtlCompressBuffer` output, and a new test decodes a directory of real `.pf`
+  files on any OS (`LRNG_PREFETCH_SAMPLES`). Six Windows 10 files, up to six
+  blocks each, decode to the run counts and file and volume counts that PECmd
+  reports for them.
+- **The sidecar failed clippy on current Rust.** Rust 1.98's clippy added
+  `chunks_exact_to_as_chunks`, which the UTF-16 scanner tripped, so CI's
+  `-D warnings` failed on any toolchain from 1.98 on. It iterates `as_chunks`
+  now.
 - **Upgraded binaries and libraries are no longer "self-deleting malware".**
   After a package upgrade, every process still running the old copy maps it as
   `… (deleted)`; each such process raised `modules.deleted_file` *and*
@@ -128,6 +149,13 @@ favour of routine events. Schema stays at 1.2.
   `www-data`'s `~/.bashrc` would sit). Each persistence record names its
   `program`, and a flagged one's program (and every preloaded library) is
   hashed.
+- **CI failures can be read from the pull request.** Test and lint steps pipe
+  their output through `.github/scripts/ci-annotate.py`. It turns each failing
+  Go test, rustc or clippy diagnostic, or PowerShell error into an annotation
+  with its file and line, so a failure on the Windows runner no longer means
+  digging through the raw log. Actions moved to their Node 24 releases, and
+  setup-go's module cache is off: it never restored for a stdlib-only module,
+  and warned on every run.
 - Report output is buffered (JSONL was one write per event — slow on USB media
   and network shares).
 - Hashing reuses its 1 MiB read buffers.

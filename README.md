@@ -872,6 +872,17 @@ assembled at runtime in another process's heap. Both runners' triage reports
 are kept as build artifacts: a clean runner is a useful false-positive
 baseline.
 
+**Releases** are built by `.github/workflows/release.yml` when a GitHub release
+is published. It runs `make release` on a Linux runner, from scratch (no build
+cache), checks every binary's architecture and that the Linux ones are static,
+and runs the Windows x64 and x86 agents with their sidecars on a Windows runner.
+Only then does it attach an archive per platform, `SHA256SUMS` (the binaries,
+as `make release` writes it) and `SHA256SUMS.archives`. It refuses a release
+whose tag isn't `v` plus the version in `cmd/lrng/main.go` and
+`sidecar-rs/Cargo.toml`. To verify a download, extract the archives side by
+side and run `sha256sum -c SHA256SUMS`. Actions > release > Run workflow builds
+and checks the same set without publishing it.
+
 To check the prefetch decoder against real files from any OS, copy some `.pf`
 files from a Windows 10 or later host and run:
 

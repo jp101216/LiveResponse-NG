@@ -175,6 +175,11 @@ that no Windows 10+ prefetch body had ever been decoded. Schema stays at 1.2.
   `records_with_findings`, `records_dropped`.
 - README: a Linux row set in the detections table, and a note that the bundled
   intel dataset has no anonymizer entries (how to add them).
+- **A release workflow** (`.github/workflows/release.yml`). Publishing a GitHub
+  release builds the full release set with `make release`, checks it, runs the
+  Windows x64 and x86 builds on a Windows runner, and attaches per-platform
+  archives with `SHA256SUMS` (the binaries) and `SHA256SUMS.archives`. A tag
+  that doesn't match the code's version is refused.
 
 ## 0.10.5
 

@@ -1,0 +1,176 @@
+name: release
+
+# Publishing a GitHub release builds every Windows and Linux binary with the
+# Makefile's own `make release` recipes, checks them, runs the Windows ones on
+# a Windows runner, and attaches per-platform archives and checksums to the
+# release. A manual run (Actions > release > Run workflow), or a pull request
+# that changes this file or the Makefile, does everything except the upload;
+# its archives are kept as the run's "release-set" artifact.
+#
+# Publish the release from the commit you want to ship (normally main): the
+# workflow runs from the tagged commit, so the tag must include this file.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - Makefile
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false # never cancel a release build part-way
+
+jobs:
+  build:
+    name: Build the release set (make release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # `git describe` stamps the tag into the binaries
+      - name: versions agree (and match the tag, for a release)
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          code=$(sed -n 's/^[[:space:]]*version *= *"\([^"]*\)".*/\1/p' cmd/lrng/main.go | head -1)
+          cargo=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' sidecar-rs/Cargo.toml | head -1)
+          echo "cmd/lrng/main.go: $code, sidecar-rs/Cargo.toml: $cargo"
+          if [ -z "$code" ] || [ "$code" != "$cargo" ]; then
+            echo "::error::cmd/lrng/main.go ($code) and sidecar-rs/Cargo.toml ($cargo) must carry the same version"; exit 1
+          fi
+          if [ "$EVENT" = release ] && [ "$TAG" != "v$code" ]; then
+            echo "::error::the release is tagged $TAG, but the code is version $code (expected tag v$code)"; exit 1
+          fi
+          echo "name=$(git describe --tags --always --dirty)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false # stdlib only: no modules to cache
+      # No build cache in this workflow: release binaries are built from scratch.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu,i686-pc-windows-gnu,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - name: cross toolchains (mingw-w64 for the Windows sidecars; zig and cargo-zigbuild for the Linux ones)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64
+          python -m pip install ziglang==0.17.0
+          cargo install --locked cargo-zigbuild@0.24.0
+      - name: make release
+        run: make release
+      - name: every binary is built for its platform, and the Linux ones are static
+        run: |
+          set -euo pipefail
+          check() {  # $1 = file, $2 = extended regex its `file` description must match
+            desc=$(file -b "$1")
+            echo "$1: $desc"
+            if ! printf '%s' "$desc" | grep -Eiq "$2"; then echo "::error::$1 is not $2"; exit 1; fi
+            case "$1" in dist/linux-*)
+              # A static (or static-pie) executable has no program interpreter.
+              if readelf -lW "$1" | grep -q 'Requesting program interpreter'; then
+                echo "::error::$1 is dynamically linked"; exit 1
+              fi ;;
+            esac
+          }
+          check dist/windows-amd64/lrng.exe         'PE32\+.*x86-64'
+          check dist/windows-amd64/lrng-sidecar.exe 'PE32\+.*x86-64'
+          check dist/windows-386/lrng.exe           'PE32 .*(80386|i386)'
+          check dist/windows-386/lrng-sidecar.exe   'PE32 .*(80386|i386)'
+          check dist/windows-arm64/lrng.exe         'PE32\+.*(aarch64|arm64)'
+          check dist/windows-arm64/lrng-sidecar.exe 'PE32\+.*x86-64' # the x64 sidecar, run under emulation
+          check dist/linux-amd64/lrng               'ELF 64-bit.*x86-64'
+          check dist/linux-amd64/lrng-sidecar       'ELF 64-bit.*x86-64'
+          check dist/linux-arm64/lrng               'ELF 64-bit.*aarch64'
+          check dist/linux-arm64/lrng-sidecar       'ELF 64-bit.*aarch64'
+      - name: the Linux x64 agent reports its version and finds its sidecar, with YARA
+        working-directory: dist/linux-amd64
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          v=$(./lrng -version); echo "$v"
+          if [ "$EVENT" = release ]; then
+            case "$v" in "lrng $TAG ("*) ;; *) echo "::error::the agent reports '$v', not $TAG"; exit 1 ;; esac
+          fi
+          ping=$(./lrng -ping-sidecar); echo "$ping"
+          case "$ping" in *yara=true*) ;; *) echo "::error::the Linux x64 sidecar has no YARA"; exit 1 ;; esac
+      - name: package (one archive per platform, plus checksums)
+        env:
+          NAME: ${{ steps.version.outputs.name }}
+        run: |
+          set -euo pipefail
+          # Each archive holds <platform>/, as in dist/, so after extracting them
+          # side by side `sha256sum -c SHA256SUMS` checks every binary.
+          mkdir stage upload
+          for dir in dist/*/; do
+            p=$(basename "$dir")
+            mkdir "stage/$p"
+            cp "$dir"/* LICENSE "stage/$p/"
+            case "$p" in
+              windows-*) (cd stage && zip -qr -X "../upload/lrng-$NAME-$p.zip" "$p") ;;
+              *) tar -C stage --owner=0 --group=0 --numeric-owner -czf "upload/lrng-$NAME-$p.tar.gz" "$p" ;;
+            esac
+          done
+          cp dist/SHA256SUMS upload/SHA256SUMS # the binaries, exactly as `make release` writes it
+          (cd upload && sha256sum lrng-* > SHA256SUMS.archives)
+          ls -l upload; cat upload/SHA256SUMS.archives
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-set
+          path: upload/
+          if-no-files-found: error
+
+  smoke-windows:
+    name: Run the Windows x64 and x86 release binaries
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-set
+          path: upload
+      - name: each agent reports its version and finds its sidecar, with YARA
+        shell: pwsh
+        run: |
+          trap { Write-Output ("::error::" + ("$_" -replace '%','%25' -replace "`r",'%0D' -replace "`n",'%0A')); exit 1 }
+          $PSNativeCommandUseErrorActionPreference = $true
+          foreach ($p in 'windows-amd64', 'windows-386') {
+            $zip = Get-ChildItem "upload/lrng-*-$p.zip" | Select-Object -First 1
+            if (-not $zip) { throw "no $p archive in the release set" }
+            Expand-Archive $zip.FullName -DestinationPath extracted -Force
+            & "extracted/$p/lrng.exe" -version
+            $ping = & "extracted/$p/lrng.exe" -ping-sidecar | Out-String
+            Write-Output $ping
+            if ($ping -notmatch 'yara=true') { throw "the $p sidecar has no YARA" }
+          }
+
+  publish:
+    name: Attach to the release
+    if: github.event_name == 'release'
+    needs: [build, smoke-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the only job that can write: it uploads, it builds nothing
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-set
+          path: upload
+      - name: upload the archives and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" upload/* --repo "$GITHUB_REPOSITORY" --clobber

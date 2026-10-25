@@ -6,14 +6,17 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"strings"
 )
 
 // Linux modules collector: the executable, file-backed mappings of each process
 // (the main image and its shared libraries), read from /proc/<pid>/maps. A
 // library loaded from a world-writable or temporary path is the shape of
-// LD_PRELOAD abuse and shared-object hijacking; a library whose file has been
-// deleted while still mapped is the shape of a fileless loader.
+// LD_PRELOAD abuse and shared-object hijacking; executable code mapped from an
+// anonymous memfd is fileless loading; a library whose file has been deleted
+// while still mapped is the shape of a loader that cleans up after itself. A
+// system library that was replaced on disk (a package upgrade the process
+// hasn't been restarted after) also shows as deleted, so it is told apart and
+// reported at low severity.
 func collectModules(ctx context.Context, opts RunOptions) (Result, error) {
 	res := NewResult("modules")
 
@@ -23,7 +26,7 @@ func collectModules(ctx context.Context, opts RunOptions) (Result, error) {
 	}
 	comm := procCommMap()
 
-	scanned, inaccessible := 0, 0
+	scanned, inaccessible, withReplaced := 0, 0, 0
 	for _, pid := range pids {
 		if err := ctx.Err(); err != nil {
 			res.Fail("cancelled: " + err.Error())
@@ -43,21 +46,12 @@ func collectModules(ctx context.Context, opts RunOptions) (Result, error) {
 		self := opts.isSelf(uint32(pid), mods[0].Path)
 
 		list := make([]map[string]any, 0, len(mods))
-		var high, low, deleted []string
+		var j moduleJudgement
+		if !self {
+			j = judgeLinuxModules(mods, procRootExists(pid))
+		}
 		for _, m := range mods {
 			list = append(list, map[string]any{"path": m.Path, "deleted": m.Deleted})
-			if self {
-				continue
-			}
-			if m.Deleted {
-				deleted = append(deleted, m.Path)
-			}
-			switch lvl, _ := unixPathRisk(m.Path); lvl {
-			case riskHigh:
-				high = append(high, m.Path)
-			case riskLow:
-				low = append(low, m.Path)
-			}
 		}
 
 		fields := map[string]any{
@@ -69,34 +63,18 @@ func collectModules(ctx context.Context, opts RunOptions) (Result, error) {
 		if self {
 			fields["lrng_component"] = true
 		}
-
-		var findings []Finding
-		if len(deleted) > 0 {
-			fields["deleted_modules"] = deleted
-			findings = append(findings, Finding{
-				Rule: "modules.deleted_file", Severity: SevSuspect, Technique: "T1620", Confidence: 65,
-				Detail: fmt.Sprintf("%s (pid %d) has %d mapped library file(s) deleted from disk while still loaded: %s",
-					name, pid, len(deleted), strings.Join(deleted, ", ")),
-			})
+		if len(j.replaced) > 0 {
+			withReplaced++
 		}
-		if susp := append(append([]string{}, high...), low...); len(susp) > 0 {
-			fields["suspicious_modules"] = susp
-			sev, conf := SevNotable, 30
-			why := "a world-writable or temporary location"
-			if len(high) > 0 {
-				sev, conf = SevSuspect, 55
-			}
-			findings = append(findings, Finding{
-				Rule: "modules.unusual_path", Severity: sev, Technique: "T1574.006", Confidence: conf,
-				Detail: fmt.Sprintf("%s (pid %d) has %d module(s) loaded from %s: %s",
-					name, pid, len(susp), why, strings.Join(susp, ", ")),
-			})
-		}
+		fields, findings := j.annotate(fields, fmt.Sprintf("%s (pid %d)", name, pid))
 		res.Add(fields, findings...)
 	}
 
 	res.SetMeta("platform", "linux")
 	res.SetMeta("processes_scanned", scanned)
 	res.SetMeta("processes_inaccessible", inaccessible)
+	if withReplaced > 0 {
+		res.SetMeta("processes_with_replaced_libraries", withReplaced)
+	}
 	return res.Finish(), nil
 }

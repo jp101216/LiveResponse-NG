@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -58,7 +59,34 @@ func (h *FileHasher) Hash(ctx context.Context, path string) HashResult {
 	if h == nil || path == "" {
 		return HashResult{}
 	}
-	key := strings.ToLower(path) // Windows paths are case-insensitive
+	return h.hashAs(ctx, "path:"+pathKey(path), path)
+}
+
+// HashAs hashes the file opened at path but caches the result under key, an
+// identity for the file itself rather than for the name it was reached by. The
+// Linux process collector uses it to hash /proc/<pid>/exe — the executable the
+// process actually runs, even when it is deleted, a memfd, or inside a container
+// whose mount namespace gives the same path to a different file — keyed by the
+// file's device and inode, so a binary shared by many processes is still read
+// once.
+func (h *FileHasher) HashAs(ctx context.Context, key, path string) HashResult {
+	if h == nil || key == "" || path == "" {
+		return HashResult{}
+	}
+	return h.hashAs(ctx, "id:"+key, path)
+}
+
+// pathKey is the cache key for a path: case-folded on Windows, whose file
+// system is case-insensitive, and taken verbatim elsewhere, where /tmp/A and
+// /tmp/a are two different files.
+func pathKey(path string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(path)
+	}
+	return path
+}
+
+func (h *FileHasher) hashAs(ctx context.Context, key, path string) HashResult {
 	h.mu.Lock()
 	if h.cache == nil {
 		h.cache = map[string]*hashEntry{}
@@ -102,6 +130,10 @@ func (h *FileHasher) Fields(ctx context.Context, fields map[string]any, prefix, 
 
 var errHashCancelled = errors.New("hashing cancelled (collector time budget)")
 
+// hashBufPool recycles the 1 MiB read buffers, so hashing hundreds of images
+// doesn't allocate (and garbage-collect) a fresh buffer per file.
+var hashBufPool = sync.Pool{New: func() any { b := make([]byte, 1<<20); return &b }}
+
 func hashFile(ctx context.Context, path string, max int64) HashResult {
 	if max <= 0 {
 		max = DefaultHashMaxBytes
@@ -122,7 +154,9 @@ func hashFile(ctx context.Context, path string, max int64) HashResult {
 		return HashResult{Size: st.Size(), Err: fmt.Sprintf("not hashed: %d bytes exceeds the %d-byte cap", st.Size(), max)}
 	}
 	sum := sha256.New()
-	buf := make([]byte, 1<<20)
+	bp := hashBufPool.Get().(*[]byte)
+	defer hashBufPool.Put(bp)
+	buf := *bp
 	var n int64
 	for {
 		if ctx.Err() != nil {

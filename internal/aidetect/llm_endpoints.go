@@ -104,7 +104,8 @@ func ProviderHostnames() []string { return append([]string(nil), llmHostnames...
 //
 // Matching is by name, which a binary can copy; the network collector
 // therefore also checks where an allowlisted process runs from (see
-// Conn.UnusualPath).
+// Conn.UnusualPath). On Linux the name is the executable's file name (the
+// process's own name can be set at will), which carries no ".exe".
 var defaultAllowlist = map[string]bool{
 	// Browsers and the WebView2 runtime that embeds web UIs in desktop apps
 	"chrome.exe":         true,
@@ -126,4 +127,11 @@ var defaultAllowlist = map[string]bool{
 	"windsurf.exe": true,
 	"zed.exe":      true,
 	"devenv.exe":   true, // Visual Studio
+
+	// Linux executables of the same applications.
+	"chrome": true, "chromium": true, "chromium-browser": true, "firefox": true,
+	"firefox-esr": true, "firefox-bin": true, "brave": true, "msedge": true,
+	"opera": true, "vivaldi-bin": true, "ollama": true, "code": true,
+	"code-insiders": true, "cursor": true, "windsurf": true, "zed": true,
+	"zed-editor": true,
 }

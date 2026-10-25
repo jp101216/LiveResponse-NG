@@ -86,3 +86,28 @@ func TestParseGroup(t *testing.T) {
 		t.Errorf("sudo members = %v", sudo.Members)
 	}
 }
+
+func TestParseProcStatFlags(t *testing.T) {
+	// A kernel thread: PF_KTHREAD (0x00200000) set among its flags (here 0x00208040).
+	kthread := []byte("2 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0 0 0 0 0 20 0 1 0 4 0 0 ")
+	st, ok := parseProcStat(kthread)
+	if !ok || !st.kernelThread() || st.State != "S" || st.StartTicks != 4 {
+		t.Fatalf("kthreadd: %+v ok=%v", st, ok)
+	}
+	// A userland process (flags 0x00400100), and a zombie one: neither is a
+	// kernel thread, though a zombie has lost its exe link.
+	user := []byte("1234 (weird ):) name) S 1 1234 1234 0 -1 4194560 100 0 0 0 10 20 0 0 20 0 1 0 987654 12345678 500 ")
+	if st, ok := parseProcStat(user); !ok || st.kernelThread() || st.StartTicks != 987654 {
+		t.Fatalf("user process: %+v ok=%v", st, ok)
+	}
+	zombie := []byte("68 (sh) Z 1 68 68 0 -1 4227084 0 0 0 0 0 0 0 0 20 0 1 0 220 0 0 ")
+	if st, ok := parseProcStat(zombie); !ok || st.kernelThread() || st.State != "Z" {
+		t.Fatalf("zombie: %+v ok=%v", st, ok)
+	}
+	if _, ok := parseProcStat([]byte("9 (x) S 1 2 3")); ok {
+		t.Error("a truncated stat line should not parse")
+	}
+	if _, ok := parseProcStat([]byte("9 (x) S 1 1 1 0 -1 notanumber 0 0 0 0 0 0 0 0 20 0 1 0 5 0 0")); ok {
+		t.Error("a non-numeric flags field should not parse")
+	}
+}

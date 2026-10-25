@@ -5,6 +5,9 @@ package collector
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -20,34 +23,9 @@ import (
 func collectConnections(ctx context.Context, opts RunOptions) (Result, error) {
 	res := NewResult("network")
 
-	families := []struct {
-		path, label string
-		v6          bool
-	}{
-		{"/proc/net/tcp", "ipv4", false},
-		{"/proc/net/tcp6", "ipv6", true},
-	}
-	type famRow struct {
-		row   procNetRow
-		label string
-	}
-	var rows []famRow
-	read := 0
-	for _, f := range families {
-		data := readFileSafe(f.path)
-		if data == nil {
-			res.Fail(f.label + ": could not read " + f.path)
-			continue
-		}
-		rr, _ := parseProcNet(data, f.v6)
-		res.SetMeta(f.label+"_rows", len(rr))
-		read++
-		for _, r := range rr {
-			rows = append(rows, famRow{row: r, label: f.label})
-		}
-	}
-	if read == 0 {
-		return res.Finish(), errors.New("could not read /proc/net/tcp or /proc/net/tcp6")
+	rows, err := readProcNetFamilies(res, "tcp")
+	if err != nil {
+		return res.Finish(), err
 	}
 
 	inodePID, comm := procSocketOwners()
@@ -74,6 +52,21 @@ func collectConnections(ctx context.Context, opts RunOptions) (Result, error) {
 		return p
 	}
 
+	// Listening sockets, so an established connection accepted on one of them
+	// (a client of a local server) isn't mistaken for this host reaching out.
+	listeners := map[netip.AddrPort]bool{}
+	wildcard := map[uint16]bool{}
+	for _, fr := range rows {
+		if linuxTCPStateName(fr.row.State) != "LISTEN" {
+			continue
+		}
+		if a := fr.row.Local.Addr(); a.IsUnspecified() {
+			wildcard[fr.row.Local.Port()] = true
+		} else {
+			listeners[netip.AddrPortFrom(a.Unmap(), fr.row.Local.Port())] = true
+		}
+	}
+
 	for _, fr := range rows {
 		if err := ctx.Err(); err != nil {
 			res.Fail("cancelled: " + err.Error())
@@ -85,6 +78,7 @@ func collectConnections(ctx context.Context, opts RunOptions) (Result, error) {
 		state := linuxTCPStateName(r.State)
 		remote := r.Remote.Addr()
 		local := r.Local.Addr()
+		exe := pathOf(pid)
 
 		fields := map[string]any{
 			"family":      fr.label,
@@ -102,22 +96,27 @@ func collectConnections(ctx context.Context, opts RunOptions) (Result, error) {
 		if name != "" {
 			fields["process"] = name
 		}
-		self := pid > 0 && opts.isSelf(uint32(pid), pathOf(pid))
+		self := pid > 0 && opts.isSelf(uint32(pid), exe)
 		if self {
 			fields["lrng_component"] = true
 		}
 
 		hasPeer := state != "LISTEN" && remote.IsValid() && !remote.IsUnspecified() && r.Remote.Port() != 0
+		inbound := state == "ESTABLISHED" &&
+			(wildcard[r.Local.Port()] || listeners[netip.AddrPortFrom(local.Unmap(), r.Local.Port())])
+		if inbound {
+			fields["direction"] = "inbound"
+		}
 
 		var findings []Finding
 		if hasPeer && !self && det.Matches(remote, "") {
-			ip := pathOf(pid)
-			if ip != "" {
-				fields["image_path"] = ip
-			}
+			// Only a high-risk location counts as unusual for an allowlisted
+			// name here: per-user installs under ~/.local and other dot
+			// directories are where Linux desktop apps normally live.
+			lvl, _ := unixPathRisk(exe)
 			conn := aidetect.Conn{
 				Remote: remote, Process: name, PID: uint32(pid),
-				ImagePath: ip, UnusualPath: unixSuspiciousPath(ip),
+				ImagePath: exe, UnusualPath: lvl == riskHigh,
 			}
 			if co := det.Inspect(conn); co != nil {
 				findings = append(findings, Finding{
@@ -129,15 +128,16 @@ func collectConnections(ctx context.Context, opts RunOptions) (Result, error) {
 		if len(findings) == 0 {
 			cv := connView{
 				State: state, Local: local, LocalPort: r.Local.Port(),
-				Remote: remote, RemotePort: r.Remote.Port(), PID: uint32(pid), Process: name, Self: self,
-			}
-			if hasPeer && aidetect.PublicAddr(remote) && (state == "ESTABLISHED" || state == "SYN_SENT") {
-				cv.ImagePath = pathOf(pid)
-				if cv.ImagePath != "" {
-					fields["image_path"] = cv.ImagePath
-				}
+				Remote: remote, RemotePort: r.Remote.Port(), PID: uint32(pid), Process: name,
+				ImagePath: exe, Self: self, Inbound: inbound,
 			}
 			findings = linuxConnFindings(cv)
+		}
+		// The image path rides along on anything judged, and on every
+		// connection to a public peer (the context an analyst pivots on).
+		publicPeer := hasPeer && aidetect.PublicAddr(remote) && (state == "ESTABLISHED" || state == "SYN_SENT")
+		if exe != "" && (len(findings) > 0 || publicPeer) {
+			fields["image_path"] = exe
 		}
 		res.Add(fields, findings...)
 	}
@@ -147,6 +147,50 @@ func collectConnections(ctx context.Context, opts RunOptions) (Result, error) {
 	}
 	res.SetMeta("platform", "linux")
 	return res.Finish(), nil
+}
+
+// procNetFamRow is one /proc/net socket row and the address family it came from.
+type procNetFamRow struct {
+	row   procNetRow
+	label string
+}
+
+// readProcNetFamilies reads the IPv4 and IPv6 tables for kind ("tcp" or "udp":
+// /proc/net/<kind> and /proc/net/<kind>6). A missing IPv6 table means IPv6 is
+// disabled on the host — there are no IPv6 sockets to miss — so it is noted in
+// meta rather than counted as a coverage gap. It fails only when neither table
+// can be read.
+func readProcNetFamilies(res *Result, kind string) ([]procNetFamRow, error) {
+	families := []struct {
+		path, label string
+		v6          bool
+	}{
+		{"/proc/net/" + kind, "ipv4", false},
+		{"/proc/net/" + kind + "6", "ipv6", true},
+	}
+	var rows []procNetFamRow
+	read := 0
+	for _, f := range families {
+		data, err := os.ReadFile(f.path)
+		if err != nil {
+			if f.v6 && errors.Is(err, fs.ErrNotExist) {
+				res.SetMeta("ipv6", "unavailable: IPv6 is disabled on this host ("+f.path+" does not exist)")
+				continue
+			}
+			res.Fail(f.label + ": could not read " + f.path + ": " + err.Error())
+			continue
+		}
+		rr, _ := parseProcNet(data, f.v6)
+		res.SetMeta(f.label+"_rows", len(rr))
+		read++
+		for _, r := range rr {
+			rows = append(rows, procNetFamRow{row: r, label: f.label})
+		}
+	}
+	if read == 0 {
+		return nil, fmt.Errorf("could not read %s or %s", families[0].path, families[1].path)
+	}
+	return rows, nil
 }
 
 // procSocketOwners walks /proc once and returns the two lookups the network and

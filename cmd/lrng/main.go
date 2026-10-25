@@ -1,5 +1,6 @@
 // Command lrng is the Live Response NG agent: a fast triage collector that
-// emits one structured JSON report per run. Windows-first; builds anywhere.
+// emits one structured JSON report per run, on Windows and Linux; it builds
+// anywhere.
 //
 // Usage examples:
 //
@@ -28,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jp101216/liveresponse-ng/internal/collector"
@@ -41,7 +43,7 @@ import (
 // Set at build time: go build -ldflags "-X main.version=... -X main.commit=...".
 // These must be vars — -X silently does nothing to a const.
 var (
-	version = "0.10.5"
+	version = "0.10.6"
 	commit  = ""
 )
 
@@ -95,9 +97,22 @@ func main() {
 	usageErrorOn(err)
 	cfg.MemPIDs = pids
 
-	// Ctrl+C cancels collection; whatever was gathered is still written.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	// Ctrl+C — or SIGTERM, which `timeout`, systemd and a plain `kill` send —
+	// cancels collection, and whatever was gathered is still written. A second
+	// signal stops waiting and exits at once (a report write stuck on a dead
+	// network share, say).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigs := make(chan os.Signal, 2)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		s := <-sigs
+		fmt.Fprintf(os.Stderr, "\nlrng: %v: stopping collection and writing what was gathered (repeat to abort)\n", s)
+		cancel()
+		<-sigs
+		fmt.Fprintln(os.Stderr, "lrng: aborted")
+		os.Exit(exitAborted)
+	}()
 
 	switch {
 	case *showVer:
@@ -154,16 +169,18 @@ func validate(cfg config.Config, args []string, memScan int) error {
 }
 
 // Exit statuses: 0 done, 1 error, 2 bad usage (the flag package's own
-// convention), 3 -fail-on threshold met.
+// convention), 3 -fail-on threshold met, 130 aborted by a second interrupt
+// (the shell's 128+SIGINT).
 const (
 	exitError    = 1
 	exitUsage    = 2
 	exitFindings = 3
+	exitAborted  = 130
 )
 
 func usage() {
 	out := flag.CommandLine.Output()
-	fmt.Fprintf(out, `Live Response NG %s: live-response triage for Windows hosts
+	fmt.Fprintf(out, `Live Response NG %s: live-response triage for Windows and Linux hosts
 
 Usage: lrng [flags]
 
@@ -181,6 +198,8 @@ Usage: lrng [flags]
   lrng -list                           collectors available on this OS
 
 Exit status: 0 done, 1 error, 2 bad usage, 3 -fail-on threshold met.
+Ctrl+C or SIGTERM stops collection and still writes the report; a second one
+aborts at once (exit status 130).
 
 Flags:
 `, version)
@@ -652,7 +671,13 @@ func doMemScan(ctx context.Context, cfg config.Config, pid int) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, cfg.MemBudget+30*time.Second)
+	// -mem-budget 0 means the default, as it does for the memory collector;
+	// the deadline here must outlast whatever budget the sidecar applies.
+	budget := cfg.MemBudget
+	if budget <= 0 {
+		budget = config.Default().MemBudget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget+30*time.Second)
 	defer cancel()
 	prompts := !cfg.MemNoPrompts
 	var resp *sidecar.Response
@@ -661,7 +686,7 @@ func doMemScan(ctx context.Context, cfg config.Config, pid int) error {
 		PID:              pid,
 		RulesPath:        cfg.YaraRules,
 		Prompts:          &prompts,
-		BudgetMS:         cfg.MemBudget.Milliseconds(),
+		BudgetMS:         budget.Milliseconds(),
 		IncludeSensitive: cfg.MemIncludeLsass,
 	}, func(r *sidecar.Response) { resp = r })
 	if resp == nil {

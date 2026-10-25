@@ -38,3 +38,32 @@ func TestLinuxProcessKthreadMasquerade(t *testing.T) {
 		t.Error("a real (exe-less) kernel thread must not be flagged")
 	}
 }
+
+func TestLinuxProcessKthreadMasqueradeWithoutRoot(t *testing.T) {
+	// Unprivileged, another user's exe link can't be read, but the PF_KTHREAD
+	// flag is: a kworker-named task without it is a masquerade either way.
+	r := linuxProcRow{pid: 4242, st: procStatus{Name: "kworker/1:3"}, kernelKnown: true, fields: map[string]any{}}
+	if _, ok := rulesOf(linuxProcessFindings(r))["process.kthread_masquerade"]; !ok {
+		t.Error("a kworker-named userland task should be flagged even when its exe is unreadable")
+	}
+	// Without the flag (stat unreadable) and without an exe there is nothing to go on.
+	r.kernelKnown = false
+	if _, ok := rulesOf(linuxProcessFindings(r))["process.kthread_masquerade"]; ok {
+		t.Error("no flag and no exe: must not guess")
+	}
+}
+
+func TestLinuxProcessReplacedBinary(t *testing.T) {
+	r := linuxProcRow{pid: 900, st: procStatus{Name: "sshd"}, exe: "/usr/sbin/sshd (deleted)", replaced: true, fields: map[string]any{}}
+	got := rulesOf(linuxProcessFindings(r))
+	if _, ok := got["process.binary_replaced"]; !ok {
+		t.Fatalf("want process.binary_replaced, got %v", got)
+	}
+	if _, ok := got["process.deleted_binary"]; ok {
+		t.Fatalf("a binary replaced by an upgrade is not a self-deleting payload: %v", got)
+	}
+	r.replaced = false
+	if _, ok := rulesOf(linuxProcessFindings(r))["process.deleted_binary"]; !ok {
+		t.Error("a deleted binary with nothing in its place stays process.deleted_binary")
+	}
+}

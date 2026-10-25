@@ -1,5 +1,181 @@
 # Changelog
 
+## 0.10.6
+
+A pre-release correctness pass, mostly over the Linux side, found by running
+the agent live as root on a Linux host and reviewing every collector. The
+headline fixes: a patched-but-not-restarted server no longer floods the report
+with *suspect* findings, Linux hashes are taken from the binary the process
+actually runs, AI module A and the network heuristics see through a `#!`
+script's name, and event-log retention can no longer drop a log clear in
+favour of routine events. The first CI run on a real Windows host also found
+that no Windows 10+ prefetch body had ever been decoded. Schema stays at 1.2.
+
+### Fixed
+- **Prefetch bodies weren't decoded on Windows 10 and later.** The Xpress
+  Huffman decompressor misread two parts of the [MS-XCA] format. A match length
+  of 18 or more continues in raw bytes of the byte stream, but it read them
+  from the bit stream. And the reader keeps a 16-bit word of lookahead, which
+  decides where those bytes and the next 64 KiB block's table sit, but it
+  placed them at the next word boundary. Its tests used an encoder built on
+  the same misreading, so they passed. On real files (every Windows 10+ `.pf`
+  is compressed) decoding failed, and the collector listed prefetch files
+  without run counts, run times, referenced files or
+  `execution.prefetch_unusual_path`. The decompressor now follows the spec,
+  including matches that run past a block and the 32-bit length form. It is
+  checked against Windows' own codec: the Windows CI job decodes
+  `RtlCompressBuffer` output, and a new test decodes a directory of real `.pf`
+  files on any OS (`LRNG_PREFETCH_SAMPLES`). Six Windows 10 files, up to six
+  blocks each, decode to the run counts and file and volume counts that PECmd
+  reports for them.
+- **The sidecar failed clippy on current Rust.** Rust 1.98's clippy added
+  `chunks_exact_to_as_chunks`, which the UTF-16 scanner tripped, so CI's
+  `-D warnings` failed on any toolchain from 1.98 on. It iterates `as_chunks`
+  now.
+- **Upgraded binaries and libraries are no longer "self-deleting malware".**
+  After a package upgrade, every process still running the old copy maps it as
+  `… (deleted)`; each such process raised `modules.deleted_file` *and*
+  `modules.unusual_path` (and `process.deleted_binary` for an upgraded
+  executable), all *suspect*. When a new file sits at the same system path
+  (`/usr`, `/lib*`, `/bin`, `/sbin`, `/opt`, `/snap`, …, checked through
+  `/proc/<pid>/root` so containers are judged on their own filesystem) the
+  mapping is now `modules.replaced_on_disk` (*info*) and the executable
+  `process.binary_replaced` (*notable*, T1554 — a trojanized binary is
+  installed the same way, so it stays visible with a `dpkg -V` / `rpm -V`
+  hint). A file deleted with nothing in its place is still *suspect*, and a
+  deletion is no longer also counted as an unusual path. The memory scanner's
+  `memory.deleted_file_exec` gets the same split (`memory.replaced_file_exec`,
+  *info*).
+- **Linux image hashes come from the running binary.** Process images were
+  hashed by re-opening the path text `/proc/<pid>/exe` names, which lives in
+  the process's mount namespace: a container's process was hashed from the
+  host's file at that path (a different file, or none — reported as the
+  misleading `image_exists: false`), and deleted or memfd payloads weren't
+  hashed at all. Hashing now opens `/proc/<pid>/exe` itself, keyed by device
+  and inode so a shared binary is still read once — a self-deleted or fileless
+  payload now carries `image_sha256`, and so lands in the IOC export.
+- **The hash cache was case-insensitive on Linux**, so `/tmp/A` and `/tmp/a`
+  shared one hash. Paths are case-folded only on Windows now.
+- **AI module A was half-blind on Linux.** Its allowlist and script-host lists
+  held only Windows `.exe` names, so `firefox` or `code` calling an LLM API was
+  a *suspect* finding and `python3`/`bash`/`curl` were never escalated to
+  *critical*. And it judged the process by `comm`, which for a `#!` script is
+  the script's name (`beacon.py`, its interpreter unseen) and which any
+  process can set with `prctl` to an allowlisted name. It now judges by the
+  executable's file name (still `comm` when the exe can't be read), knows the
+  Linux executables of the allowed browsers and editors, treats versioned
+  interpreters (`python3.12`, `perl5.36.0`) as interpreters, and counts only a
+  high-risk location (not `~/.local`, where Linux desktop apps live) as an
+  unusual place for an allowlisted name.
+- **Linux network heuristics missed `#!` shells and misread servers.** A
+  reverse shell launched as `./update.sh` (comm `update.sh`, exe `bash`) raised
+  nothing; it's now `network.shell_outbound`. An interpreter *listening* (a
+  gunicorn or node app server) was a *suspect* `network.shell_listener`; it's
+  now `network.interpreter_listener` at *notable*. And every client connected
+  to a local server was judged as an outbound connection by the server process;
+  connections accepted on a listening port are now marked `direction: inbound`
+  and not judged as outbound.
+- **Event-log retention could drop the evidence.** Each log kept its most
+  recent 50,000 recorded events whether or not they carried a finding, so on a
+  busy server routine always-kept events (4672, task runs) could push a week-old
+  log clear or service install out; and once 100,000 were kept the remaining
+  logs — Defender, TerminalServices, Sysmon — weren't read at all. Records with
+  a finding now have their own budget and are never displaced, and every log is
+  still parsed (for findings, channel ranges and Sigma aggregations) after the
+  routine budget is spent. The 4672s of SYSTEM, LocalService, NetworkService,
+  the DWM/UMFD virtual accounts and computer accounts — the bulk of a server's
+  Security log — are no longer kept as routine records.
+- **A slow event-log parse lost everything.** Cancellation was only checked
+  between files, so a large log still parsing at the collector's 3-minute
+  deadline got the whole result abandoned. It is now checked between 64 KiB
+  chunks, and the partial result is returned with a `cancelled` error.
+- **Wrapped (circular) logs were read out of order.** Chunks were walked in
+  file order, which for a full log that has wrapped is not time order, so "the
+  most recent records" weren't. Chunks are now ordered by their first record
+  identifier; a corrupt chunk is skipped instead of ending the walk.
+- **Correlation could report a live service or task as removed** when the
+  `services` or `scheduledtasks` collector ran out of time part-way: anything
+  it hadn't reached became `correlate.*_absent`. A cancelled inventory now
+  leaves those installs unjudged (`meta.*_correlation.unverified`).
+- **Zombies were reported as kernel threads** (a zombie has no exe link, which
+  was the kernel-thread test). Kernel threads are now told by the `PF_KTHREAD`
+  flag in `/proc/<pid>/stat`, which also lets `process.kthread_masquerade` fire
+  without root (another user's exe link is unreadable unprivileged). The memory
+  collector skips zombies with their own reason.
+- **A host with IPv6 disabled was reported as "incomplete coverage"** (no
+  `/proc/net/tcp6`). A missing IPv6 table is now `meta.ipv6`, not an error.
+- **`/etc/ld.so.preload` was parsed wrong.** Words of a commented-out line were
+  raised as preloaded libraries, and `a.so:b.so` was one entry. It is now read
+  as glibc reads it: `#` comments to end of line, entries split on whitespace
+  and `:`.
+- **memfd mappings raised two findings with a wrong message** ("deleted from
+  disk" plus "unusual path"). They are now one `modules.memfd_exec`.
+- **Module B's endpoint list had drifted from module A's** (no
+  `*.models.ai.azure.com`). Fixed, and a Go test now reads the Rust pattern and
+  fails if it misses any host or pattern module A knows.
+- **`intelgen -out` truncated the dataset before reading its inputs**, so a
+  failed refresh (a missing download) left `endpoints.tsv` empty — and the next
+  build silently embedded an empty dataset. It now writes a temporary file and
+  renames it into place only on success.
+- **`-mem-scan` with `-mem-budget 0`** gave the sidecar its 60-second default
+  but killed it after 30 seconds. A zero budget now means the default
+  everywhere.
+- The Linux path heuristics matched `/root` as a bare prefix, so `/rootfs/…`
+  was treated as root's home. It is matched by whole component now.
+
+### Changed
+- **The event log streams.** Logs are read 64 KiB at a time (peak heap for a
+  256 MiB log fell from 258 MiB to 4 MiB in testing, and parsing got faster),
+  so the 512 MiB per-log cap is gone: a larger Security log is read rather than
+  skipped. The live collector reads each log newest first, so if its budget runs
+  out on a huge log, what it has is the latest activity. Kept records are still
+  reported oldest first.
+- **SIGTERM is handled like Ctrl+C** — what `timeout`, systemd and `kill` send
+  on Linux now stops collection and still writes the report — and a second
+  signal aborts immediately (exit status 130) instead of being swallowed.
+- **The IOC export covers Linux.** Absolute POSIX paths are file indicators
+  (case-sensitive; a ` (deleted)` marker is dropped, a memfd skipped), and
+  `library`, `suspicious_modules` and `deleted_modules` are path fields — the
+  last two also on Windows, where flagged DLL paths were never exported.
+  Records whose only findings are *info* annotations no longer contribute.
+- **Linux persistence coverage**: systemd drop-ins (`<unit>.d/*.conf`, which
+  can override a legitimate unit's `ExecStart`), units in the vendor
+  directories (`/usr/lib/systemd/system`, recorded only when one trips a
+  heuristic, so an implant hiding among packaged units is caught without
+  listing hundreds), system-wide user units, masked units; RHEL's
+  `/etc/bashrc` and the zsh startup files (`zshenv` runs for every zsh, scripts
+  included) and `~/.bash_login`/`.bash_logout`/`.zshenv`/`.zlogin`; and the
+  homes of service accounts with an interactive shell (where a backdoor in
+  `www-data`'s `~/.bashrc` would sit). Each persistence record names its
+  `program`, and a flagged one's program (and every preloaded library) is
+  hashed.
+- **CI failures can be read from the pull request.** Test and lint steps pipe
+  their output through `.github/scripts/ci-annotate.py`. It turns each failing
+  Go test, rustc or clippy diagnostic, or PowerShell error into an annotation
+  with its file and line, so a failure on the Windows runner no longer means
+  digging through the raw log. Each Go test step also posts its pass and skip
+  counts with every skip's reason: the test that decodes the runner's own
+  prefetch files skips on Server SKUs, and that silence is how the prefetch
+  bug stayed hidden. Actions moved to their Node 24 releases, and
+  setup-go's module cache is off: it never restored for a stdlib-only module,
+  and warned on every run.
+- Report output is buffered (JSONL was one write per event — slow on USB media
+  and network shares).
+- Hashing reuses its 1 MiB read buffers.
+- Linux host info reads `/usr/lib/os-release` when `/etc/os-release` is absent,
+  and single-quoted values.
+
+### Added
+- Rule ids `process.binary_replaced`, `modules.replaced_on_disk`,
+  `modules.memfd_exec`, `network.interpreter_listener`,
+  `memory.replaced_file_exec`; record fields `image_replaced` (processes),
+  `memfd_modules`/`replaced_modules` (modules), `direction` (network),
+  `program`/`program_sha256`/`library_sha256`/`vendor`/`masked`/`file`
+  (autoruns); meta `ipv6`, `processes_with_replaced_libraries`,
+  `records_with_findings`, `records_dropped`.
+- README: a Linux row set in the detections table, and a note that the bundled
+  intel dataset has no anonymizer entries (how to add them).
+
 ## 0.10.5
 
 Makes the Linux demo's "inert" cron lines inert on every host, not just the

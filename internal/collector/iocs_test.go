@@ -365,3 +365,62 @@ func keysOf(m map[string]Record) []string {
 	}
 	return out
 }
+
+func TestExtractIOCs_LinuxPaths(t *testing.T) {
+	results := []Result{
+		{Collector: "processes", Records: []Record{
+			{Fields: map[string]any{"image_path": "/tmp/.x/Payload (deleted)"},
+				Findings: []Finding{finding("process.deleted_binary", SevSuspect)}},
+			{Fields: map[string]any{"image_path": "/tmp/.x/payload"},
+				Findings: []Finding{finding("process.unusual_exec_path", SevSuspect)}},
+			{Fields: map[string]any{"image_path": "/memfd:stage2 (deleted)"},
+				Findings: []Finding{finding("process.memfd_exec", SevSuspect)}},
+		}},
+		{Collector: "modules", Records: []Record{
+			{Fields: map[string]any{"suspicious_modules": []string{"/dev/shm/.l/hook.so"}},
+				Findings: []Finding{finding("modules.unusual_path", SevSuspect)}},
+		}},
+		{Collector: "autoruns", Records: []Record{
+			{Fields: map[string]any{"library": "/usr/local/lib/libpreload.so", "program": "/var/tmp/.u/updater"},
+				Findings: []Finding{finding("persistence.ld_preload", SevSuspect)}},
+		}},
+	}
+	got := iocByValue(ExtractIOCs(results))
+	for _, want := range []string{
+		"filepath|/tmp/.x/Payload", // the deleted marker dropped: this is where it ran from
+		"filepath|/tmp/.x/payload", // POSIX paths are case-sensitive: a different file
+		"filepath|/dev/shm/.l/hook.so",
+		"filepath|/usr/local/lib/libpreload.so",
+		"filepath|/var/tmp/.u/updater",
+	} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("missing %s; have %v", want, keysOfRecords(got))
+		}
+	}
+	for k := range got {
+		if k == "filepath|/memfd:stage2" || k == "filepath|/memfd:stage2 (deleted)" {
+			t.Errorf("a memfd is not an on-disk location: %s", k)
+		}
+	}
+}
+
+func TestExtractIOCs_InfoOnlyRecordsAreNotIndicators(t *testing.T) {
+	results := []Result{{
+		Collector: "modules",
+		Records: []Record{{
+			Fields:   map[string]any{"image_path": "/usr/sbin/sshd", "remote_addr": "203.0.113.77"},
+			Findings: []Finding{finding("modules.replaced_on_disk", SevInfo)},
+		}},
+	}}
+	if res := ExtractIOCs(results); len(res.Records) != 0 {
+		t.Fatalf("an info-only record must not feed the blocklist, got %d indicator(s)", len(res.Records))
+	}
+}
+
+func keysOfRecords(m map[string]Record) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

@@ -167,7 +167,7 @@ func addSessionTimes(fields map[string]any, sessionID uint32) {
 	}
 	b := unsafe.Slice((*byte)(p), wtsInfoSize)
 	ft := func(off int) time.Time { return winreg.FiletimeToTime(binary.LittleEndian.Uint64(b[off:])) }
-	if now := ft(wtsInfoCurrentOff); now.IsZero() || now.Sub(time.Now()).Abs() > 48*time.Hour {
+	if now := ft(wtsInfoCurrentOff); now.IsZero() || time.Until(now).Abs() > 48*time.Hour {
 		return // layout not as expected: report nothing rather than nonsense
 	}
 	for name, off := range map[string]int{

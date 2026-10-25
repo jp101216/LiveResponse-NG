@@ -7,7 +7,8 @@ import "time"
 
 // Config is the resolved settings for one triage run.
 type Config struct {
-	// Collectors to run by name. Empty means "all collectors for this OS".
+	// Collectors to run by name. Empty means the default set: every collector
+	// available on this OS except the opt-in ones (memory, dnscache).
 	Collectors []string
 	// Workers bounds concurrent collectors.
 	Workers int

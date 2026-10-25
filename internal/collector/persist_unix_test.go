@@ -67,3 +67,34 @@ func TestFirstProgram(t *testing.T) {
 		t.Errorf("firstProgram with wrapper/env = %q", got)
 	}
 }
+
+func TestParseLdPreload(t *testing.T) {
+	data := []byte("# disabled for now: /lib/evil.so\n/usr/lib/libgood.so\n/opt/a.so:/opt/b.so  # trailing note\n\t/opt/c.so\n")
+	got := parseLdPreload(data)
+	want := []string{"/usr/lib/libgood.so", "/opt/a.so", "/opt/b.so", "/opt/c.so"}
+	if len(got) != len(want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	}
+	if got := parseLdPreload([]byte("# only a comment\n\n")); len(got) != 0 {
+		t.Fatalf("a comment-only file names no libraries, got %q", got)
+	}
+}
+
+func TestFirstProgramQuoted(t *testing.T) {
+	cases := map[string]string{
+		`"/opt/my app/run" --flag`:   `/opt/my`, // a quoted path with a space still yields its first word
+		`'/tmp/.x/payload' -d`:       "/tmp/.x/payload",
+		`env FOO=1 /usr/bin/python3`: "/usr/bin/python3",
+		`"" /bin/true`:               "/bin/true",
+	}
+	for in, want := range cases {
+		if got := firstProgram(in); got != want {
+			t.Errorf("firstProgram(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

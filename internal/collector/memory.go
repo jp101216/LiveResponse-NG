@@ -52,6 +52,7 @@ type procInfo struct {
 	Name   string
 	Path   string
 	Kernel bool // no user-mode memory to scan (Windows Idle/System, Linux kernel threads)
+	Zombie bool // exited but not yet reaped (Linux): no memory left to scan
 }
 
 type memSkip struct {
@@ -183,6 +184,8 @@ func selectMemoryTargets(procs []procInfo, want []int, self int, exclude []strin
 			skipped = append(skipped, memSkip{p, "lrng itself"})
 		case p.Kernel:
 			skipped = append(skipped, memSkip{p, "kernel process: no user-mode memory"})
+		case p.Zombie:
+			skipped = append(skipped, memSkip{p, "zombie process: it has exited and holds no memory"})
 		case samePath(p.Path, exclude):
 			skipped = append(skipped, memSkip{p, "lrng component"})
 		default:

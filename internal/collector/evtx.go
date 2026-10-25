@@ -1,9 +1,12 @@
 package collector
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -280,26 +283,97 @@ func parseEvtx(data []byte, maxRecords int) (recs []evtxRecord, warnings []strin
 	return recs, warnings, err
 }
 
-// parseEvtxStream walks every record in an .evtx image, calling emit for each
-// one; emit returns false to stop. Per-record/chunk problems are collected as
-// warnings (capped); a fatal error is returned only for a bad file header.
+// parseEvtxStream walks every record in an in-memory .evtx image, oldest first,
+// calling emit for each one; emit returns false to stop. Per-record/chunk
+// problems are collected as warnings (capped); a fatal error is returned only
+// for a bad file header.
 func parseEvtxStream(data []byte, emit func(evtxRecord) bool) (warnings []string, err error) {
-	if len(data) < 8 || string(data[:8]) != evtxFileMagic {
-		return nil, errors.New("evtx: missing ElfFile signature")
+	warnings, _, err = parseEvtxReader(bytes.NewReader(data), int64(len(data)), false, nil, emit)
+	return warnings, err
+}
+
+// evtxChunkFirstIDAt is the chunk-relative offset of the chunk's first event
+// record identifier. Identifiers only grow, so they put chunks in time order.
+const evtxChunkFirstIDAt = 24
+
+// parseEvtxReader walks the records of the .evtx file in r (size bytes) one
+// 64 KiB chunk at a time, so a log of any size is parsed in constant memory.
+//
+// A full log is circular: once it wraps, the newest chunks overwrite the oldest
+// at the start of the file, so file order is not time order. Chunks are visited
+// in the order of their first record identifier instead — oldest first, or
+// newestFirst (records reversed within each chunk too), which is what the live
+// collector wants: if its time budget runs out mid-log, what it has is the
+// latest activity. stop is polled before each chunk (nil = never) and reports
+// cancellation; stopped says the walk ended early because of it. A chunk whose
+// signature is wrong (a corrupt or never-written slot) is skipped rather than
+// ending the walk.
+func parseEvtxReader(r io.ReaderAt, size int64, newestFirst bool, stop func() bool,
+	emit func(evtxRecord) bool) (warnings []string, stopped bool, err error) {
+	var magic [8]byte
+	if size < int64(len(magic)) {
+		return nil, false, errors.New("evtx: missing ElfFile signature")
 	}
-	for base := evtxHeaderLen; base+evtxChunkHdrLen <= len(data); base += evtxChunkLen {
-		if string(data[base:base+8]) != evtxChunkMagic {
-			break // padding or the end of the written chunks
-		}
-		end := base + evtxChunkLen
-		if end > len(data) {
-			end = len(data) // a dirty/truncated final chunk
-		}
-		if stop := parseChunkRecords(data[base:end], &warnings, emit); stop {
+	if _, err := r.ReadAt(magic[:], 0); err != nil || string(magic[:]) != evtxFileMagic {
+		return nil, false, errors.New("evtx: missing ElfFile signature")
+	}
+
+	type slot struct {
+		base    int64
+		firstID uint64
+	}
+	var slots []slot
+	var hdr [evtxChunkFirstIDAt + 8]byte
+	for base := int64(evtxHeaderLen); base+evtxChunkHdrLen <= size; base += evtxChunkLen {
+		if _, err := r.ReadAt(hdr[:], base); err != nil {
 			break
 		}
+		if string(hdr[:8]) != evtxChunkMagic {
+			continue // an unwritten slot, or a corrupt chunk
+		}
+		slots = append(slots, slot{base: base, firstID: le.Uint64(hdr[evtxChunkFirstIDAt:])})
 	}
-	return warnings, nil
+	sort.SliceStable(slots, func(i, j int) bool {
+		if newestFirst {
+			return slots[i].firstID > slots[j].firstID
+		}
+		return slots[i].firstID < slots[j].firstID
+	})
+
+	buf := make([]byte, evtxChunkLen)
+	var batch []evtxRecord // one chunk's records, when they're emitted newest first
+	for _, s := range slots {
+		if stop != nil && stop() {
+			return warnings, true, nil
+		}
+		n := evtxChunkLen
+		if rem := size - s.base; rem < int64(n) {
+			n = int(rem) // a dirty/truncated final chunk
+		}
+		got, rerr := r.ReadAt(buf[:n], s.base)
+		if got < evtxChunkHdrLen {
+			warn(&warnings, fmt.Sprintf("evtx: chunk at offset %d: read %d bytes: %v", s.base, got, rerr))
+			continue
+		}
+		chunk := buf[:got]
+		if !newestFirst {
+			if parseChunkRecords(chunk, &warnings, emit) {
+				break
+			}
+			continue
+		}
+		batch = batch[:0]
+		parseChunkRecords(chunk, &warnings, func(rec evtxRecord) bool {
+			batch = append(batch, rec)
+			return true
+		})
+		for i := len(batch) - 1; i >= 0; i-- {
+			if !emit(batch[i]) {
+				return warnings, false, nil
+			}
+		}
+	}
+	return warnings, false, nil
 }
 
 // warn appends a bounded warning.

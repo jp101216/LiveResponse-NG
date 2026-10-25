@@ -6,6 +6,7 @@
 package output
 
 import (
+	"bufio"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -157,21 +158,29 @@ func NewRunID() string {
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
-// Write serialises the report to w in the given format ("" means JSON).
+// Write serialises the report to w in the given format ("" means JSON). Output
+// goes through a 1 MiB buffer: JSONL is one small write per event, and on USB
+// media or a network share each write is a round trip.
 func Write(w io.Writer, rep Report, format string, pretty bool) error {
+	bw := bufio.NewWriterSize(w, 1<<20)
+	var err error
 	switch format {
 	case "", FormatJSON:
-		enc := json.NewEncoder(w)
+		enc := json.NewEncoder(bw)
 		enc.SetEscapeHTML(false)
 		if pretty {
 			enc.SetIndent("", "  ")
 		}
-		return enc.Encode(rep)
+		err = enc.Encode(rep)
 	case FormatJSONL:
-		return writeJSONL(w, rep)
+		err = writeJSONL(bw, rep)
 	default:
 		return fmt.Errorf("unknown output format %q (want json or jsonl)", format)
 	}
+	if err != nil {
+		return err
+	}
+	return bw.Flush()
 }
 
 // writeJSONL emits one event per line: a "run" event (envelope and summary),

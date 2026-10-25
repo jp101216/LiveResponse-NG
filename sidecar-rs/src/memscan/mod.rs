@@ -212,9 +212,58 @@ fn pe_header(b: &[u8]) -> Option<&'static str> {
     })
 }
 
+/// Package locations whose files upgrades replace in place (the new version is
+/// renamed over the old, so a process still running the old one maps a
+/// "deleted" file).
+const SYSTEM_PREFIXES: &[&str] = &[
+    "/usr",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/bin",
+    "/sbin",
+    "/opt",
+    "/snap",
+    "/nix/store",
+    "/var/lib/flatpak",
+    "/var/lib/snapd",
+];
+
+fn under_system_prefix(p: &str) -> bool {
+    SYSTEM_PREFIXES.iter().any(|pre| {
+        p == *pre
+            || p.strip_prefix(pre)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// Whether a regular file exists at `path` as process `pid` sees it (through
+/// /proc/<pid>/root, so a container's own filesystem is the one consulted).
+#[cfg(target_os = "linux")]
+fn exists_in_process_root(pid: u32, path: &str) -> bool {
+    std::fs::metadata(format!("/proc/{pid}/root{path}"))
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exists_in_process_root(_pid: u32, _path: &str) -> bool {
+    false
+}
+
 /// Memory-structure heuristics for one region, judged from its metadata and
 /// the first bytes read from it. No bytes are copied into the hit.
+#[cfg(test)]
 fn region_heuristic(r: &Region, first: &[u8]) -> Option<Hit> {
+    region_heuristic_with(r, first, &|_| false)
+}
+
+/// region_heuristic with `exists` saying whether a file is now at a path (in
+/// the scanned process's view): a deleted mapping from a system location that
+/// has a new file in its place is a package upgrade pending a restart, not a
+/// self-deleting payload, and is reported at info level.
+fn region_heuristic_with(r: &Region, first: &[u8], exists: &dyn Fn(&str) -> bool) -> Option<Hit> {
     if !is_exec(r) {
         return None;
     }
@@ -250,16 +299,26 @@ fn region_heuristic(r: &Region, first: &[u8]) -> Option<Hit> {
                 r.file
             ),
         )
-    } else if r.file.ends_with(" (deleted)") {
-        (
-            "memory.deleted_file_exec",
-            "notable",
-            "T1070.004",
-            45,
-            format!("executable mapping of a deleted file ({})", r.file),
-        )
     } else {
-        return None;
+        // Anything else worth a hit is a mapping of a deleted file.
+        let orig = r.file.strip_suffix(" (deleted)")?;
+        if under_system_prefix(orig) && exists(orig) {
+            (
+                "memory.replaced_file_exec",
+                "info",
+                "T1554",
+                20,
+                format!("executable mapping of a file since replaced on disk ({}): usually a package upgrade the process hasn't been restarted after; verify with the package manager", r.file),
+            )
+        } else {
+            (
+                "memory.deleted_file_exec",
+                "notable",
+                "T1070.004",
+                45,
+                format!("executable mapping of a deleted file ({})", r.file),
+            )
+        }
     };
     Some(Hit {
         rule: rule.to_string(),
@@ -358,7 +417,9 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
             let block = &buf[..carry + n];
 
             if off == 0 {
-                if let Some(h) = region_heuristic(r, block) {
+                if let Some(h) =
+                    region_heuristic_with(r, block, &|p| exists_in_process_root(pid32, p))
+                {
                     if heuristic_hits.len() < MAX_HEURISTIC_HITS {
                         heuristic_hits.push(h);
                     } else {

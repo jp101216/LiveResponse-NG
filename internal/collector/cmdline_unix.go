@@ -124,9 +124,12 @@ func pipesToShell(lc string) bool {
 }
 
 // pipelineProgram returns the base name of the program a pipeline stage runs,
-// skipping wrappers, environment assignments and flags.
+// skipping wrappers, environment assignments and flags. Shell quoting and
+// grouping around the word are dropped, so the "sh'" in `sh -c 'curl x | sh'`,
+// the "sh)" in `$(curl x | sh)` and the "sh;" in `{ curl x | sh; }` read as sh.
 func pipelineProgram(seg string) string {
 	for _, f := range strings.Fields(strings.TrimSpace(seg)) {
+		f = strings.Trim(f, "'\"`(){};")
 		switch {
 		case f == "":
 			continue

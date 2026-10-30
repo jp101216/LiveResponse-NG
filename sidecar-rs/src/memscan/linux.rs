@@ -350,7 +350,9 @@ mod tests {
         // overwrite and a 1-byte patch), and restored to read+exec.
         unsafe {
             assert_eq!(mprotect(p, LEN, PROT_READ | PROT_WRITE), 0);
-            std::ptr::write_bytes((p as *mut u8).add(4096), 0xCC, 1024);
+            for b in std::slice::from_raw_parts_mut((p as *mut u8).add(4096), 1024) {
+                *b = !*b; // inverted: every byte differs
+            }
             *(p as *mut u8).add(8192 + 100) ^= 0xFF;
             assert_eq!(mprotect(p, LEN, PROT_READ | PROT_EXEC), 0);
         }

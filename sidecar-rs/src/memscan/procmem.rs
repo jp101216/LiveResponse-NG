@@ -1,5 +1,8 @@
 //! Platform-neutral view of another process's memory.
 
+use super::integrity::Report;
+use std::time::Instant;
+
 /// One committed, readable memory region.
 #[derive(Clone, Debug)]
 pub struct Region {
@@ -61,6 +64,11 @@ pub trait ProcessMemory {
     /// Backing file of the region holding `addr` (image/mapped), or "".
     fn mapped_file(&self, _addr: usize) -> String {
         String::new()
+    }
+    /// Compare the code mapped from image files with those files (see
+    /// integrity.rs), stopping at `deadline` or after `max_bytes` compared.
+    fn image_integrity(&self, _deadline: Instant, _max_bytes: u64) -> Report {
+        Report::unsupported()
     }
 }
 

@@ -8,9 +8,14 @@
 //! it can be type-checked without a Windows toolchain (`make check-windows-rs`).
 #![cfg_attr(not(windows), allow(dead_code))]
 
+use super::integrity::{Report, Unavailable};
+use super::pe;
 use super::procmem::{OpenError, ProcessMemory, Region};
 use core::ffi::c_void;
+use std::collections::BTreeSet;
+use std::io::{ErrorKind, Read};
 use std::sync::OnceLock;
+use std::time::Instant;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, HANDLE,
 };
@@ -30,6 +35,10 @@ use windows_sys::Win32::System::Threading::{
 const PAGE: usize = 4096;
 /// Sanity cap on the region walk (a normal process has a few thousand).
 const MAX_REGIONS: usize = 1_000_000;
+/// Bytes read from the start of each mapped image for its headers.
+const HEADER_READ: usize = 0x10000;
+/// Image files larger than this aren't read back for the integrity check.
+const MAX_IMAGE_FILE: u64 = 512 << 20;
 
 pub struct WinProcess {
     h: HANDLE,
@@ -173,6 +182,105 @@ impl ProcessMemory for WinProcess {
             &buf[..(n as usize).min(buf.len())],
         ))
     }
+
+    fn image_integrity(&self, deadline: Instant, max_bytes: u64) -> Report {
+        let mut rep = Report {
+            supported: true,
+            ..Default::default()
+        };
+        for base in self.image_bases() {
+            if Instant::now() >= deadline {
+                rep.stopped = Some("time budget exhausted".into());
+                break;
+            }
+            if rep.bytes >= max_bytes {
+                rep.stopped = Some("byte cap reached".into());
+                break;
+            }
+            let path = self.mapped_file(base);
+            if path.is_empty() {
+                rep.skip("image path unknown");
+                continue;
+            }
+            let file = match read_image_file(&path) {
+                Ok(f) => f,
+                Err(e) if e.kind() == ErrorKind::NotFound => {
+                    rep.unavailable.push(Unavailable {
+                        path,
+                        base,
+                        why: "file not found".into(),
+                    });
+                    continue;
+                }
+                Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                    rep.skip("image file access denied");
+                    continue;
+                }
+                Err(_) => {
+                    rep.skip("image file unreadable");
+                    continue;
+                }
+            };
+            let mut header = vec![0u8; HEADER_READ];
+            let n = self.read(base, &mut header);
+            header.truncate(n);
+            rep.images += 1;
+            let mut read = |addr: usize, buf: &mut [u8]| self.read(addr, buf);
+            let c = pe::check_image(&path, &file, &header, base, &mut read);
+            rep.compared += c.compared;
+            rep.bytes += c.bytes;
+            for why in c.skipped {
+                rep.skip(why);
+            }
+            rep.changes.extend(c.changes);
+            rep.headers.extend(c.header);
+        }
+        rep
+    }
+}
+
+impl WinProcess {
+    /// Allocation bases of the process's committed image mappings
+    /// (MEM_IMAGE), one per loaded module, in address order.
+    fn image_bases(&self) -> Vec<usize> {
+        let mut out = BTreeSet::new();
+        let mut addr: usize = 0;
+        let len = core::mem::size_of::<MEMORY_BASIC_INFORMATION>();
+        for _ in 0..MAX_REGIONS {
+            // SAFETY: mbi is a plain-data struct VirtualQueryEx fills in.
+            let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+            let n = unsafe { VirtualQueryEx(self.h, addr as *const c_void, &mut mbi, len) };
+            if n == 0 {
+                break;
+            }
+            if mbi.State == MEM_COMMIT && mbi.Type == MEM_IMAGE {
+                out.insert(mbi.AllocationBase as usize);
+            }
+            match (mbi.BaseAddress as usize).checked_add(mbi.RegionSize) {
+                Some(next) if next > addr => addr = next,
+                _ => break,
+            }
+        }
+        out.into_iter().collect()
+    }
+}
+
+/// Read an image file back from disk. A path GetMappedFileName couldn't turn
+/// into a drive-letter path (\Device\...) is opened through GLOBALROOT.
+fn read_image_file(path: &str) -> std::io::Result<Vec<u8>> {
+    let open = if path.starts_with(r"\Device\") {
+        format!(r"\\?\GLOBALROOT{path}")
+    } else {
+        path.to_string()
+    };
+    let mut f = std::fs::File::open(open)?;
+    let size = f.metadata()?.len();
+    if size > MAX_IMAGE_FILE {
+        return Err(std::io::Error::other("image file too large to compare"));
+    }
+    let mut data = Vec::with_capacity(size as usize);
+    f.read_to_end(&mut data)?;
+    Ok(data)
 }
 
 /// NT device names (\Device\HarddiskVolume3) and the drive letters (C:) they
@@ -249,5 +357,114 @@ fn kind_name(t: u32) -> &'static str {
         MEM_MAPPED => "mapped",
         MEM_PRIVATE => "private",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memscan::integrity::Verdict;
+    use crate::memscan::procmem::file_name_lower;
+    use std::time::Duration;
+    use windows_sys::Win32::Foundation::FreeLibrary;
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+    use windows_sys::Win32::System::Memory::VirtualProtect;
+
+    /// End to end on this process, against the real Windows loader: every
+    /// module this process has loaded must compare clean (a false-positive
+    /// check on the system's own DLLs); then a renamed copy of version.dll is
+    /// loaded, 4 KiB of its code is overwritten in this process's private
+    /// copy, and the check must find exactly that rewrite.
+    #[test]
+    fn integrity_finds_a_rewritten_image() {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let dst = std::env::temp_dir().join(format!("lrng-integrity-{}.dll", std::process::id()));
+        std::fs::copy(format!(r"{root}\System32\version.dll"), &dst).unwrap();
+        let wide: Vec<u16> = dst
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: wide is NUL-terminated; the module is freed below.
+        let module = unsafe { LoadLibraryW(wide.as_ptr()) };
+        assert!(!module.is_null(), "LoadLibraryW failed");
+        let base = module as usize;
+        let me = open(std::process::id()).unwrap();
+        let deadline = || Instant::now() + Duration::from_secs(120);
+
+        let clean = me.image_integrity(deadline(), 1 << 32);
+        eprintln!("clean run: {}", clean.meta());
+        for c in &clean.changes {
+            eprintln!(
+                "  patched: {} ({} site(s), near {:?})",
+                c.path, c.stats.sites, c.near
+            );
+        }
+        assert!(
+            clean.images > 1 && clean.bytes > 0,
+            "nothing compared: {}",
+            clean.meta()
+        );
+        assert!(
+            clean.headers.is_empty(),
+            "header mismatch on a clean process: {:?}",
+            clean.headers
+        );
+        assert!(
+            clean.unavailable.is_empty(),
+            "unreadable images: {:?}",
+            clean.unavailable
+        );
+        let rewrites: Vec<_> = clean
+            .changes
+            .iter()
+            .filter(|c| c.stats.verdict() == Verdict::Rewritten)
+            .collect();
+        assert!(
+            rewrites.is_empty(),
+            "rewritten code in a clean process: {rewrites:?}"
+        );
+
+        let file = std::fs::read(&dst).unwrap();
+        let disk = pe::parse(&file).unwrap();
+        let text = disk
+            .sections
+            .iter()
+            .find(|s| s.exec() && s.file_len() >= 0x1400)
+            .expect("a code section of at least 5 KiB");
+        let at = base + text.va as usize + 0x400;
+        // SAFETY: the pages belong to the module loaded above; they are made
+        // writable (copy-on-write), filled, and given their old protection back.
+        unsafe {
+            let mut old = 0u32;
+            assert_ne!(
+                VirtualProtect(at as *const c_void, 4096, PAGE_READWRITE, &mut old),
+                0
+            );
+            std::ptr::write_bytes(at as *mut u8, 0xCC, 4096);
+            assert_ne!(VirtualProtect(at as *const c_void, 4096, old, &mut old), 0);
+        }
+        let after = me.image_integrity(deadline(), 1 << 32);
+        // SAFETY: loaded above and not used after this.
+        unsafe {
+            FreeLibrary(module);
+        }
+        let _ = std::fs::remove_file(&dst);
+
+        let name = file_name_lower(&dst.to_string_lossy());
+        let ours: Vec<_> = after
+            .changes
+            .iter()
+            .filter(|c| file_name_lower(&c.path) == name)
+            .collect();
+        assert_eq!(ours.len(), 1, "{:?}", after.changes);
+        let s = &ours[0].stats;
+        assert_eq!(s.verdict(), Verdict::Rewritten);
+        assert_eq!(
+            ours[0].start + s.largest_at,
+            at,
+            "rewrite found at the wrong address"
+        );
+        assert!(s.largest > 4096 - 32, "largest change {}", s.largest);
     }
 }

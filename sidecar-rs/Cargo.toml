@@ -37,6 +37,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
 ] }
 
+# The Windows image-integrity self-test loads a module of its own to rewrite.
+[target.'cfg(any(windows, lrng_typecheck_windows))'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader"] }
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(lrng_typecheck_windows)'] }
 

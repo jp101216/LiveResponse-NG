@@ -236,6 +236,9 @@ var memoryRecordKeys = []string{
 	"read_failures", "elapsed_ms", "stopped_early", "hits_truncated",
 	"prompt_verdict", "prompt_score",
 	"unbacked_exec_regions", "unbacked_rwx_regions", "memory_heuristic_hits", "memory_heuristics_truncated",
+	// The image-integrity pass: images and code compared, rewrites, patches,
+	// header mismatches, unreadable backing files, and why anything was skipped.
+	"image_integrity",
 }
 
 // memoryRecords turns sidecar responses into one record per process (every

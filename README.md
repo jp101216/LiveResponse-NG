@@ -210,7 +210,12 @@ user-writable or temporary path, a scriptlet (`scrobj.dll`) or script-host /
 LOLBin server, and `TreatAs` remaps. Detection is behavioural, not a list of
 "known abused" CLSIDs. A host has tens of thousands of legitimate CLSIDs, so
 only registrations that trip a heuristic are recorded; the totals scanned are
-in the result metadata.
+in the result metadata. The same walk also covers the **TypeLib** class stores
+(`…\Classes\TypeLib`, native and WOW64, machine and per-user): a COM object
+loads its registered type library when it is instantiated, so a registration
+that names a script moniker instead of a `.tlb`/`.dll`, sits in a user-writable
+path, or (per-user) shadows a machine entry is flagged the same way
+(`persistence.typelib_*`, also T1546.015).
 
 **`wmi`** — WMI permanent event subscriptions in `root\subscription` (and the
 legacy `root\default`): the `__EventFilter` trigger queries, the
@@ -221,6 +226,10 @@ repository over COM through a hand-rolled, dependency-free client (nothing is
 shelled out to `wmic` or PowerShell). A clean install carries essentially none,
 so every object is surfaced; the fileless script consumers and the active
 bindings rank highest, while the stock `SCM Event Log Consumer` is left quiet.
+It also enumerates the `__TimerInstruction` objects (interval and absolute) and
+calls out an `__EventFilter` that triggers on a `__TimerEvent`
+(`persistence.wmi_timer`, `persistence.wmi_timer_filter`): a timer makes a
+subscription fire on a schedule, with no system-event trigger at all.
 
 **`eventlog`** — the DFIR-relevant Windows event logs, parsed from `winevt\Logs`
 with a dependency-free, read-only EVTX/binary-XML reader (no `wevtutil` or
@@ -276,14 +285,14 @@ against both malicious and ordinary examples.
 | **Process tree** | `process.masquerade_path` (a system binary name outside its Windows directory), `process.unexpected_parent` (e.g. `lsass.exe` not started by `wininit.exe`), `process.document_app_child` (Office → shell), `process.server_app_child` (w3wp → shell: web shell), `process.wmi_child`, `process.service_shell`, `process.name_typosquat` (`scvhost`, `Isass`), `process.unusual_path` |
 | **Autostarts** | `persistence.autorun_unusual_path`, `persistence.startup_folder_program`, `persistence.policies_run`, `persistence.windows_load`, `persistence.winlogon_hijack`, `persistence.winlogon_extra`, `persistence.ifeo_debugger`, `persistence.silent_process_exit`, `persistence.appinit_dlls`, `persistence.appcert_dlls`, `persistence.lsa_authentication_package`, `persistence.lsa_security_package`, `persistence.password_filter`, `persistence.boot_execute`, `persistence.cmd_autorun`, `persistence.print_monitor`, `persistence.netsh_helper`, `persistence.screensaver` |
 | **Services & scheduled tasks** | `persistence.service_unusual_path`, `persistence.service_script_host`, `persistence.service_unquoted_path`, `persistence.service_failure_command`, `lateral.service_in_windows_dir` (PsExec/Impacket), `persistence.scheduled_task_unusual_path`, `persistence.scheduled_task_hidden` (Tarrask), `persistence.scheduled_task_no_file`, `persistence.scheduled_task_unregistered` |
-| **COM & WMI persistence** | `persistence.com_hijack_user_shadow` (a per-user CLSID overriding a machine one), `persistence.com_server_unusual_path`, `persistence.com_script_server` (`scrobj.dll` / script-host server), `persistence.com_treatas_redirect`; `persistence.wmi_script_consumer` (fileless `ActiveScriptEventConsumer`), `persistence.wmi_commandline_consumer`, `persistence.wmi_consumer_unusual_path`, `persistence.wmi_consumer`, `persistence.wmi_filter`, `persistence.wmi_subscription_active` (a binding — the persistence is live) |
+| **COM & WMI persistence** | `persistence.com_hijack_user_shadow` (a per-user CLSID overriding a machine one), `persistence.com_server_unusual_path`, `persistence.com_script_server` (`scrobj.dll` / script-host server), `persistence.com_treatas_redirect`; `persistence.wmi_script_consumer` (fileless `ActiveScriptEventConsumer`), `persistence.wmi_commandline_consumer`, `persistence.wmi_consumer_unusual_path`, `persistence.wmi_consumer`, `persistence.wmi_filter`, `persistence.wmi_subscription_active` (a binding — the persistence is live), `persistence.wmi_timer` (an `__IntervalTimerInstruction`/`__AbsoluteTimerInstruction`), `persistence.wmi_timer_filter` (a `__TimerEvent` filter — a schedule-based trigger); TypeLib hijacking: `persistence.typelib_script_moniker`, `persistence.typelib_unusual_path`, `persistence.typelib_user_shadow` |
 | **Accounts & sessions** | `accounts.dollar_suffix_user`, `accounts.hidden_from_logon_screen`, `accounts.guest_enabled`, `accounts.password_not_required`, `sessions.remote_from_public_address` |
 | **Network** | `network.lolbin_outbound`, `network.script_host_listener`, `network.unusual_path_outbound`, `network.script_host_outbound`; module A's `ai.llm_callout`, `ai.llm_callout_unattributed`, `ai.llm_callout_unusual_path`, `ai.llm_dns_cache` |
 | **Execution evidence & modules** | `execution.shimcache_unusual_path`, `execution.prefetch_unusual_path`, `execution.amcache_unusual_path`, `modules.unusual_path` |
 | **Signature integrity** | `integrity.unsigned_system_binary` (a process image in System32/SysWOW64 that is unsigned or carries an untrusted signature; the finding quotes who that signature claims to be from) |
 | **Event logs** | `defense.clear_event_logs` (Security 1102 / System 104), `eventlog.service_installed` (7045), `persistence.account_created` (4720), `persistence.admin_group_add` (4728/4732/4756 to a privileged group), `eventlog.powershell_suspicious_block` (4104), `eventlog.defender_detection` (Defender 1116/1117) — plus the command-line rules above applied to 4688 command lines, 4104 script blocks and 7045 service ImagePaths |
 | **Logon sessions** (event log) | `logon.remote_interactive` (4624 type 10 / RDP — suspect from a public source address, T1021.001), `logon.network_external` (4624 type 3 from an external address, T1021), `logon.failed_external` (4625 from an external address, T1110) |
-| **Correlation** (event log × live state) | `correlate.service_installed_absent` (a 7045 service install with no matching live service — installed then removed, T1070.009), `correlate.task_registered_absent` (a 4698/106 task registration with no matching live task — deleted or hidden, T1070.009); and the `defense.clear_event_logs` finding is annotated with the surviving record-id/time range left by the clear |
+| **Correlation** (event log × live state) | `correlate.service_installed_absent` (a 7045 service install with no matching live service — installed then removed, T1070.009), `correlate.task_registered_absent` (a 4698/106 task registration with no matching live task — deleted or hidden, T1070.009); and the `defense.clear_event_logs` finding is annotated with the surviving record-id/time range left by the clear. Independent of the event log: `correlate.task_comhandler_hijacked` (a scheduled task whose `IComHandlerAction` CLSID matches a COM registration `comhijack` flagged — schedule meets hijacked object, T1546.015) |
 | **Sigma** (`-sigma`) | `sigma.<rule>` for each matching Sigma rule, carrying the rule's level (→ severity) and first `attack.t*` tag (→ technique) — the analyst's own detections, run beside the built-in ones |
 | **Linux processes & modules** | `process.unusual_exec_path` (`/tmp`, `/dev/shm`, a hidden home dir), `process.deleted_binary` (self-deleting, T1070.004), `process.memfd_exec` (fileless, T1620), `process.kthread_masquerade` (a userland task named like `kworker/…`, T1036.004), `process.binary_replaced` (*notable*: the executable was replaced on disk — usually an upgrade pending a restart, T1554); `modules.unusual_path` (T1574.006), `modules.deleted_file`, `modules.memfd_exec`, `modules.replaced_on_disk` (*info*: upgraded system libraries) |
 | **Linux network** | `network.shell_listener` (a shell or netcat listening: bind shell), `network.shell_outbound` (a shell or netcat talking to a public address: reverse shell), `network.interpreter_listener` / `network.interpreter_outbound` (*notable*: an interpreter as a server or client), `network.unusual_path_outbound` — judged by the process name *and* its executable's name, so a reverse shell run as `./update.sh` is still a shell, and a client connected to a local server isn't counted as outbound |
@@ -1097,6 +1106,13 @@ The shape is in [`docs/architecture.md`](docs/architecture.md);
       autostart), read from `/proc` and the standard config files and judged by
       Linux-specific path and command-line heuristics; AI module A runs on Linux
       too. *(v0.10)*
+- [x] **COM/WMI persistence, extended**: COM **type-library hijacking** in the
+      `comhijack` collector (`TypeLib` script monikers, unusual-path libraries,
+      per-user shadows); **timer-triggered WMI subscriptions** in the `wmi`
+      collector (`__IntervalTimerInstruction`/`__AbsoluteTimerInstruction` and
+      `__TimerEvent` filters); and a **scheduled-task → COM-handler**
+      cross-check (`correlate.task_comhandler_hijacked`) that flags a task firing
+      a hijacked COM CLSID. *(v0.11)*
 - [ ] Memory: hollowed and module-stomped images (image regions whose bytes
       differ from the file on disk).
 - [ ] Remaining Linux surfaces (journald triage, eBPF/kernel-module

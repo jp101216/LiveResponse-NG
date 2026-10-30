@@ -1,6 +1,6 @@
 [package]
 name = "lrng-sidecar"
-version = "0.10.6"
+version = "0.11.0"
 edition = "2021"
 rust-version = "1.93" # yara-x 1.21
 description = "Live Response NG sidecar: memory-safe hostile-input scanning (prompt artifacts, YARA over process memory)."

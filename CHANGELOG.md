@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.11.0
+
+Extends the COM- and WMI-persistence collectors from v0.6 to three fileless
+persistence surfaces they did not yet cover, all read-only and all under
+T1546: COM type-library hijacking, timer-triggered WMI subscriptions, and
+scheduled tasks that fire a hijacked COM handler. Six new rule ids, no new
+dependencies, and the schema is unchanged at 1.2 — these are new records and
+findings within the existing envelope.
+
+### Added
+- **COM type-library hijacking (`comhijack` collector).** The CLSID-server
+  walk is joined by a walk of the TypeLib class stores —
+  `HKLM\SOFTWARE\Classes\TypeLib` (native and the `Wow6432Node` 32-bit view)
+  and each loaded user's `HKU\<sid>_Classes` — resolving the library path at
+  each `{libid}\{version}\{lcid}\{platform}` leaf. A COM object loads its
+  registered type library when it is instantiated, so a registration that
+  names a COM script moniker instead of a `.tlb`/`.dll`, sits in a
+  user-writable path, or (per-user) shadows a machine entry reaches code the
+  same way a rewritten `InprocServer32` does — and the CLSID walk does not see
+  it. New rules, all T1546.015: `persistence.typelib_script_moniker`,
+  `persistence.typelib_unusual_path`, and `persistence.typelib_user_shadow`
+  (*critical* when the shadowing entry is itself a moniker or an odd path).
+  Reuses the read-only `internal/winreg` reader; the moniker and per-user-shadow
+  judging is portable and unit-tested. The totals scanned go in the result's
+  metadata (`typelib_count_machine` / `typelib_count_user`).
+- **Timer-triggered WMI subscriptions (`wmi` collector).** The namespace sweep
+  now also enumerates `__TimerInstruction` (the `__IntervalTimerInstruction`
+  and `__AbsoluteTimerInstruction` subclasses) over the same hand-rolled COM
+  client, and an `__EventFilter` whose WQL subscribes to `__TimerEvent` is
+  called out as timer-triggered. A timer makes a subscription fire on a
+  schedule, independent of any system event — a trigger legitimate software
+  almost never uses. New rules, T1546.003: `persistence.wmi_timer` for the
+  timer object and `persistence.wmi_timer_filter` for the filter that rides it.
+  A clean host carries neither; a namespace that doesn't carry the class is
+  noted, not failed, so the subscription records are never lost to it.
+- **Scheduled task → COM-handler cross-check (`correlate.go`).** A scheduled
+  task can act through an `IComHandlerAction` (a CLSID) rather than an exec; the
+  scheduledtasks collector already records the ClassId and comhijack already
+  flags hijacked or oddly-served COM registrations, but nothing joined the two.
+  The post-pass now raises `correlate.task_comhandler_hijacked` (T1546.015) on a
+  task whose ComHandler CLSID matches a registration comhijack flagged —
+  *critical* when that registration was — tying the schedule (the trigger) to
+  the hijacked object (the payload). Portable and unit-tested; like the other
+  correlations, a no-op unless both collectors ran, so offline `-evtx` runs are
+  unaffected.
+
 ## 0.10.6
 
 A pre-release correctness pass, mostly over the Linux side, found by running

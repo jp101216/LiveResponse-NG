@@ -131,7 +131,7 @@ covering both malicious and ordinary input:
 | `envexpand.go` | Environment expansion: machine variables from the host, per-user ones only from a known profile. |
 | `cmdline.go` | Command-line analytics (encoded PowerShell, cradles, LOLBins, credential theft, recovery inhibition, defence evasion, account changes). RE2 regexes, compiled once. |
 | `proctree.go` | Process-tree checks: masquerading paths, impossible parents, shells under document/server/WMI/service parents, typosquats. |
-| `servicerules.go`, `autorunrules.go`, `taskrules.go`, `accountrules.go`, `netrules.go`, `comrules.go`, `wmirules.go` | Per-collector rules, including comparisons against Windows defaults (Winlogon, BootExecute, LSA packages, print monitors, netsh helpers), the TaskCache cross-check, COM-hijack patterns (per-user shadowing, unusual-path/scriptlet servers, `TreatAs`) and WMI subscription consumers/filters/bindings. |
+| `servicerules.go`, `autorunrules.go`, `taskrules.go`, `accountrules.go`, `netrules.go`, `comrules.go`, `typelibrules.go`, `wmirules.go` | Per-collector rules, including comparisons against Windows defaults (Winlogon, BootExecute, LSA packages, print monitors, netsh helpers), the TaskCache cross-check, COM-hijack patterns (per-user shadowing, unusual-path/scriptlet servers, `TreatAs`), TypeLib hijacking (script monikers, unusual-path libraries, per-user shadows) and WMI subscription consumers/filters/bindings/timers (including `__TimerEvent` schedule triggers). |
 | `filehash.go` | The shared SHA-256 hasher: one read per file per run, size-capped, cancellable. |
 | `authenticode.go` | The signature verdict → record fields (state, catalog, and the `signer` name, sanitized because a certificate's subject is attacker-chosen) and the unsigned/untrusted system-binary finding, which quotes the claimed signer. The WinVerifyTrust embedded-plus-catalog verification, and reading the signer from its state before it is closed, are in `authenticode_windows.go`. |
 | `eventlog.go` | Which events are kept (low-volume security events in full; high-volume command-bearing ones such as 4688 and 4104 only when a rule fires) and the built-in event rules: log clears, service installs, account and privileged-group changes, Defender detections and remote logons. Command lines inside events go through `cmdline.go`, so a running process and a logged one are judged alike. |
@@ -273,8 +273,12 @@ before summarising, for live and offline runs alike:
    store: still there is annotated, gone is `correlate.service_installed_absent`
    or `correlate.task_registered_absent` (T1070.009). A 1102/104 log clear is
    measured against the record span that survived it, folded into the
-   `defense.clear_event_logs` finding. A cross-check whose inputs weren't
-   collected is skipped, so missing data never turns into an "absent" finding.
+   `defense.clear_event_logs` finding. Independent of the event log, a scheduled
+   task's `IComHandlerAction` CLSID is cross-checked against the COM
+   registrations `comhijack` flagged (`correlate.task_comhandler_hijacked`,
+   T1546.015) — the schedule (trigger) joined to the hijacked object (payload).
+   A cross-check whose inputs weren't collected is skipped, so missing data
+   never turns into an "absent" finding.
 2. **Timeline** (`timeline.go`, with `-timeline`) appends a synthetic
    `timeline` result: every timestamped artifact, oldest first, each entry
    pointing back to its source record and showing that record's top finding.

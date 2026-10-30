@@ -109,13 +109,96 @@ func judgeWMIConsumer(c wmiConsumer) []Finding {
 	}
 }
 
-// judgeWMIFilter returns the finding for one event filter. Every filter in
+// judgeWMIFilter returns the findings for one event filter. Every filter in
 // root\subscription is worth a glance; the WQL often reveals the trigger (a
-// logon, a process start, an interval timer).
+// logon, a process start, an interval timer). A filter that triggers on a WMI
+// timer is called out separately: timer triggers fire on a schedule rather
+// than on a system event, which legitimate software almost never relies on.
 func judgeWMIFilter(f wmiFilter) []Finding {
-	return []Finding{{
+	out := []Finding{{
 		Rule: "persistence.wmi_filter", Severity: SevNotable, Technique: "T1546.003", Confidence: 40,
 		Detail: fmt.Sprintf("WMI event filter %s watches: %s", wmiRef(f.Namespace, "__EventFilter", f.Name), excerpt(f.Query, 240)),
+	}}
+	if id := wmiFilterTimerID(f.Query); id != "" {
+		out = append(out, Finding{
+			Rule: "persistence.wmi_timer_filter", Severity: SevSuspect, Technique: "T1546.003", Confidence: 60,
+			Detail: fmt.Sprintf("WMI event filter %s triggers on a timer (TimerID %s) — a schedule-based trigger that fires independently of any system event",
+				wmiRef(f.Namespace, "__EventFilter", f.Name), id),
+		})
+	}
+	return out
+}
+
+// Timer-instruction classes: the scheduling half of timer-based subscriptions.
+const (
+	wmiIntervalTimer = "__IntervalTimerInstruction" // fires every IntervalBetweenEvents ms
+	wmiAbsoluteTimer = "__AbsoluteTimerInstruction" // fires once at EventDateTime
+)
+
+// wmiTimer is an __IntervalTimerInstruction or __AbsoluteTimerInstruction.
+type wmiTimer struct {
+	Namespace    string
+	Class        string // the concrete __CLASS
+	TimerID      string // the TimerId a __TimerEvent filter subscribes to
+	Interval     string // IntervalBetweenEvents (ms), for interval timers
+	When         string // EventDateTime, for absolute timers
+	SkipIfPassed string
+}
+
+// wmiFilterTimerID reports the TimerID an __EventFilter subscribes to when its
+// WQL is a __TimerEvent subscription, else "". A __TimerEvent query with no
+// readable TimerID still returns a non-empty marker, since the timer trigger
+// itself is the point.
+func wmiFilterTimerID(query string) string {
+	if !strings.Contains(strings.ToLower(query), "__timerevent") {
+		return ""
+	}
+	i := strings.Index(strings.ToLower(query), "timerid")
+	if i < 0 {
+		return `"(unnamed)"`
+	}
+	rest := query[i+len("timerid"):]
+	if eq := strings.IndexByte(rest, '='); eq >= 0 {
+		rest = rest[eq+1:]
+	}
+	rest = strings.TrimSpace(rest)
+	quoted := strings.HasPrefix(rest, `"`) || strings.HasPrefix(rest, `'`)
+	rest = strings.Trim(rest, `"'`)
+	// Cut at the first quote, whitespace or clause terminator.
+	for _, sep := range []string{`"`, `'`, " ", "\t", ")"} {
+		if k := strings.Index(rest, sep); k >= 0 {
+			rest = rest[:k]
+		}
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return `"(unnamed)"`
+	}
+	if quoted {
+		return `"` + rest + `"`
+	}
+	return rest
+}
+
+// judgeWMITimer returns the finding for one timer instruction. A default
+// Windows install carries no timer instructions, so each is surfaced; paired
+// with a __TimerEvent filter and a binding, a timer makes a subscription fire
+// on a schedule with no system-event trigger at all.
+func judgeWMITimer(tm wmiTimer) []Finding {
+	ref := tm.Class
+	if tm.TimerID != "" {
+		ref += ` (TimerID "` + tm.TimerID + `")`
+	}
+	detail := fmt.Sprintf("WMI timer instruction %s in %s", ref, tm.Namespace)
+	switch {
+	case tm.Interval != "":
+		detail += " fires every " + tm.Interval + " ms"
+	case tm.When != "":
+		detail += " fires at " + tm.When
+	}
+	detail += " — the schedule for a timer-triggered subscription"
+	return []Finding{{
+		Rule: "persistence.wmi_timer", Severity: SevNotable, Technique: "T1546.003", Confidence: 45, Detail: detail,
 	}}
 }
 

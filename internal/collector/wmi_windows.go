@@ -289,6 +289,7 @@ var (
 	consumerProps = []string{"__CLASS", "Name", "CommandLineTemplate", "ExecutablePath",
 		"WorkingDirectory", "ScriptingEngine", "ScriptText", "ScriptFileName", "Filename", "Destination"}
 	bindingProps = []string{"Filter", "Consumer"}
+	timerProps   = []string{"__CLASS", "TimerId", "IntervalBetweenEvents", "EventDateTime", "SkipIfPassed"}
 )
 
 func collectWMI(ctx context.Context, opts RunOptions) (Result, error) {
@@ -381,6 +382,38 @@ func collectWMINamespace(ctx context.Context, res *Result, svc unsafe.Pointer, n
 		matched := byKey[consumerKey(class, name)]
 		fields := map[string]any{"kind": "binding", "namespace": ns, "filter": b.Filter, "consumer": b.Consumer}
 		res.Add(fields, judgeWMIBinding(b, matched)...)
+		*total++
+	}
+
+	// Timer instructions — the schedule half of timer-based subscriptions. A
+	// clean host carries none; a namespace that doesn't carry the class is
+	// expected, so a query failure here is noted rather than failing the
+	// namespace (the subscription records above are the important ones).
+	trows, terr := queryInto(svc, "SELECT * FROM __TimerInstruction", timerProps)
+	if terr != nil {
+		res.SetMeta("note_timer_"+strings.ToLower(ns), terr.Error())
+		return nil
+	}
+	for _, r := range trows {
+		if ctx.Err() != nil {
+			break
+		}
+		tm := wmiTimer{Namespace: ns, Class: r["__CLASS"], TimerID: r["TimerId"],
+			Interval: r["IntervalBetweenEvents"], When: r["EventDateTime"], SkipIfPassed: r["SkipIfPassed"]}
+		fields := map[string]any{"kind": "timer", "namespace": ns, "class": tm.Class}
+		if tm.TimerID != "" {
+			fields["timer_id"] = tm.TimerID
+		}
+		if tm.Interval != "" {
+			fields["interval_ms"] = tm.Interval
+		}
+		if tm.When != "" {
+			fields["event_datetime"] = tm.When
+		}
+		if tm.SkipIfPassed != "" {
+			fields["skip_if_passed"] = tm.SkipIfPassed
+		}
+		res.Add(fields, judgeWMITimer(tm)...)
 		*total++
 	}
 	return nil

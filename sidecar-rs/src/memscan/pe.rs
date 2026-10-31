@@ -431,6 +431,10 @@ pub fn identity_mismatch(mem: &Pe, disk: &Pe) -> Vec<String> {
     f
 }
 
+/// The section of loader-written function-override thunks.
+const FOTHK: &str = "fothk";
+const SKIP_FOTHK: &str = "fothk section (thunks the Windows loader writes) not compared";
+
 /// What comparing one mapped PE image with its file found.
 #[derive(Debug, Default)]
 pub struct ImageCheck {
@@ -482,6 +486,14 @@ pub fn check_image(
     let il_only = disk.il_only(file);
     let mut exports: Option<Exports> = None;
     for s in disk.sections.iter().filter(|s| s.exec()) {
+        // Recent Windows builds give system images a "fothk" section of
+        // function-override thunks, and the loader rewrites them when it maps
+        // the image, so it never matches the file. Hooking targets live in
+        // the code sections proper, which are still compared.
+        if s.name == FOTHK {
+            out.skipped.push(SKIP_FOTHK);
+            continue;
+        }
         let (bytes, mut mask) = disk.section_bytes(file, s, delta, &relocs);
         if bytes.is_empty() {
             continue;
@@ -689,6 +701,20 @@ mod tests {
         img[0x1000..0x1200].fill(0xCC); // the whole section overwritten
         let r = check(&f, &img, base);
         assert_eq!(r.changes[0].stats.verdict(), Verdict::Rewritten);
+    }
+
+    #[test]
+    fn loader_thunk_section_is_skipped() {
+        let mut f = tiny_dll();
+        // Rename .text (section header 0 at optional header + 0xF0) to fothk.
+        let s0 = 0x84 + 20 + 0xF0;
+        f[s0..s0 + 8].copy_from_slice(b"fothk\0\0\0");
+        let base = 0x7ff6_1230_0000;
+        let mut img = map(&f, base);
+        img[0x1000..0x1200].fill(0xCC); // what the loader's rewrite looks like to a diff
+        let r = check(&f, &img, base);
+        assert!(r.changes.is_empty(), "{r:?}");
+        assert_eq!((r.compared, r.skipped.as_slice()), (0, &[SKIP_FOTHK][..]));
     }
 
     #[test]

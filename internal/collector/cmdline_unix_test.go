@@ -122,3 +122,45 @@ func TestContainsWord(t *testing.T) {
 		t.Error("should match nc after a pipe")
 	}
 }
+
+func TestUnixCmdlineAntiForensics(t *testing.T) {
+	cases := map[string]string{
+		"rm -rf /var/log/journal":                                 "defense.clear_linux_logs",
+		"sudo /bin/rm -f /var/log/auth.log":                       "defense.clear_linux_logs",
+		"shred -u /var/log/secure":                                "defense.clear_linux_logs",
+		"truncate -s 0 /var/log/wtmp":                             "defense.clear_linux_logs",
+		"cat /dev/null > /var/log/syslog":                         "defense.clear_linux_logs",
+		"> /var/log/lastlog":                                      "defense.clear_linux_logs",
+		": > /var/log/btmp":                                       "defense.clear_linux_logs",
+		"ln -sf /dev/null /var/log/auth.log":                      "defense.clear_linux_logs",
+		"journalctl --vacuum-time=1s":                             "defense.clear_linux_logs",
+		"sudo journalctl --rotate && journalctl --vacuum-size=1K": "defense.clear_linux_logs",
+		"history -c":                                              "defense.clear_shell_history",
+		"unset HISTFILE":                                          "defense.clear_shell_history",
+		"export HISTFILE=/dev/null; id":                           "defense.clear_shell_history",
+		"rm -f /root/.bash_history":                               "defense.clear_shell_history",
+		"ln -sf /dev/null ~/.bash_history":                        "defense.clear_shell_history",
+		"> ~/.zsh_history":                                        "defense.clear_shell_history",
+	}
+	for cmd, want := range cases {
+		if rules := unixRules(cmd); !hasRuleName(rules, want) {
+			t.Errorf("%q: expected %s, got %v", cmd, want, rules)
+		}
+	}
+	// Reading, rotating and writing logs is ordinary.
+	for _, cmd := range []string{
+		"grep rm /var/log/syslog",
+		"tail -f /var/log/auth.log",
+		"/usr/sbin/logrotate /etc/logrotate.conf",
+		"/opt/app/run.sh > /var/log/app.log 2>&1",
+		"/opt/app/job 2>/var/log/app.err",
+		"echo started >> /var/log/app.log",
+		"journalctl --rotate",
+		"cat ~/.bash_history",
+		"history | tail",
+	} {
+		if rules := unixRules(cmd); len(rules) != 0 {
+			t.Errorf("%q should be quiet, got %v", cmd, rules)
+		}
+	}
+}

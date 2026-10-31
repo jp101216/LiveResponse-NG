@@ -8,28 +8,34 @@ handling of hostile input. It builds from any OS; Windows has the full collector
 set, and Linux now has a working core (processes, network, modules, accounts and
 persistence) behind the same interface.
 
-> **Status:** v0.10. On **Linux**, a default run covers processes, network
+> **Status:** v0.11. On **Linux**, a default run covers processes, network
 > (TCP + UDP, with per-socket process attribution via `/proc`), loaded modules,
-> local accounts, and persistence (cron, systemd, ld.so.preload, rc.local, XDG
-> autostart) — judged by about 30 Linux-specific path, process, network and
-> command-line detections, with AI module A (LLM-callout detection) running too;
-> see [Platform support](#platform-support).
+> local accounts, persistence (cron, systemd, ld.so.preload, rc.local, XDG
+> autostart), kernel modules (with a cross-view that exposes a module hidden from
+> the list), the eBPF programs loaded in the kernel, and the systemd journal (SSH
+> brute force, sudo and su, account changes, kernel warnings), read without
+> journalctl — judged by about 55 Linux-specific path, process, network, kernel,
+> log and command-line detections, with AI module A (LLM-callout detection)
+> running too; see [Platform support](#platform-support).
 >
 > On **Windows**, a default run covers processes (with a process-tree,
 > command-line analysis and offline Authenticode verification that names the
 > signer), network (TCP + UDP, IPv4 + IPv6), services, ~20 autostart locations,
 > scheduled tasks (cross-checked against the Task Scheduler's registry cache),
-> WMI event subscriptions, COM CLSID hijacking, ShimCache, AmCache, prefetch
+> WMI event subscriptions (including timer triggers), COM CLSID and TypeLib
+> hijacking, ShimCache, AmCache, prefetch
 > (with decoded run counts and times), sessions, local accounts, loaded modules
 > and the Windows event logs, which can also be triaged offline from saved
 > `.evtx` files on any OS. A correlation pass lines the logs up against the live
-> state. That's about 90 named detections, each mapped to MITRE ATT&CK, plus
+> state. That's about 120 named detections, each mapped to MITRE ATT&CK, plus
 > your own Sigma rules (or the bundled pack), an optional super-timeline,
 > indicator (IOC) export and offline endpoint-intelligence attribution
 > (ASN / country / cloud / CDN / hosting / Tor, air-gapped), AI
 > module A (LLM-callout detection), the Rust sidecar with AI module B
 > (embedded-prompt-artifact scanner), and opt-in live process-memory scanning
-> with YARA and memory-structure heuristics. See [Roadmap](#roadmap).
+> with YARA, memory-structure heuristics and an image-integrity check that finds
+> code overwritten in memory (module stomping, hollowing, AMSI/ETW patching). See
+> [Roadmap](#roadmap).
 
 ---
 
@@ -258,9 +264,10 @@ skipped — read it from a shadow copy or image then. The same parser also runs
 OS, applying the identical classification — for an exported log, a Volume Shadow
 Copy, or a file pulled from a disk image.
 
-**`memory`** *(opt-in)* — YARA rules, the module-B prompt scan and memory
-structure heuristics over the live memory of every process (or the ones you
-pick). See [Memory scanning](#memory-scanning-yara).
+**`memory`** *(opt-in)* — YARA rules, the module-B prompt scan, memory
+structure heuristics and an image-integrity check (the code each process mapped
+from an image file, compared with that file) over the live memory of every
+process (or the ones you pick). See [Memory scanning](#memory-scanning-yara).
 
 **`dnscache`** *(opt-in)* — the DNS resolver cache: each cached name, its
 record types, and the addresses it resolved to (read with cache-only lookups,
@@ -268,6 +275,37 @@ so nothing goes on the network). Selecting it also turns on **DNS
 correlation** in `network`. It's opt-in because it reads the cache through the
 undocumented `DnsGetCacheDataTable` API. The cache is snapshotted once, before
 module A resolves anything, so lrng never pollutes the evidence it reports.
+
+**`kmod`** *(Linux)* — kernel modules: every loaded module from `/proc/modules`
+with its size, users and taint flags; what loads at boot (`modules-load.d`,
+`/etc/modules`); modprobe's `install`/`remove` hooks, which run a command as
+root whenever a module is requested (stock blacklisting with `/bin/true` and
+modprobe chaining stay quiet); and the kernel-wide taint, decoded letter by
+letter. A cross-view of `/sys/module` against `/proc/modules` exposes a module
+that is loaded but removed from the list — how kernel rootkits hide. Config
+files are resolved before reading, so Debian's `modules.conf -> /etc/modules`
+link and merged `/usr` are read once.
+
+**`ebpf`** *(Linux, needs root)* — the eBPF programs loaded in the kernel, read
+with `bpf(2)` (no `bpftool`): type, name, tag, loader uid, load time, maps, run
+count, and the bpffs paths that keep it alive after its loader exits (the
+program pinned itself, or a pinned link attaching it); pinned maps and links
+are records of their own. Each
+program's translated instructions are decoded and every helper call is named
+through `/proc/kallsyms` the way `bpftool` does; programs calling the helpers
+that act on user space — `bpf_probe_write_user`, `bpf_override_return`,
+`bpf_send_signal` — are flagged.
+
+**`journald`** *(Linux)* — the systemd journal, read straight from its files
+(`/var/log/journal`, `/run/log/journal`; newest first, within a byte budget)
+by a dependency-free reader for both the regular and the compact layout, with
+LZ4 decoded. Only security-relevant events become records: SSH logons, and
+failed attempts aggregated per source address (a success after a burst of
+failures from the same address is flagged), sudo and su, account and group
+changes, cron commands that trip the command-line rules, and the kernel's own
+warnings about unsigned modules and `bpf_probe_write_user` programs. Each event
+carries its time, so `-timeline` places it. Fields journald compressed with
+zstd or xz (only payloads over its 512-byte threshold) are counted, not decoded.
 
 ---
 
@@ -296,8 +334,10 @@ against both malicious and ordinary examples.
 | **Sigma** (`-sigma`) | `sigma.<rule>` for each matching Sigma rule, carrying the rule's level (→ severity) and first `attack.t*` tag (→ technique) — the analyst's own detections, run beside the built-in ones |
 | **Linux processes & modules** | `process.unusual_exec_path` (`/tmp`, `/dev/shm`, a hidden home dir), `process.deleted_binary` (self-deleting, T1070.004), `process.memfd_exec` (fileless, T1620), `process.kthread_masquerade` (a userland task named like `kworker/…`, T1036.004), `process.binary_replaced` (*notable*: the executable was replaced on disk — usually an upgrade pending a restart, T1554); `modules.unusual_path` (T1574.006), `modules.deleted_file`, `modules.memfd_exec`, `modules.replaced_on_disk` (*info*: upgraded system libraries) |
 | **Linux network** | `network.shell_listener` (a shell or netcat listening: bind shell), `network.shell_outbound` (a shell or netcat talking to a public address: reverse shell), `network.interpreter_listener` / `network.interpreter_outbound` (*notable*: an interpreter as a server or client), `network.unusual_path_outbound` — judged by the process name *and* its executable's name, so a reverse shell run as `./update.sh` is still a shell, and a client connected to a local server isn't counted as outbound |
-| **Linux command lines, persistence & accounts** | `exec.download_pipe_shell` (`curl … \| sh`), `exec.reverse_shell` (`/dev/tcp`, `nc -e`, socat `EXEC`, interpreter one-liners), `exec.base64_decode`, `exec.chmod_suspicious`, `persistence.ssh_authorized_keys`, `persistence.cron_install`, `persistence.shell_profile`, `persistence.boot_or_preload`; `persistence.ld_preload`, `persistence.unusual_path` (cron, systemd units and drop-ins, rc.local, XDG autostart); `accounts.uid0_nonroot`, `accounts.empty_password`, `accounts.system_account_login_shell`, `accounts.duplicate_uid`, `accounts.root_equiv_group` |
-| **Memory** (opt-in) | `yara:<rule>`, `memory.pe_in_private` (reflective/manual-mapped PE), `memory.elf_in_anonymous`, `memory.memfd_exec`, `memory.deleted_file_exec`, `memory.replaced_file_exec` (*info*: a system library replaced by an upgrade), and module B's `prompt.*`, `api.*`, `model.*` and `secret.*` (below) |
+| **Linux command lines, persistence & accounts** | `exec.download_pipe_shell` (`curl … \| sh`), `exec.reverse_shell` (`/dev/tcp`, `nc -e`, socat `EXEC`, interpreter one-liners), `exec.base64_decode`, `exec.chmod_suspicious`, `persistence.ssh_authorized_keys`, `persistence.cron_install`, `persistence.shell_profile`, `persistence.boot_or_preload`; `persistence.ld_preload`, `persistence.unusual_path` (cron, systemd units and drop-ins, rc.local, XDG autostart); `accounts.uid0_nonroot`, `accounts.empty_password`, `accounts.system_account_login_shell`, `accounts.duplicate_uid`, `accounts.root_equiv_group`; anti-forensics: `defense.clear_linux_logs` (wiping `/var/log`, `journalctl --vacuum-*`, T1070.002), `defense.clear_shell_history` (T1070.003) |
+| **Linux kernel modules & eBPF** | `persistence.kmod_hidden` (*critical*: loaded per `/sys/module` but missing from `/proc/modules`, T1014), `persistence.kmod_forced`, `persistence.kmod_unsigned` (*suspect* when it also loads at boot), `persistence.kmod_out_of_tree`, `persistence.kmod_boot_unknown` (set to load at boot but not in the running kernel's module tree), `persistence.modprobe_hook` (an `install`/`remove` command, T1547.006), `kernel.tainted`; `persistence.ebpf_write_user` (`bpf_probe_write_user`, T1014), `persistence.ebpf_override_return`, `persistence.ebpf_send_signal` |
+| **Linux journal** (`journald`) | `logon.ssh_bruteforce` (T1110.001), `logon.ssh_bruteforce_success` (*critical*: a logon after ten or more failures from the same address, T1110), `logon.ssh_external` (*suspect* for a root password logon, T1021.004), `privesc.sudo_denied`, `privesc.sudo_auth_failure`, `privesc.su_failed` (T1548), `persistence.account_created` (*critical* for a new UID 0, T1136.001), `persistence.admin_group_add` (to `sudo`, `wheel`, `docker`, … T1098), `persistence.password_changed` (root), `persistence.kmod_unsigned_loaded` and `persistence.ebpf_write_user` from the kernel's own warnings — plus the command-line rules on sudo and cron commands |
+| **Memory** (opt-in) | `yara:<rule>`, `memory.pe_in_private` (reflective/manual-mapped PE), `memory.elf_in_anonymous`, `memory.memfd_exec`, `memory.deleted_file_exec`, `memory.replaced_file_exec` (*info*: a system library replaced by an upgrade); image integrity: `memory.image_code_modified` (code overwritten after mapping — module stomping, T1055; *critical* from 16 KiB), `memory.image_header_mismatch` (the mapped image was replaced — hollowing and its relatives, T1055.012), `memory.image_file_unavailable`, `memory.image_inline_patch` (short patches: hooks), `defense.amsi_patched` (T1562.001), `defense.etw_patched` (T1562.006); and module B's `prompt.*`, `api.*`, `model.*` and `secret.*` (below) |
 | **Endpoint intelligence** (`-intel`) | `intel.tor_endpoint` (a remote address that is Tor infrastructure, T1090.003), `intel.anonymizer_endpoint` (a known anonymising VPN/proxy, T1090.002) — from the offline ASN/country/category attribution of the run's public remote addresses |
 
 **False-positive discipline.** Path heuristics grade locations: temporary,
@@ -410,6 +450,27 @@ injection and manual mapping. On Linux, anonymous executable ELF images,
 executable `memfd` mappings and executable mappings of deleted files are
 flagged. Per-process counts of unbacked executable and RWX regions are in the
 record.
+
+**Image integrity (no rules needed).** Code mapped from an image file should
+stay what the file says, so before the YARA walk (with up to a third of the
+per-process budget) the sidecar compares them. On Windows, each loaded
+module's executable sections are compared with its file on disk after
+applying the base relocations the loader applied (the import table is masked,
+and the `fothk` section of function-override thunks, which the loader rewrites,
+is left out and counted under `skipped`), and its header's identity fields with
+the file's; on Linux, each executable
+file mapping is compared with `/proc/<pid>/map_files/…` — the very inode that
+was mapped, so a package upgrade can't look like tampering. Differences are
+merged into change sites and judged by length: a long run is code rewritten in
+place (`memory.image_code_modified`); short ones are patches, reported together
+at low severity (`memory.image_inline_patch`) since security products hook
+code too — except in `amsi.dll` (`defense.amsi_patched`) and at ntdll's ETW
+event writers (`defense.etw_patched`), named by export. A header that no longer
+matches its file is `memory.image_header_mismatch`. Classic hollowing into
+private memory is `memory.pe_in_private` above. The PE reader is checked
+byte-for-byte against [pefile](https://github.com/erocarrera/pefile) on real
+compiler-built images (`LRNG_PE_SAMPLES`, `sidecar-rs/scripts/pe_golden.py`),
+and CI runs it against the real Windows loader.
 
 **Rules.** Pass `-yara` a `.yar`/`.yara` file or a directory (searched
 recursively). Each file gets its own namespace, so rule names from different
@@ -760,7 +821,8 @@ set that compiles and runs is exactly the set `-list` shows on that host.
 | `localaccounts` | ✅ | ✅ | `/etc/passwd`, `/etc/group`, `/etc/shadow`, and each user's `authorized_keys` (via sshd's `AuthorizedKeysFile`) |
 | `autoruns` (persistence) | ✅ | ✅ | ld.so.preload, cron, systemd, rc.local, XDG autostart, shell profiles |
 | AI module A (LLM callouts) | ✅ | ✅ | runs on the Linux `network` collector (OS-agnostic) |
-| `memory` (opt-in) | ✅ | ✅ | the Rust sidecar reads `/proc/<pid>/{maps,mem}` |
+| `memory` (opt-in) | ✅ | ✅ | the Rust sidecar reads `/proc/<pid>/{maps,mem,map_files}` |
+| `kmod`, `ebpf`, `journald` | — | ✅ | `/proc/modules`, `/sys/module`, `modules-load.d`, `modprobe.d`; `bpf(2)` and `/proc/kallsyms`; the journal files under `/var/log/journal` and `/run/log/journal` |
 | `eventlog`, `sigma`, `-timeline`, `-iocs`, `-intel` | ✅ | ✅ | portable — on Linux the event log is Windows `.evtx` triaged offline with `-evtx` (there is no live Windows log to read) |
 | `amcache`, `authenticode`, `comhijack`, `prefetch`, `shimcache`, `wmi`, `dnscache`, `services`, `scheduledtasks` | ✅ | — | Windows-specific concepts; on Linux, service and scheduled-task persistence is covered by `autoruns` (systemd and cron) |
 
@@ -817,7 +879,12 @@ leaves behind, so you can account for it in your notes:
   and no file writes — it is safe on a contained or air-gapped host.
 - **Memory scanning** opens other processes with `PROCESS_VM_READ` and reads
   their memory. That's exactly what EDR products watch for, so expect alerts
-  (and blocks, for protected processes) and tell the SOC before a sweep.
+  (and blocks, for protected processes) and tell the SOC before a sweep. Its
+  image-integrity check also reads each loaded module's file from disk.
+- **Linux kernel state.** `ebpf` takes a file descriptor on each loaded eBPF
+  program (and on each pinned object) just long enough to read its information;
+  `kmod` and `journald` only read files — the journal is read directly, without
+  journalctl, so nothing is written to it.
 - **Execution artifacts.** Running `lrng.exe` and `lrng-sidecar.exe` can
   create Prefetch entries (on by default on client Windows) and process-creation
   events in whatever logging the host has.
@@ -1113,10 +1180,16 @@ The shape is in [`docs/architecture.md`](docs/architecture.md);
       `__TimerEvent` filters); and a **scheduled-task → COM-handler**
       cross-check (`correlate.task_comhandler_hijacked`) that flags a task firing
       a hijacked COM CLSID. *(v0.11)*
-- [ ] Memory: hollowed and module-stomped images (image regions whose bytes
-      differ from the file on disk).
-- [ ] Remaining Linux surfaces (journald triage, eBPF/kernel-module
-      persistence).
+- [x] **Memory: hollowed and module-stomped images**: an image-integrity check
+      that compares mapped code with its file (Windows: relocation-aware, per
+      section; Linux: against `/proc/<pid>/map_files`), plus AMSI/ETW patch
+      detection and a header-identity check. *(v0.11)*
+- [x] **Remaining Linux surfaces**: `kmod` (loaded modules, boot lists,
+      modprobe hooks, a hidden-module cross-view, taint), `ebpf` (programs and
+      the helpers they call, pins) and `journald` (a dependency-free journal
+      reader with SSH, sudo/su, account, cron and kernel triage). *(v0.11)*
+- [ ] zstd decoding for journal fields above journald's compression threshold
+      (they are counted, not read, today).
 
 ---
 

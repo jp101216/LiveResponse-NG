@@ -46,6 +46,21 @@ func analyzeUnixCommandLine(source, image, cmd string) []Finding {
 			"downloads and pipes straight into a shell — fetch-and-run, nothing lands on disk to inspect")
 	}
 
+	// Anti-forensics: wiping system logs, vacuuming the journal, clearing
+	// shell history.
+	switch {
+	case wipesSystemLogs(lc):
+		add("defense.clear_linux_logs", SevSuspect, "T1070.002", 70,
+			"deletes, truncates or empties system logs under /var/log")
+	case journalVacuum(lc):
+		add("defense.clear_linux_logs", SevNotable, "T1070.002", 45,
+			"vacuums the systemd journal (journalctl --vacuum-*), discarding older log history")
+	}
+	if clearsShellHistory(lc) {
+		add("defense.clear_shell_history", SevNotable, "T1070.003", 55,
+			"clears or disables shell history")
+	}
+
 	// Reverse shells.
 	switch {
 	case strings.Contains(lc, "/dev/tcp/") || strings.Contains(lc, "/dev/udp/"):
@@ -247,4 +262,93 @@ func containsWord(s, word string) bool {
 
 func isWordByte(b byte) bool {
 	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_'
+}
+
+// logWipers are programs that destroy a file's contents when pointed at it.
+var logWipers = map[string]bool{"rm": true, "shred": true, "unlink": true, "srm": true, "wipe": true, "truncate": true}
+
+// wipesSystemLogs reports whether a command destroys logs under /var/log:
+// a wiper program (by its position, not a mere mention: `grep rm /var/log/x`
+// is fine), /dev/null copied or linked over a log, or an empty redirect onto
+// one (`> /var/log/auth.log`, `cat /dev/null > ...`). A command's own output
+// redirected into a log is ordinary and isn't matched.
+func wipesSystemLogs(lc string) bool {
+	if !strings.Contains(lc, "/var/log") {
+		return false
+	}
+	for _, seg := range splitCommandSegments(lc) {
+		if !strings.Contains(seg, "/var/log") {
+			continue
+		}
+		prog := pipelineProgram(seg)
+		switch {
+		case logWipers[prog]:
+			return true
+		case (prog == "cp" || prog == "ln" || prog == "mv") && strings.Contains(seg, "/dev/null"):
+			return true
+		case emptyRedirectOntoLog(seg, prog):
+			return true
+		}
+	}
+	return false
+}
+
+// emptyRedirectOntoLog matches a truncating redirect (">", not ">>") onto
+// /var/log whose source writes nothing: a bare redirect, ":", "true", a bare
+// "echo", or "cat /dev/null".
+func emptyRedirectOntoLog(seg, prog string) bool {
+	i := strings.Index(seg, ">")
+	if i < 0 || strings.HasPrefix(seg[i:], ">>") || (i > 0 && seg[i-1] >= '0' && seg[i-1] <= '9') {
+		return false // an append, or "2>" (a command's own stderr)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(seg[i+1:]), "/var/log") {
+		return false
+	}
+	src := strings.Fields(strings.TrimSpace(seg[:i]))
+	switch {
+	case len(src) == 0, prog == ":" || prog == "true":
+		return true
+	case prog == "echo":
+		return len(src) == 1 || (len(src) == 2 && (src[1] == `""` || src[1] == "''"))
+	case prog == "cat":
+		return len(src) == 2 && src[1] == "/dev/null"
+	}
+	return false
+}
+
+// journalVacuum reports a journalctl --vacuum-size/-time/-files run.
+func journalVacuum(lc string) bool {
+	for _, seg := range splitCommandSegments(lc) {
+		if pipelineProgram(seg) == "journalctl" && strings.Contains(seg, "--vacuum") {
+			return true
+		}
+	}
+	return false
+}
+
+// clearsShellHistory reports clearing or disabling shell history: history -c,
+// unsetting or nulling HISTFILE, a zero HISTSIZE, "set +o history", or
+// deleting, emptying or linking away a *_history file.
+func clearsShellHistory(lc string) bool {
+	for _, s := range []string{"unset histfile", "histfile=/dev/null", "histsize=0", "histfilesize=0", "set +o history"} {
+		if strings.Contains(lc, s) {
+			return true
+		}
+	}
+	for _, seg := range splitCommandSegments(lc) {
+		prog := pipelineProgram(seg)
+		if prog == "history" && containsWord(seg, "-c") {
+			return true
+		}
+		if strings.Contains(seg, "_history") {
+			if logWipers[prog] || ((prog == "ln" || prog == "cp") && strings.Contains(seg, "/dev/null")) {
+				return true
+			}
+			if i := strings.Index(seg, ">"); i >= 0 && !strings.HasPrefix(seg[i:], ">>") &&
+				strings.Contains(seg[i:], "_history") && len(strings.Fields(seg[:i])) == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }

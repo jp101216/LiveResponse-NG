@@ -201,18 +201,28 @@ fn refuses_own_process_and_bad_input() {
         });
         assert!(!r[0].ok);
     }
+}
 
-    let nothing = run(Request {
+/// No rules and no prompt scan: image integrity and the heuristics still run
+/// (they need no rules), reading only each region's first chunk.
+#[test]
+fn integrity_and_heuristics_need_no_rules() {
+    let child = spawn("sleep", &[]);
+    let r = &run(Request {
         op: "scan_memory".into(),
-        pid: 1,
+        pid: child.0.id() as i64,
         prompts: Some(false),
         ..Default::default()
-    });
+    })[0];
+    assert!(r.ok, "{r:?}");
+    assert_eq!(status(r), "scanned", "{:?}", r.meta);
+    let m = r.meta.as_ref().unwrap();
+    assert_eq!(m["image_integrity"]["supported"], true, "{m}");
     assert!(
-        nothing[0].error.contains("nothing to do"),
-        "{:?}",
-        nothing[0]
+        m["image_integrity"]["bytes_compared"].as_u64().unwrap() > 0,
+        "{m}"
     );
+    assert!(m["bytes_scanned"].as_u64().unwrap() <= m["bytes_total"].as_u64().unwrap());
 }
 
 #[cfg(not(feature = "yara"))]

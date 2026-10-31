@@ -337,7 +337,7 @@ against both malicious and ordinary examples.
 | **Linux command lines, persistence & accounts** | `exec.download_pipe_shell` (`curl … \| sh`), `exec.reverse_shell` (`/dev/tcp`, `nc -e`, socat `EXEC`, interpreter one-liners), `exec.base64_decode`, `exec.chmod_suspicious`, `persistence.ssh_authorized_keys`, `persistence.cron_install`, `persistence.shell_profile`, `persistence.boot_or_preload`; `persistence.ld_preload`, `persistence.unusual_path` (cron, systemd units and drop-ins, rc.local, XDG autostart); `accounts.uid0_nonroot`, `accounts.empty_password`, `accounts.system_account_login_shell`, `accounts.duplicate_uid`, `accounts.root_equiv_group`; anti-forensics: `defense.clear_linux_logs` (wiping `/var/log`, `journalctl --vacuum-*`, T1070.002), `defense.clear_shell_history` (T1070.003) |
 | **Linux kernel modules & eBPF** | `persistence.kmod_hidden` (*critical*: loaded per `/sys/module` but missing from `/proc/modules`, T1014), `persistence.kmod_forced`, `persistence.kmod_unsigned` (*suspect* when it also loads at boot), `persistence.kmod_out_of_tree`, `persistence.kmod_boot_unknown` (set to load at boot but not in the running kernel's module tree), `persistence.modprobe_hook` (an `install`/`remove` command, T1547.006), `kernel.tainted`; `persistence.ebpf_write_user` (`bpf_probe_write_user`, T1014), `persistence.ebpf_override_return`, `persistence.ebpf_send_signal` |
 | **Linux journal** (`journald`) | `logon.ssh_bruteforce` (T1110.001), `logon.ssh_bruteforce_success` (*critical*: a logon after ten or more failures from the same address, T1110), `logon.ssh_external` (*suspect* for a root password logon, T1021.004), `privesc.sudo_denied`, `privesc.sudo_auth_failure`, `privesc.su_failed` (T1548), `persistence.account_created` (*critical* for a new UID 0, T1136.001), `persistence.admin_group_add` (to `sudo`, `wheel`, `docker`, … T1098), `persistence.password_changed` (root), `persistence.kmod_unsigned_loaded` and `persistence.ebpf_write_user` from the kernel's own warnings — plus the command-line rules on sudo and cron commands |
-| **Memory** (opt-in) | `yara:<rule>`, `memory.pe_in_private` (reflective/manual-mapped PE), `memory.elf_in_anonymous`, `memory.memfd_exec`, `memory.deleted_file_exec`, `memory.replaced_file_exec` (*info*: a system library replaced by an upgrade); image integrity: `memory.image_code_modified` (code overwritten after mapping — module stomping, T1055; *critical* from 16 KiB), `memory.image_header_mismatch` (the mapped image was replaced — hollowing and its relatives, T1055.012), `memory.image_file_unavailable`, `memory.image_inline_patch` (short patches: hooks), `defense.amsi_patched` (T1562.001), `defense.etw_patched` (T1562.006); and module B's `prompt.*`, `api.*`, `model.*` and `secret.*` (below) |
+| **Memory** (opt-in) | `yara:<rule>`, `memory.pe_in_private` (reflective/manual-mapped PE), `memory.elf_in_anonymous`, `memory.memfd_exec`, `memory.deleted_file_exec`, `memory.replaced_file_exec` (*info*: a system library replaced by an upgrade); image integrity: `memory.image_code_modified` (code overwritten after mapping — module stomping, T1055; *critical* from 16 KiB), `memory.image_header_mismatch` (the mapped image was replaced — hollowing and its relatives, T1055.012), `memory.image_exec_outside_code` (executable pages outside a module's code sections — stomping into a data section; *critical* when a payload was written there), `memory.image_file_unavailable`, `memory.image_inline_patch` (short patches: hooks), `defense.amsi_patched` (T1562.001), `defense.etw_patched` (T1562.006); and module B's `prompt.*`, `api.*`, `model.*` and `secret.*` (below) |
 | **Endpoint intelligence** (`-intel`) | `intel.tor_endpoint` (a remote address that is Tor infrastructure, T1090.003), `intel.anonymizer_endpoint` (a known anonymising VPN/proxy, T1090.002) — from the offline ASN/country/category attribution of the run's public remote addresses |
 
 **False-positive discipline.** Path heuristics grade locations: temporary,
@@ -467,11 +467,26 @@ at low severity (`memory.image_inline_patch`) since security products hook
 code too (the .NET runtime, which rewrites its own GC write barriers, is named
 as expected) — except in `amsi.dll` (`defense.amsi_patched`) and at ntdll's ETW
 event writers (`defense.etw_patched`), named by export. A header that no longer
-matches its file is `memory.image_header_mismatch`. Classic hollowing into
-private memory is `memory.pe_in_private` above. The PE reader is checked
+matches its file is `memory.image_header_mismatch`. Stomping doesn't have to
+overwrite the code: a payload written into a data section, the headers or
+past the last section, and those pages made executable, leaves `.text` intact.
+So on Windows every executable page of a loaded module is also placed against
+the file's layout, and any outside the sections the file marks as code is
+`memory.image_exec_outside_code` — *critical* when the bytes there differ from
+the file (a payload was written), *suspect* when only the protection changed.
+Recent Windows builds map an executable page of their own just past the end of
+every image with a `fothk` section, the same in every module; each copy is
+judged against the others in the process, so one that differs from a copy two
+or more modules share is reported (*critical*) and matching ones are counted
+under `skipped`. (On the Windows build CI runs, that page can't even be made
+writable from user mode.)
+(On Linux every executable mapping is compared already, wherever it lies.)
+Classic hollowing into private memory is `memory.pe_in_private` above. The PE reader is checked
 byte-for-byte against [pefile](https://github.com/erocarrera/pefile) on real
-compiler-built images (`LRNG_PE_SAMPLES`, `sidecar-rs/scripts/pe_golden.py`),
-and CI runs it against the real Windows loader.
+compiler-built images (`LRNG_PE_SAMPLES`, `sidecar-rs/scripts/pe_golden.py`) —
+code sections, data sections and headers alike — and CI runs it against the
+real Windows loader, rewriting code and stomping a data section in a live
+module and requiring both to be found at their addresses.
 
 **Rules.** Pass `-yara` a `.yar`/`.yara` file or a directory (searched
 recursively). Each file gets its own namespace, so rule names from different
@@ -499,7 +514,7 @@ contain LLM endpoints or model names legitimately.
 | `-mem-timeout` | 15m | the whole memory collector |
 | `-mem-workers` | 2 | sidecars scanning in parallel (each compiles the rules once) |
 | `-mem-pids` | all | only these PIDs |
-| `-mem-no-prompts` | off | YARA only (roughly 5× faster) |
+| `-mem-no-prompts` | off | skip the prompt-artifact scan (roughly 5× faster); YARA, the heuristics and image integrity still run, so `-collectors memory -mem-no-prompts` alone is a quick integrity sweep |
 | `-mem-include-lsass` | off | scan `lsass.exe` too |
 
 Results stream back per process, so a timeout keeps everything already
@@ -1097,11 +1112,6 @@ The shape is in [`docs/architecture.md`](docs/architecture.md);
 What's still to come. Everything already shipped is in
 [CHANGELOG.md](CHANGELOG.md), release by release.
 
-- [ ] **Module stomping into a data section (Windows).** Image integrity
-      compares the sections a module's file marks as code, so a payload written
-      into a data section whose pages were then made executable isn't compared.
-      Flag executable pages anywhere else in a loaded image as well. (Linux
-      already covers this: it compares every executable file mapping.)
 - [ ] **zstd decoding for journal fields** above journald's compression
       threshold (they are counted, not read, today).
 

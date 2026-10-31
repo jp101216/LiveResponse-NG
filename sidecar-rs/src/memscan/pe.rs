@@ -8,7 +8,7 @@
 //! at run time.
 #![cfg_attr(not(windows), allow(dead_code))]
 
-use super::integrity::{Change, DiffAcc, HeaderMismatch, Verdict};
+use super::integrity::{Change, DiffAcc, ExecOutside, HeaderMismatch, Verdict};
 
 pub const SCN_CNT_CODE: u32 = 0x0000_0020;
 pub const SCN_MEM_EXECUTE: u32 = 0x2000_0000;
@@ -81,6 +81,7 @@ pub struct Pe {
     pub magic: u16,
     pub image_base: u64,
     pub entry: u32,
+    pub section_alignment: u32,
     pub file_alignment: u32,
     pub size_of_image: u32,
     pub size_of_headers: u32,
@@ -119,6 +120,7 @@ pub fn parse(b: &[u8]) -> Result<Pe, &'static str> {
         _ => return Err("unknown optional-header magic"),
     };
     let entry = u32_at(b, oh + 16).ok_or(t)?;
+    let section_alignment = u32_at(b, oh + 32).ok_or(t)?;
     let file_alignment = u32_at(b, oh + 36).ok_or(t)?;
     let size_of_image = u32_at(b, oh + 56).ok_or(t)?;
     let size_of_headers = u32_at(b, oh + 60).ok_or(t)?;
@@ -156,6 +158,7 @@ pub fn parse(b: &[u8]) -> Result<Pe, &'static str> {
         magic,
         image_base,
         entry,
+        section_alignment,
         file_alignment,
         size_of_image,
         size_of_headers,
@@ -435,24 +438,42 @@ pub fn identity_mismatch(mem: &Pe, disk: &Pe) -> Vec<String> {
 const FOTHK: &str = "fothk";
 const SKIP_FOTHK: &str = "fothk section (thunks the Windows loader writes) not compared";
 
+/// One executable stretch of a mapped image, as an offset from its base and
+/// the protection the memory manager reports for it.
+#[derive(Debug, Clone)]
+pub struct ExecRange {
+    pub rva: usize,
+    pub len: usize,
+    pub protect: &'static str,
+}
+
+const PAGE: u64 = 0x1000;
+const SKIP_SMALL_ALIGN: &str =
+    "section alignment below a page (one protection for the whole image): executable pages not placed";
+/// Executable stretches outside the code reported per image, at most.
+const MAX_EXEC_OUTSIDE: usize = 16;
+
 /// What comparing one mapped PE image with its file found.
 #[derive(Debug, Default)]
 pub struct ImageCheck {
     pub changes: Vec<Change>,
     pub header: Option<HeaderMismatch>,
+    pub exec_outside: Vec<ExecOutside>,
     pub compared: usize,
     pub bytes: u64,
     pub skipped: Vec<&'static str>,
 }
 
 /// Compare the PE image mapped at `base` with its `file`. `mem_header` holds
-/// the first bytes of the mapping; `read` reads process memory at an address
-/// into a buffer and returns how many bytes it got.
+/// the first bytes of the mapping; `exec` lists the mapping's executable
+/// stretches; `read` reads process memory at an address into a buffer and
+/// returns how many bytes it got.
 pub fn check_image(
     path: &str,
     file: &[u8],
     mem_header: &[u8],
     base: usize,
+    exec: &[ExecRange],
     read: &mut dyn FnMut(usize, &mut [u8]) -> usize,
 ) -> ImageCheck {
     let mut out = ImageCheck::default();
@@ -542,6 +563,181 @@ pub fn check_image(
             }
         }
     }
+    out.exec_outside = exec_outside_code(
+        path,
+        &disk,
+        file,
+        base,
+        delta,
+        &relocs,
+        exec,
+        read,
+        &mut out.skipped,
+    );
+    out
+}
+
+/// Where a stretch of a mapped image lies, by the file's own layout.
+struct Place {
+    start: u64,
+    end: u64,
+    label: String,
+    code: bool,
+    section: Option<usize>,
+}
+
+/// FNV-1a: a digest for telling identical pages apart, not a security hash
+/// (the pages compared are the loader's, and a mismatch is what's reported).
+fn fnv1a(b: &[u8]) -> u64 {
+    b.iter().fold(0xcbf2_9ce4_8422_2325, |h, &x| {
+        (h ^ u64::from(x)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+fn round_up(x: u64, a: u64) -> u64 {
+    x.div_ceil(a).saturating_mul(a)
+}
+
+/// The image's executable memory that lies outside the sections its file
+/// marks as code — in the headers, a data section, or no section at all —
+/// each stretch compared with what the file maps there. Executable code has
+/// no business there: module stomping that writes its payload past `.text`
+/// and makes those pages executable looks like this.
+#[allow(clippy::too_many_arguments)]
+fn exec_outside_code(
+    path: &str,
+    disk: &Pe,
+    file: &[u8],
+    base: usize,
+    delta: u64,
+    relocs: &[Reloc],
+    exec: &[ExecRange],
+    read: &mut dyn FnMut(usize, &mut [u8]) -> usize,
+    skipped: &mut Vec<&'static str>,
+) -> Vec<ExecOutside> {
+    if exec.is_empty() {
+        return Vec::new();
+    }
+    // Sections smaller than a page share pages, so the memory manager maps
+    // the whole image with one protection.
+    let align = u64::from(disk.section_alignment);
+    if align < PAGE {
+        skipped.push(SKIP_SMALL_ALIGN);
+        return Vec::new();
+    }
+    let mut places = vec![Place {
+        start: 0,
+        end: round_up(u64::from(disk.size_of_headers), PAGE),
+        label: "headers".into(),
+        code: false,
+        section: None,
+    }];
+    for (i, s) in disk.sections.iter().enumerate() {
+        let size = if s.vsize == 0 { s.raw_size } else { s.vsize };
+        let start = u64::from(s.va);
+        places.push(Place {
+            start,
+            end: start.saturating_add(round_up(u64::from(size), align)),
+            label: format!("section {}", s.name),
+            code: s.exec(),
+            section: Some(i),
+        });
+    }
+
+    // Split each executable stretch at the layout's boundaries and keep the
+    // pieces no code section covers, merged where they continue each other.
+    let mut pieces: Vec<(u64, u64, usize, String)> = Vec::new(); // start, end, place (or MAX), protect
+    for r in exec {
+        let (a, b) = (r.rva as u64, (r.rva as u64).saturating_add(r.len as u64));
+        let mut cur = a;
+        while cur < b && pieces.len() < MAX_EXEC_OUTSIDE {
+            let next = places
+                .iter()
+                .flat_map(|p| [p.start, p.end])
+                .filter(|&x| x > cur)
+                .min()
+                .unwrap_or(b)
+                .min(b);
+            let covering: Vec<usize> = (0..places.len())
+                .filter(|&i| places[i].start <= cur && cur < places[i].end)
+                .collect();
+            if !covering.iter().any(|&i| places[i].code) {
+                let at = covering.first().copied().unwrap_or(usize::MAX);
+                match pieces.last_mut() {
+                    Some(last) if last.1 == cur && last.2 == at => {
+                        last.1 = next;
+                        if !last.3.split('+').any(|p| p == r.protect) {
+                            last.3 = format!("{}+{}", last.3, r.protect);
+                        }
+                    }
+                    _ => pieces.push((cur, next, at, r.protect.to_string())),
+                }
+            }
+            cur = next;
+        }
+    }
+
+    let iat = disk.dir(DIR_IAT);
+    // Windows adds a page of its own outside every section of images with a
+    // fothk section; those are told apart by comparison across modules.
+    let fothk = disk.sections.iter().any(|s| s.name == FOTHK);
+    let mut out = Vec::new();
+    for (start, end, at, protect) in pieces {
+        let len = ((end - start) as usize).min(MAX_SECTION);
+        // What the file maps there: the headers, the section's relocated
+        // bytes (zero fill past its raw data), or nothing.
+        let mut want = vec![0u8; len];
+        let mut mask: Vec<(usize, usize)> = Vec::new();
+        let place = places.get(at);
+        match place.and_then(|p| p.section) {
+            Some(i) => {
+                let s = &disk.sections[i];
+                let (bytes, smask) = disk.section_bytes(file, s, delta, relocs);
+                let off = (start - u64::from(s.va)) as usize;
+                if off < bytes.len() {
+                    let n = (bytes.len() - off).min(len);
+                    want[..n].copy_from_slice(&bytes[off..off + n]);
+                }
+                for (ms, me) in smask {
+                    let (ms, me) = (ms.saturating_sub(off), me.saturating_sub(off).min(len));
+                    if ms < me {
+                        mask.push((ms, me));
+                    }
+                }
+            }
+            None if place.is_some() => {
+                let hdr = (disk.size_of_headers as usize).min(file.len());
+                let s = start as usize;
+                if s < hdr {
+                    let n = (hdr - s).min(len);
+                    want[..n].copy_from_slice(&file[s..s + n]);
+                }
+            }
+            None => {}
+        }
+        // The loader writes resolved imports into the IAT, which often sits
+        // in a data section.
+        if let Some((irva, isize)) = iat {
+            let a = u64::from(irva).max(start);
+            let b = (u64::from(irva) + u64::from(isize)).min(start + len as u64);
+            if a < b {
+                mask.push(((a - start) as usize, (b - start) as usize));
+            }
+        }
+        let mut mem = vec![0u8; len];
+        let got = read(base.wrapping_add(start as usize), &mut mem);
+        let mut acc = DiffAcc::new();
+        acc.feed(0, &mem[..got], &want[..got], &mask);
+        out.push(ExecOutside {
+            path: path.to_string(),
+            start: base.wrapping_add(start as usize),
+            len: (end - start) as usize,
+            what: place.map_or_else(|| "no section".to_string(), |p| p.label.clone()),
+            protect,
+            stats: acc.finish(),
+            loader_page: (place.is_none() && fothk).then(|| (disk.machine, fnv1a(&mem[..got]))),
+        });
+    }
     out
 }
 
@@ -567,6 +763,7 @@ mod tests {
         let oh = fh + 20;
         f[oh..oh + 2].copy_from_slice(&0x20bu16.to_le_bytes());
         f[oh + 24..oh + 32].copy_from_slice(&0x1_8000_0000u64.to_le_bytes());
+        f[oh + 32..oh + 36].copy_from_slice(&0x1000u32.to_le_bytes()); // SectionAlignment
         f[oh + 36..oh + 40].copy_from_slice(&0x200u32.to_le_bytes()); // FileAlignment
         f[oh + 56..oh + 60].copy_from_slice(&0x4000u32.to_le_bytes()); // SizeOfImage
         f[oh + 60..oh + 64].copy_from_slice(&0x400u32.to_le_bytes()); // SizeOfHeaders
@@ -637,13 +834,122 @@ mod tests {
     }
 
     fn check(file: &[u8], img: &[u8], base: usize) -> ImageCheck {
+        check_exec(file, img, base, &[])
+    }
+
+    fn check_exec(file: &[u8], img: &[u8], base: usize, exec: &[ExecRange]) -> ImageCheck {
         let mut read = |addr: usize, buf: &mut [u8]| {
             let src = img.get(addr - base..).unwrap_or(&[]);
             let n = buf.len().min(src.len());
             buf[..n].copy_from_slice(&src[..n]);
             n
         };
-        check_image("tiny.dll", file, &img[..0x400], base, &mut read)
+        check_image("tiny.dll", file, &img[..0x400], base, exec, &mut read)
+    }
+
+    fn rx(rva: usize, len: usize, protect: &'static str) -> ExecRange {
+        ExecRange { rva, len, protect }
+    }
+
+    #[test]
+    fn executable_pages_outside_the_code_are_found() {
+        let mut f = tiny_dll();
+        let base = 0x7ff6_1230_0000;
+        // The loader's own view: only .text is executable.
+        let img = map(&f, base);
+        let r = check_exec(&f, &img, base, &[rx(0x1000, 0x1000, "RX")]);
+        assert!(r.exec_outside.is_empty(), "{:?}", r.exec_outside);
+
+        // .edata made executable, with a payload written into it.
+        let mut stomped = img.clone();
+        for b in &mut stomped[0x3100..0x3300] {
+            *b = !*b;
+        }
+        let r = check_exec(
+            &f,
+            &stomped,
+            base,
+            &[rx(0x1000, 0x1000, "RX"), rx(0x3000, 0x1000, "RWX")],
+        );
+        assert_eq!(r.exec_outside.len(), 1, "{:?}", r.exec_outside);
+        let e = &r.exec_outside[0];
+        assert_eq!(
+            (e.what.as_str(), e.start, e.len, e.protect.as_str()),
+            ("section .edata", base + 0x3000, 0x1000, "RWX")
+        );
+        assert_eq!(e.stats.verdict(), Verdict::Rewritten);
+        assert_eq!((e.stats.differing, e.stats.largest_at), (0x200, 0x100));
+
+        // Only the protection flipped: still found, with the file's bytes.
+        // Headers, a run of two protections in one section, and memory past
+        // every section are each placed.
+        let r = check_exec(
+            &f,
+            &img,
+            base,
+            &[
+                rx(0, 0x1000, "RX"),
+                rx(0x2000, 0x800, "RX"),
+                rx(0x2800, 0x800, "RWX"),
+                rx(0x4000, 0x1000, "RX"),
+            ],
+        );
+        let got: Vec<(&str, usize, &str, u64)> = r
+            .exec_outside
+            .iter()
+            .map(|e| {
+                (
+                    e.what.as_str(),
+                    e.len,
+                    e.protect.as_str(),
+                    e.stats.differing,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("headers", 0x1000, "RX", 0),
+                ("section .reloc", 0x1000, "RX+RWX", 0),
+                ("no section", 0x1000, "RX", 0),
+            ]
+        );
+
+        // In an image with a fothk section, memory no section covers is the
+        // page Windows adds there: marked for comparison across modules.
+        let mut fo = f.clone();
+        let s1 = 0x84 + 20 + 0xF0 + 40;
+        fo[s1..s1 + 8].copy_from_slice(b"fothk\0\0\0");
+        let r = check_exec(&fo, &map(&fo, base), base, &[rx(0x4000, 0x1000, "RX")]);
+        let e = &r.exec_outside[0];
+        assert_eq!(e.what, "no section");
+        assert_eq!(
+            e.loader_page,
+            Some((0x8664, fnv1a(&[0u8; 0]))),
+            "nothing mapped there in the test image"
+        );
+        let r = check_exec(&f, &img, base, &[rx(0x4000, 0x1000, "RX")]);
+        assert_eq!(
+            r.exec_outside[0].loader_page, None,
+            "no fothk section, no loader page"
+        );
+
+        // The IAT, which the loader fills in, isn't held against a data
+        // section (here: resolved pointers written over .edata's start).
+        let iat = 0x84 + 20 + 112 + DIR_IAT * 8;
+        f[iat..iat + 4].copy_from_slice(&0x3000u32.to_le_bytes());
+        f[iat + 4..iat + 8].copy_from_slice(&0x10u32.to_le_bytes());
+        let mut bound = map(&f, base);
+        bound[0x3000..0x3010].copy_from_slice(&[0xAB; 16]);
+        let r = check_exec(&f, &bound, base, &[rx(0x3000, 0x1000, "RX")]);
+        assert_eq!(r.exec_outside[0].stats.differing, 0);
+
+        // Sections that share pages get one protection for the whole image:
+        // nothing can be placed.
+        f[0x84 + 20 + 32..0x84 + 20 + 36].copy_from_slice(&0x200u32.to_le_bytes());
+        let r = check_exec(&f, &map(&f, base), base, &[rx(0, 0x4000, "RWXC")]);
+        assert!(r.exec_outside.is_empty());
+        assert_eq!(r.skipped, [SKIP_SMALL_ALIGN]);
     }
 
     #[test]
@@ -765,7 +1071,8 @@ mod tests {
                 }
                 let _ = pe.exports(&g).near(x);
                 let mut read = |_: usize, buf: &mut [u8]| buf.len() / 2;
-                let _ = check_image("fuzz", &g, &g, 0x1000_0000, &mut read);
+                let exec = [rx(0, 0x8000, "RWX"), rx(x as usize % 0x10000, 0x3000, "RX")];
+                let _ = check_image("fuzz", &g, &g, 0x1000_0000, &exec, &mut read);
             }
         }
     }
@@ -780,6 +1087,7 @@ mod tests {
             return;
         };
         let mut checked = 0;
+        let mut exec_checked = 0;
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
@@ -810,9 +1118,39 @@ mod tests {
                 n
             };
             let header = &golden[..golden.len().min(0x10000)];
-            let r = check_image(stem, &file, header, base, &mut read);
+            let r = check_image(stem, &file, header, base, &[], &mut read);
             assert!(r.header.is_none() && r.changes.is_empty(), "{stem}: {r:?}");
             assert!(r.compared > 0 && r.bytes > 0, "{stem}: nothing compared");
+
+            // Every page executable: each part that isn't code is reported,
+            // and the bytes expected there (headers, relocated data, zero
+            // fill) are exactly pefile's mapping.
+            let whole = [rx(0, golden.len(), "RWX")];
+            let w = check_image(stem, &file, header, base, &whole, &mut read);
+            if pe.section_alignment >= 0x1000 {
+                assert!(w.exec_outside.iter().any(|e| e.what == "headers"), "{stem}");
+                for e in &w.exec_outside {
+                    assert_eq!(
+                        e.stats.differing,
+                        0,
+                        "{stem}: {} at +0x{:x}: {:?}",
+                        e.what,
+                        e.start - base,
+                        e.stats
+                    );
+                    assert!(
+                        e.what == "headers"
+                            || e.what == "no section"
+                            || pe
+                                .sections
+                                .iter()
+                                .any(|s| !s.exec() && e.what == format!("section {}", s.name)),
+                        "{stem}: {}",
+                        e.what
+                    );
+                }
+                exec_checked += w.exec_outside.len();
+            }
 
             // Exports agree with pefile's, and a hook on a real exported
             // function is reported as a patch named after it.
@@ -846,7 +1184,7 @@ mod tests {
                     buf[..n].copy_from_slice(&src[..n]);
                     n
                 };
-                let h = check_image(stem, &file, header, base, &mut read);
+                let h = check_image(stem, &file, header, base, &[], &mut read);
                 let c = h.changes.first().expect("hook not found");
                 assert_eq!(c.stats.verdict(), Verdict::Patched, "{stem}");
                 let (names, off) = c.near[0].rsplit_once('+').expect("named");
@@ -866,5 +1204,6 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 0, "LRNG_PE_SAMPLES={dir} holds no samples");
+        eprintln!("{exec_checked} non-code part(s) of {checked} images placed and matched");
     }
 }

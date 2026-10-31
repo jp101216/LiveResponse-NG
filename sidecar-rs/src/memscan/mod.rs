@@ -139,16 +139,8 @@ pub fn handle(req: &Request, emit: &mut dyn FnMut(Response)) {
             }
         }
     };
-    if rules.is_none() && !opts.prompts {
-        for &pid in &pids {
-            emit(failure(
-                pid,
-                "error",
-                "nothing to do: no rules_path and prompts disabled",
-            ));
-        }
-        return;
-    }
+    // Without rules or the prompt scan there is still work: image integrity
+    // and the memory heuristics need no rules.
 
     for &pid in &pids {
         let resp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -491,6 +483,11 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
 
             any = true;
             bytes_scanned += n as u64;
+            if session.is_none() && !opts.prompts {
+                // Only the heuristics read the bytes, and they look at each
+                // region's first chunk.
+                break;
+            }
             off += n;
             if n < want {
                 // Short read: the rest of this chunk is unreadable.

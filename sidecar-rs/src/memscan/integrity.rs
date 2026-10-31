@@ -177,6 +177,33 @@ pub struct HeaderMismatch {
     pub fields: Vec<String>,
 }
 
+/// Executable memory in a mapped image outside the sections its file marks
+/// as code (PE images only: on Linux every executable mapping is compared).
+#[derive(Debug, Clone)]
+pub struct ExecOutside {
+    pub path: String,
+    pub start: usize,
+    pub len: usize,
+    /// Where it lies: "headers", "section .data", "no section".
+    pub what: String,
+    /// The protections seen there ("RX", "RWX", "RX+RWX").
+    pub protect: String,
+    /// Those bytes compared with what the file maps there.
+    pub stats: DiffStats,
+    /// For memory no section covers in an image with a `fothk` section: the
+    /// image's machine and a digest of the bytes. Windows adds a page of its
+    /// own there, the same in every module, so it is judged against its
+    /// copies in the process's other modules (`Report::settle_loader_pages`).
+    pub loader_page: Option<(u16, u64)>,
+}
+
+#[cfg_attr(not(any(windows, lrng_typecheck_windows)), allow(dead_code))] // Windows only
+pub const SKIP_LOADER_PAGE_MATCH: &str =
+    "page Windows adds to fothk images, same bytes as in the process's other modules";
+#[cfg_attr(not(any(windows, lrng_typecheck_windows)), allow(dead_code))] // Windows only
+pub const SKIP_LOADER_PAGE_ALONE: &str =
+    "page Windows adds to fothk images, no identical copy in another module to judge it by";
+
 /// Executable image memory whose backing file can't be read back.
 #[derive(Debug, Clone)]
 pub struct Unavailable {
@@ -197,6 +224,7 @@ pub struct Report {
     pub skipped: BTreeMap<&'static str, usize>,
     pub changes: Vec<Change>,
     pub headers: Vec<HeaderMismatch>,
+    pub exec_outside: Vec<ExecOutside>,
     pub unavailable: Vec<Unavailable>,
     pub stopped: Option<String>,
 }
@@ -316,6 +344,31 @@ impl Report {
         *self.skipped.entry(why).or_default() += 1;
     }
 
+    /// Judge the pages Windows adds outside every section of images that
+    /// have a `fothk` section. They are the loader's own code and identical
+    /// in every module of an architecture, so a copy matching one that two or
+    /// more modules share is the loader's (skipped), one that differs from it
+    /// was written to (kept, and reported), and with no two copies alike
+    /// there is nothing to judge by (skipped, counted).
+    #[cfg_attr(not(any(windows, lrng_typecheck_windows)), allow(dead_code))] // Windows only
+    pub fn settle_loader_pages(&mut self) {
+        let mut seen: BTreeMap<(u16, u64), usize> = BTreeMap::new();
+        for e in &self.exec_outside {
+            if let Some(k) = e.loader_page {
+                *seen.entry(k).or_default() += 1;
+            }
+        }
+        let shared = |machine: u16| seen.iter().any(|(&(m, _), &n)| m == machine && n >= 2);
+        for e in std::mem::take(&mut self.exec_outside) {
+            match e.loader_page {
+                None => self.exec_outside.push(e),
+                Some(k) if seen[&k] >= 2 => self.skip(SKIP_LOADER_PAGE_MATCH),
+                Some((m, _)) if !shared(m) => self.skip(SKIP_LOADER_PAGE_ALONE),
+                Some(_) => self.exec_outside.push(e),
+            }
+        }
+    }
+
     /// The findings, as sidecar hits (regions are filled in by the caller).
     pub fn hits(&self) -> Vec<Hit> {
         let mut out = Vec::new();
@@ -347,6 +400,13 @@ impl Report {
                     m.fields.join("; ")
                 ),
             ));
+        }
+        let mut by_image: BTreeMap<&str, Vec<&ExecOutside>> = BTreeMap::new();
+        for e in &self.exec_outside {
+            by_image.entry(e.path.as_str()).or_default().push(e);
+        }
+        for group in by_image.values() {
+            out.push(exec_outside_hit(group));
         }
         for u in &self.unavailable {
             out.push(hit(
@@ -383,6 +443,7 @@ impl Report {
             "rewritten": count(Verdict::Rewritten),
             "patched": count(Verdict::Patched),
             "header_mismatch": self.headers.len(),
+            "exec_outside_code": self.exec_outside.len(),
             "unavailable": self.unavailable.len(),
             "skipped": self.skipped,
             "stopped": self.stopped,
@@ -446,6 +507,62 @@ fn tamper_hit(c: &Change) -> Option<Hit> {
         ));
     }
     None
+}
+
+fn size_label(n: usize) -> String {
+    if n >= 1024 && n.is_multiple_of(1024) {
+        format!("{} KiB", n / 1024)
+    } else {
+        format!("{n} bytes")
+    }
+}
+
+/// One hit per image with executable memory outside its code sections.
+fn exec_outside_hit(group: &[&ExecOutside]) -> Hit {
+    let written = group
+        .iter()
+        .any(|e| e.loader_page.is_some() || e.stats.verdict() == Verdict::Rewritten);
+    let mut parts: Vec<String> = group
+        .iter()
+        .take(4)
+        .map(|e| {
+            let bytes = if e.loader_page.is_some() {
+                "unlike the page Windows adds to the process's other modules".to_string()
+            } else if e.stats.differing > 0 {
+                format!("{} byte(s) differ from the file", e.stats.differing)
+            } else {
+                "same bytes as the file".to_string()
+            };
+            format!(
+                "{} at 0x{:x} ({}, {}; {bytes})",
+                e.what,
+                e.start,
+                size_label(e.len),
+                e.protect
+            )
+        })
+        .collect();
+    if group.len() > 4 {
+        parts.push(format!("and {} more", group.len() - 4));
+    }
+    let first = group[0];
+    hit(
+        "memory.image_exec_outside_code",
+        if written { "critical" } else { "suspect" },
+        "T1055",
+        if written { 85 } else { 65 },
+        first.start + first.stats.site_offsets.first().copied().unwrap_or(0),
+        format!(
+            "executable memory in {} outside the sections its file marks as code: {}. {}",
+            first.path,
+            parts.join("; "),
+            if written {
+                "Code was written there and made executable: module stomping that places its payload past the code sections looks like this"
+            } else {
+                "Pages that should hold data, headers or nothing were made executable: module stomping prepares memory like this"
+            }
+        ),
+    )
 }
 
 /// One hit for all of a process's short patches, grouped by module.
@@ -722,6 +839,100 @@ mod tests {
             "{}",
             h.context
         );
+    }
+
+    #[test]
+    fn exec_outside_code_is_suspect_and_critical_when_written() {
+        let e = |what: &str, start: usize, differing: u64| ExecOutside {
+            path: r"C:\Windows\System32\netshell.dll".into(),
+            start,
+            len: 0x1000,
+            what: what.into(),
+            protect: "RWX".into(),
+            stats: DiffStats {
+                compared: 0x1000,
+                differing,
+                sites: usize::from(differing > 0),
+                largest: differing as usize,
+                largest_at: 0x10,
+                site_offsets: if differing > 0 { vec![0x10] } else { vec![] },
+            },
+            loader_page: None,
+        };
+        let mut r = Report {
+            supported: true,
+            ..Default::default()
+        };
+        // Only the protection changed.
+        r.exec_outside
+            .push(e("section .rdata", 0x7ff8_0000_5000, 0));
+        let h = &r.hits()[0];
+        assert_eq!(
+            (h.rule.as_str(), h.severity.as_str(), h.offset),
+            (
+                "memory.image_exec_outside_code",
+                "suspect",
+                0x7ff8_0000_5000
+            )
+        );
+        assert!(
+            h.context
+                .contains("section .rdata at 0x7ff800005000 (4 KiB, RWX; same bytes as the file)"),
+            "{}",
+            h.context
+        );
+        // A payload written into another section of the same image: one
+        // finding for the image, now critical.
+        r.exec_outside
+            .push(e("section .data", 0x7ff8_0000_9000, 600));
+        let hs = r.hits();
+        assert_eq!(hs.len(), 1);
+        assert_eq!(hs[0].severity, "critical");
+        assert!(hs[0].context.contains("600 byte(s) differ from the file"));
+        assert_eq!(r.meta()["exec_outside_code"], 2);
+    }
+
+    #[test]
+    fn loader_pages_are_judged_against_their_copies() {
+        let page = |path: &str, machine: u16, digest: u64| ExecOutside {
+            path: path.into(),
+            start: 0x7ff8_0000_0000,
+            len: 0x1000,
+            what: "no section".into(),
+            protect: "RX".into(),
+            stats: DiffStats::default(),
+            loader_page: Some((machine, digest)),
+        };
+        let mut r = Report {
+            supported: true,
+            ..Default::default()
+        };
+        // ntdll, kernel32 and kernelbase agree; the 32-bit image is alone in
+        // its architecture; amsi.dll's copy was written to.
+        r.exec_outside = vec![
+            page("ntdll.dll", 0x8664, 7),
+            page("kernel32.dll", 0x8664, 7),
+            page("kernelbase.dll", 0x8664, 7),
+            page("wow.dll", 0x14c, 9),
+            page("amsi.dll", 0x8664, 8),
+        ];
+        r.settle_loader_pages();
+        assert_eq!(r.exec_outside.len(), 1);
+        assert_eq!(r.exec_outside[0].path, "amsi.dll");
+        assert_eq!(r.skipped[SKIP_LOADER_PAGE_MATCH], 3);
+        assert_eq!(r.skipped[SKIP_LOADER_PAGE_ALONE], 1);
+        let h = &r.hits()[0];
+        assert_eq!(h.severity, "critical");
+        assert!(
+            h.context.contains("unlike the page Windows adds"),
+            "{}",
+            h.context
+        );
+
+        // Every copy different (nothing to judge by): none reported.
+        r.exec_outside = vec![page("a.dll", 0x8664, 1), page("b.dll", 0x8664, 2)];
+        r.settle_loader_pages();
+        assert!(r.exec_outside.is_empty());
     }
 
     #[test]

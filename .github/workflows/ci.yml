@@ -166,14 +166,15 @@ jobs:
           Stop-Process -Id $p.Id
           if (-not $hits) { throw "YARA marker not found in live process memory" }
           # Image integrity ran over the live PowerShell's ~100 modules and found nothing
-          # rewritten: a false-positive gate on real system DLLs and .NET native images.
+          # rewritten and no executable pages outside their code sections: a
+          # false-positive gate on real system DLLs and .NET native images.
           $recs = @($r.results | Where-Object { $_.collector -eq 'memory' } | ForEach-Object { $_.records })
           $ii = @($recs | ForEach-Object { $_.fields.image_integrity } | Where-Object { $_ })
           Write-Output ("::notice::image integrity (live PowerShell): " + ($ii | ConvertTo-Json -Compress -Depth 6))
           $recs | ForEach-Object { $_.findings } | Where-Object { $_ -and ($_.rule -like 'memory.image_*' -or $_.rule -like 'defense.*') } |
             Select-Object -First 8 | ForEach-Object { Write-Output ("::notice::" + $_.rule + " [" + $_.severity + "]: " + ($_.detail -replace '%','%25')) }
           if ($ii.Count -lt 1 -or $ii[0].images -lt 1 -or $ii[0].bytes_compared -lt 1) { throw "image integrity compared nothing in a live process" }
-          foreach ($rule in 'memory.image_code_modified', 'memory.image_header_mismatch', 'defense.amsi_patched', 'defense.etw_patched') {
+          foreach ($rule in 'memory.image_code_modified', 'memory.image_header_mismatch', 'memory.image_exec_outside_code', 'defense.amsi_patched', 'defense.etw_patched') {
             if ($r.summary.by_rule.$rule) { throw "false positive: $rule on a clean PowerShell process" }
           }
 

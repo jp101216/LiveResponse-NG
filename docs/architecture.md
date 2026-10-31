@@ -25,6 +25,10 @@ internal/
                        output, the console summary
   sidecar/             Go side of the Go<->Rust contract + client
   config/              Resolved run configuration
+viewer/                The report viewer: lrng-viewer.html (one offline page:
+                       HTML, CSS and JS, no dependencies), embedded by
+                       viewer.go for -format html; browsertest/ opens hostile
+                       and real reports in Chromium
 sidecar-rs/            Rust sidecar
   src/prompts.rs       AI module B (prompt artifacts, files and memory)
   src/memscan/         scan_memory: region walk, YARA-X block scan,
@@ -383,6 +387,31 @@ endpoint intelligence add roll up into `summary` like any other.
    tests for both malicious and ordinary input.
 
 That's it — it shows up in `-list` and runs by default.
+
+## Report viewer
+
+`viewer/lrng-viewer.html` is the whole viewer: one page, no build step, no
+framework, nothing fetched. It reads a report from a dropped or chosen file
+(JSON, or JSONL rebuilt into the envelope from its `run`, `collector` and
+`record` events), or from the `<script type="application/json"
+id="lrng-report">` block that `viewer.Render` fills for `-format html`. It
+builds one model (results with prototype-less field maps, findings flattened
+and ranked, ATT&CK tactic counts), then renders views from it; the process
+tree and timeline are built the first time they're needed. The hash names the
+view (`#findings`, `#collector/<name>`), and anything it names is looked up in
+the model, never inserted.
+
+Safety rests on two independent layers. The first is that nothing from a report
+is parsed as markup: the `h()` helper turns every string into a Text node or an
+attribute value, and the page uses no API that parses HTML or code (checked by
+`viewer_test.go`). The second is the content security policy, which allows the
+page's own script and stylesheet by SHA-256 hash and nothing else, so inline
+code can't run and no connection can leave the page. The Go test fails if the
+hashes are stale; `go test ./viewer -update` rewrites them.
+`viewer/browsertest/browser_test.cjs` is the end-to-end check, in Chromium
+(through Playwright). It opens a hostile report embedded, as JSON and as JSONL,
+plus real Windows and Linux reports, and walks every view. In CI it runs
+against the reports the Windows and Linux runners produce.
 
 ## Go <-> Rust sidecar contract
 

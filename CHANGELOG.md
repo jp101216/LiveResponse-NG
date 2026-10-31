@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.12.0
+
+Adds the report viewer: one offline HTML page that reads lrng's reports, so an
+analyst never has to read the JSON, plus `-format html`, which writes a report
+already inside it: one file to open in a browser or attach to a ticket. The
+agent itself stays command-line. No new dependencies (the page is plain HTML,
+CSS and JavaScript, embedded in the agent with `go:embed`), and the report
+schema is unchanged at 1.2.
+
+### Added
+- **Report viewer (`viewer/lrng-viewer.html`).** Drop a `.json` or `.jsonl`
+  report onto it, or open one. It shows:
+  - the run at a glance: the host and OS; when the report was collected; the
+    run ID, agent version and elevation; the report's SHA-256, to compare with
+    the `.sha256` lrng wrote; warnings for a non-elevated or interrupted run and
+    for collector errors; and a strip of ATT&CK tactics in kill-chain order,
+    each counting its findings and coloured by the worst of them (a click
+    filters to that tactic);
+  - findings, most severe first, filterable by severity, collector, tactic and
+    text, each opening to the record behind it, with links to the process tree
+    and the collector's table;
+  - the process tree, with processes that have findings marked, collapsible
+    branches, and a search that keeps the path down to each match;
+  - the timeline: the `-timeline` result, or one built from the report's own
+    timestamps, grouped by day, each entry linked to its source record;
+  - indicators from `-iocs` with their `-intel` attribution, copyable as a list;
+  - the run's settings, host details and every collector's errors;
+  - every collector's records as a table that can be searched and sorted.
+
+  It works in light and dark mode and at phone width, and opens a 43 MB report
+  of 100,000 records in about a second. Monospace marks verbatim evidence from
+  the host; everything else is the viewer's own words. The standalone page
+  ships in every release archive, beside the agent.
+- **`-format html`.** The `json` envelope inside the viewer, in one file; the
+  `.sha256` beside it covers both. The report is HTML-escaped into a
+  non-executable data block (`viewer.Render`), so no value in it can close the
+  block or open markup.
+
+### Security
+- **The viewer treats every report as hostile.** Process names, command lines
+  and event data are attacker-controlled, so no report string is ever parsed as
+  markup or code: values only become Text nodes or attribute values, and the
+  script uses none of `innerHTML`, `insertAdjacentHTML`, `document.write`,
+  `eval` or `new Function` (a Go test checks). Field names are looked up on
+  prototype-less objects, so keys like `__proto__` and `constructor` are just
+  data. The only links it makes go to `attack.mitre.org`, for technique IDs it
+  has validated, and a hash route can only name views and collectors that
+  exist. The page's content security policy allows its one script and one
+  stylesheet by SHA-256 hash and nothing else (`default-src 'none'`), so even
+  a successful injection couldn't run inline code, and the page can't load or
+  send anything: a report opened in it stays on the machine. A Go test keeps
+  the hashes in step with the page (`go test ./viewer -update` after an edit).
+- **Tested in a real browser with hostile reports** (`viewer/browsertest`, a
+  new CI job). A report carrying markup, script, URL and template payloads in
+  every field, prototype keys, malformed records, process cycles and a chain
+  3,000 processes deep is opened embedded, as JSON and as JSONL. Real reports
+  are also opened: the Windows runner's JSON and JSONL, and a Linux runner's.
+  For each, the job walks every view in Chromium and opens every finding,
+  process and record it shows. It fails on any dialog, page error, console
+  error, element created from report markup, link outside ATT&CK, request
+  leaving the page, or prototype pollution. It also checks that the policy is
+  in force: an injected script doesn't run and `fetch` is refused. Making the
+  viewer render report strings as markup fails this test thousands of times.
+
 ## 0.11.1
 
 Closes the gap 0.11.0's image-integrity check left on Windows: module stomping

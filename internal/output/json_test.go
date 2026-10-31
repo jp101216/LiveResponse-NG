@@ -108,6 +108,39 @@ func TestJSONLEvents(t *testing.T) {
 	}
 }
 
+// The html format is the viewer with the JSON envelope inside: the same
+// report, readable back from the page's data block.
+func TestHTMLReport(t *testing.T) {
+	rep := Report{Schema: SchemaVersion, RunID: "r1", Host: `<b>h</b>`, Results: sampleResults()}
+	rep.Summary = Summarise(rep.Results)
+	var buf bytes.Buffer
+	if err := Write(&buf, rep, FormatHTML, true); err != nil {
+		t.Fatal(err)
+	}
+	page := buf.String()
+	open := `<script type="application/json" id="lrng-report">`
+	i := strings.Index(page, open)
+	if !strings.HasPrefix(page, "<!doctype html>") || i < 0 {
+		t.Fatalf("not the viewer page: %.120q", page)
+	}
+	data := page[i+len(open):]
+	data = data[:strings.Index(data, "</script>")]
+	var back Report
+	if err := json.Unmarshal([]byte(data), &back); err != nil {
+		t.Fatalf("embedded report: %v", err)
+	}
+	if back.RunID != "r1" || back.Host != "<b>h</b>" || len(back.Results) != 2 || back.Summary.Findings != 4 {
+		t.Fatalf("embedded report = %+v", back)
+	}
+	if strings.Contains(data, "<b>") {
+		t.Fatal("markup in the report reached the page unescaped")
+	}
+	path := filepath.Join(t.TempDir(), "host.html")
+	if _, err := WriteFile(path, rep, FormatHTML, false, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNewRunID(t *testing.T) {
 	a, b := NewRunID(), NewRunID()
 	if a == b || !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(a) {

@@ -10,6 +10,7 @@
 //	lrng -collectors default,dnscache -out host.json   # defaults + DNS cache
 //	lrng -no-dns -out E:\case42\host.json   # don't touch the host DNS cache
 //	lrng -format jsonl -out host.jsonl      # one event per line for a SIEM
+//	lrng -format html -out host.html        # the report in the viewer, one file
 //	lrng -ping-sidecar               # sidecar next to lrng, or -sidecar <path>
 //	lrng -prompt-scan suspicious.ps1
 //	lrng -yara .\rules -out host.json       # default collectors + memory scan
@@ -43,7 +44,7 @@ import (
 // Set at build time: go build -ldflags "-X main.version=... -X main.commit=...".
 // These must be vars — -X silently does nothing to a const.
 var (
-	version = "0.11.1"
+	version = "0.12.0"
 	commit  = ""
 )
 
@@ -64,7 +65,7 @@ func main() {
 	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "max collectors to run concurrently")
 	flag.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "per-collector timeout (0 = none)")
 	flag.StringVar(&cfg.Output, "out", "", "write the report to this path, plus <path>.sha256 (default: stdout)")
-	flag.StringVar(&cfg.Format, "format", cfg.Format, "report format: json (one envelope) or jsonl (one event per line)")
+	flag.StringVar(&cfg.Format, "format", cfg.Format, "report format: json (one envelope), jsonl (one event per line) or html (the report viewer with the report inside)")
 	flag.BoolVar(&cfg.Force, "force", false, "allow -out to overwrite an existing file")
 	flag.BoolVar(&cfg.Pretty, "pretty", cfg.Pretty, "indent JSON output (json format only)")
 	flag.BoolVar(&cfg.Quiet, "quiet", false, "don't print the findings summary to stderr")
@@ -158,8 +159,8 @@ func validate(cfg config.Config, args []string, memScan int) error {
 		return errors.New("-mem-workers must be at least 1")
 	case cfg.Timeout < 0 || cfg.MemTimeout < 0 || cfg.MemBudget < 0:
 		return errors.New("timeouts and budgets can't be negative")
-	case cfg.Format != output.FormatJSON && cfg.Format != output.FormatJSONL:
-		return fmt.Errorf("-format must be %s or %s", output.FormatJSON, output.FormatJSONL)
+	case cfg.Format != output.FormatJSON && cfg.Format != output.FormatJSONL && cfg.Format != output.FormatHTML:
+		return fmt.Errorf("-format must be %s, %s or %s", output.FormatJSON, output.FormatJSONL, output.FormatHTML)
 	case memScan < 0:
 		return errors.New("-mem-scan needs a positive PID")
 	case cfg.FailOn != "" && collector.SeverityRank(collector.Severity(cfg.FailOn)) == 0:
@@ -188,6 +189,7 @@ Usage: lrng [flags]
   lrng -collectors default,dnscache    add an opt-in collector to the default set
   lrng -no-dns -out host.json          skip module A's LLM-provider DNS lookups
   lrng -format jsonl -out host.jsonl   one event per line, for a SIEM
+  lrng -format html -out host.html     the report in the viewer: one file to open in a browser
   lrng -fail-on suspect -quiet         exit status 3 when a suspect or critical finding exists
   lrng -yara rules -out host.json      also scan process memory (needs lrng-sidecar)
   lrng -evtx Security.evtx -out logs.json   offline: triage a saved .evtx (any OS)

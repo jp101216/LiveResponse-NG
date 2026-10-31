@@ -238,7 +238,10 @@ ARM64X image changes for x64 callers — with the file's. The same region walk
 records each module's executable stretches; any outside the sections the file
 marks as code (headers, data sections, past the last section) is reported and
 its bytes compared with what the file maps there, so stomping that leaves
-`.text` intact is still seen. A file no drive letter reaches is read through
+`.text` intact is still seen. The executable page recent Windows builds add
+outside every section of images with a `fothk` section has no file bytes to
+compare with; each copy is compared with the others in the process instead
+(`Report::settle_loader_pages`). A file no drive letter reaches is read through
 its `\\?\GLOBALROOT` device path. On Linux each
 executable file mapping is compared with `/proc/<pid>/map_files/<range>`, the
 inode actually mapped, falling back to the path only when its inode matches.

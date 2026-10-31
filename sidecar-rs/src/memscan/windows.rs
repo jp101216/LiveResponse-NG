@@ -236,6 +236,7 @@ impl ProcessMemory for WinProcess {
             rep.headers.extend(c.header);
             rep.exec_outside.extend(c.exec_outside);
         }
+        rep.settle_loader_pages();
         rep
     }
 }
@@ -381,7 +382,7 @@ fn kind_name(t: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memscan::integrity::Verdict;
+    use crate::memscan::integrity::{Verdict, SKIP_LOADER_PAGE_MATCH};
     use crate::memscan::procmem::file_name_lower;
     use std::time::Duration;
     use windows_sys::Win32::Foundation::FreeLibrary;
@@ -475,6 +476,66 @@ mod tests {
             .find(|s| s.exec() && s.file_len() >= 0x1400)
             .expect("a code section of at least 5 KiB");
         let at = base + text.va as usize + 0x400;
+
+        // The page Windows adds to images with a fothk section, if this build
+        // adds one: where it lies (for the log), and written to below to show
+        // a tampered copy is told from the loader's.
+        let wp = WinProcess {
+            // SAFETY: plain Win32 call; the handle is closed when wp drops.
+            h: unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                    0,
+                    std::process::id(),
+                )
+            },
+        };
+        let exec = wp
+            .images()
+            .into_iter()
+            .find(|(b, _)| *b == base)
+            .map(|(_, e)| e)
+            .unwrap_or_default();
+        let mut header = vec![0u8; HEADER_READ];
+        let n = me.read(base, &mut header);
+        header.truncate(n);
+        let mut read = |addr: usize, buf: &mut [u8]| me.read(addr, buf);
+        let pre = pe::check_image(
+            &dst.to_string_lossy(),
+            &file,
+            &header,
+            base,
+            &exec,
+            &mut read,
+        );
+        let sections_end = disk
+            .sections
+            .iter()
+            .map(|s| s.va as usize + (s.vsize.max(s.raw_size) as usize).div_ceil(4096) * 4096)
+            .max()
+            .unwrap_or(0);
+        for e in &pre.exec_outside {
+            eprintln!(
+                "lrng-selftest: our module: {} at rva 0x{:x} ({} bytes, {}); SizeOfImage 0x{:x}, sections end at 0x{:x}; loader page {:?}",
+                e.what,
+                e.start - base,
+                e.len,
+                e.protect,
+                disk.size_of_image,
+                sections_end,
+                e.loader_page
+            );
+        }
+        let loader_page = pre
+            .exec_outside
+            .iter()
+            .find(|e| e.loader_page.is_some())
+            .map(|e| e.start);
+        let shared = clean
+            .skipped
+            .get(SKIP_LOADER_PAGE_MATCH)
+            .copied()
+            .unwrap_or(0);
         // SAFETY: the pages belong to the module loaded above; they are made
         // writable (copy-on-write), every byte is inverted (so all 4096
         // differ: an MSVC 0xCC padding byte can't coincide with the filler),
@@ -522,6 +583,25 @@ mod tests {
             }
         }
 
+        // Write to Windows' page in our module, when its copies elsewhere agree.
+        let tamper = loader_page.filter(|_| shared >= 2);
+        if let Some(lp) = tamper {
+            // SAFETY: a byte of our own module's page, restored below.
+            unsafe {
+                let mut old = 0u32;
+                assert_ne!(
+                    VirtualProtect(lp as *const c_void, 1, PAGE_EXECUTE_READWRITE, &mut old),
+                    0
+                );
+                *(lp as *mut u8) ^= 0xFF;
+                VirtualProtect(lp as *const c_void, 1, old, &mut old);
+            }
+        } else {
+            eprintln!(
+                "lrng-selftest: loader page not tampered with (ours: {loader_page:?}, identical copies elsewhere: {shared})"
+            );
+        }
+
         let after = me.image_integrity(deadline(), 1 << 32);
         // SAFETY: as above; both changes are undone (the module's DllMain runs
         // as it unloads), then the module is freed and not used again.
@@ -536,6 +616,11 @@ mod tests {
                 *b = !*b;
             }
             VirtualProtect(at as *const c_void, 4096, old, &mut old);
+            if let Some(lp) = tamper {
+                VirtualProtect(lp as *const c_void, 1, PAGE_EXECUTE_READWRITE, &mut old);
+                *(lp as *mut u8) ^= 0xFF;
+                VirtualProtect(lp as *const c_void, 1, old, &mut old);
+            }
             FreeLibrary(module);
         }
         let _ = std::fs::remove_file(&dst);
@@ -573,8 +658,23 @@ mod tests {
             .iter()
             .filter(|e| file_name_lower(&e.path) == name)
             .collect();
-        assert_eq!(outside.len(), 1, "{:?}", after.exec_outside);
-        let e = outside[0];
+        assert_eq!(
+            outside.len(),
+            1 + usize::from(tamper.is_some()),
+            "{:?}",
+            after.exec_outside
+        );
+        if let Some(lp) = tamper {
+            let l = outside
+                .iter()
+                .find(|e| e.loader_page.is_some())
+                .expect("the written copy of Windows' page is reported");
+            assert_eq!(l.start, lp, "{l:?}");
+        }
+        let e = outside
+            .iter()
+            .find(|e| e.loader_page.is_none())
+            .expect("the stomped .rsrc page is reported");
         assert_eq!(
             (e.what.as_str(), e.start, e.len),
             ("section .rsrc", page, 4096),

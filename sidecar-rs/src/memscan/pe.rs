@@ -586,6 +586,14 @@ struct Place {
     section: Option<usize>,
 }
 
+/// FNV-1a: a digest for telling identical pages apart, not a security hash
+/// (the pages compared are the loader's, and a mismatch is what's reported).
+fn fnv1a(b: &[u8]) -> u64 {
+    b.iter().fold(0xcbf2_9ce4_8422_2325, |h, &x| {
+        (h ^ u64::from(x)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
 fn round_up(x: u64, a: u64) -> u64 {
     x.div_ceil(a).saturating_mul(a)
 }
@@ -670,6 +678,9 @@ fn exec_outside_code(
     }
 
     let iat = disk.dir(DIR_IAT);
+    // Windows adds a page of its own outside every section of images with a
+    // fothk section; those are told apart by comparison across modules.
+    let fothk = disk.sections.iter().any(|s| s.name == FOTHK);
     let mut out = Vec::new();
     for (start, end, at, protect) in pieces {
         let len = ((end - start) as usize).min(MAX_SECTION);
@@ -724,6 +735,7 @@ fn exec_outside_code(
             what: place.map_or_else(|| "no section".to_string(), |p| p.label.clone()),
             protect,
             stats: acc.finish(),
+            loader_page: (place.is_none() && fothk).then(|| (disk.machine, fnv1a(&mem[..got]))),
         });
     }
     out
@@ -901,6 +913,25 @@ mod tests {
                 ("section .reloc", 0x1000, "RX+RWX", 0),
                 ("no section", 0x1000, "RX", 0),
             ]
+        );
+
+        // In an image with a fothk section, memory no section covers is the
+        // page Windows adds there: marked for comparison across modules.
+        let mut fo = f.clone();
+        let s1 = 0x84 + 20 + 0xF0 + 40;
+        fo[s1..s1 + 8].copy_from_slice(b"fothk\0\0\0");
+        let r = check_exec(&fo, &map(&fo, base), base, &[rx(0x4000, 0x1000, "RX")]);
+        let e = &r.exec_outside[0];
+        assert_eq!(e.what, "no section");
+        assert_eq!(
+            e.loader_page,
+            Some((0x8664, fnv1a(&[0u8; 0]))),
+            "nothing mapped there in the test image"
+        );
+        let r = check_exec(&f, &img, base, &[rx(0x4000, 0x1000, "RX")]);
+        assert_eq!(
+            r.exec_outside[0].loader_page, None,
+            "no fothk section, no loader page"
         );
 
         // The IAT, which the loader fills in, isn't held against a data

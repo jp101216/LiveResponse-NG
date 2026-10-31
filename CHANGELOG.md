@@ -19,11 +19,17 @@ everything read-only, no new dependencies, schema unchanged at 1.2.
   payload was written, *suspect* when only the protection changed. Images whose
   sections share pages (section alignment below a page, so the memory manager
   gives the whole image one protection) are counted under `skipped` instead.
+  Recent Windows builds add an executable page of their own, which no section
+  covers, to every image with a `fothk` section (13 of 14 modules in CI's test
+  process); those are judged against each other instead of the file: a copy
+  that differs from one two or more of the process's modules share is reported
+  as *critical*, matching ones are counted under `skipped`.
   The expected bytes are checked against pefile on 188 real images (962 data
   sections and headers, byte for byte), and the real-Windows self-test now also
   makes a page of a loaded DLL's `.rsrc` executable, writes 1 KiB into it, and
   requires exactly that page to be reported — after a clean run that must report
-  nothing. The live Windows sweep fails CI if the rule fires on the runner. Linux
+  nothing — and flips a byte of that DLL's copy of Windows' own page, which must
+  be reported too. The live Windows sweep fails CI if the rule fires on the runner. Linux
   needed no change: it compares every executable mapping, wherever it lies.
   Counted per process as `image_integrity.exec_outside_code`.
 

@@ -8,6 +8,14 @@ handling of hostile input. It builds from any OS; Windows has the full collector
 set, and Linux covers processes, network, modules, accounts, persistence, kernel
 modules, eBPF and the systemd journal behind the same interface.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/viewer-dark.png">
+  <img alt="The lrng report viewer: a host's findings ranked by severity, under a strip of ATT&amp;CK tactics in kill-chain order" src="docs/images/viewer-light.png">
+</picture>
+
+*The [report viewer](#report-viewer) on a lab VM seeded with harmless
+lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
+
 > **Status:** v0.12. On **Linux**, a default run covers processes, network
 > (TCP + UDP, with per-socket process attribution via `/proc`), loaded modules,
 > local accounts, persistence (cron, systemd, ld.so.preload, rc.local, XDG
@@ -806,8 +814,10 @@ without rebuilding.
 `demo/linux-detection-demo.sh` stages benign stand-ins for six common Linux
 attacker TTPs — a payload run from `/tmp`, a process masquerading as a kernel
 thread, cron and systemd persistence, a fetch-and-run cradle and a reverse-shell
-one-liner — then runs a triage and prints what fired. Every "payload" is `sleep`,
-the only addresses are the documentation range, and everything is removed on exit.
+one-liner — then runs a triage, prints what fired, and leaves the report as
+`lrng-demo-report.html`, in the report viewer. Every "payload" is `sleep`,
+the only addresses are the documentation range, and everything it stages is
+removed on exit.
 It's a one-command way to see the Linux detections work (and a good screen
 recording). See [`demo/README.md`](demo/README.md).
 

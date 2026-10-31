@@ -5,8 +5,8 @@ detection modules aimed at the current wave of AI-assisted malware. It's the
 next-generation successor to a PowerShell live-response toolkit: a single
 static binary, structured JSON output, parallel collection, and memory-safe
 handling of hostile input. It builds from any OS; Windows has the full collector
-set, and Linux now has a working core (processes, network, modules, accounts and
-persistence) behind the same interface.
+set, and Linux covers processes, network, modules, accounts, persistence, kernel
+modules, eBPF and the systemd journal behind the same interface.
 
 > **Status:** v0.11. On **Linux**, a default run covers processes, network
 > (TCP + UDP, with per-socket process attribution via `/proc`), loaded modules,
@@ -1094,103 +1094,16 @@ The shape is in [`docs/architecture.md`](docs/architecture.md);
 
 ## Roadmap
 
-- [x] More collectors: persistence (services / Run keys / scheduled tasks),
-      ShimCache, prefetch, sessions, local accounts, loaded modules, UDP
-      endpoints. *(v0.4)*
-- [x] DNS-cache snapshot (the opt-in `dnscache` collector). *(v0.4)*
-- [x] DNS-cache **correlation**: snapshot the cache before any resolution,
-      attach hostnames to connections, match regional endpoints by name. *(v0.5)*
-- [x] Behavioural analytics: command lines, process tree, ~20 ASEPs, the
-      TaskCache cross-check, hashes, shortcut targets. *(v0.5)*
-- [x] Memory heuristics beyond YARA: PE images in private executable memory;
-      fileless ELF/memfd on Linux. *(v0.5)*
-- [x] **AmCache** (`Amcache.hve`), via a dependency-free, read-only offline
-      registry-hive parser (`internal/winreg/hive.go`). *(v0.6)*
-- [x] **Prefetch body decode**: run count, the last eight run times and
-      referenced files, via a dependency-free Xpress-Huffman decompressor.
-      *(v0.6)*
-- [x] Authenticode signature verification for process images (embedded and
-      catalog, offline), surfaced as `signature_state` and the `signer` name,
-      with an `integrity.unsigned_system_binary` finding. *(v0.6; signer name
-      v0.7)*
-- [x] **WMI event-subscription persistence** (`wmi`): the
-      `__EventFilter` / `__EventConsumer` / `__FilterToConsumerBinding` objects
-      in `root\subscription`, read live over a hand-rolled, dependency-free COM
-      client. *(v0.6)*
-- [x] **COM hijacking** (`comhijack`): CLSID servers across the machine and
-      per-user class stores, flagging per-user shadowing, unusual-path and
-      scriptlet servers, and `TreatAs` remaps. *(v0.6)*
-- [x] **Windows event-log triage** (`eventlog`): the DFIR channels parsed from
-      `winevt\Logs` through a dependency-free EVTX/binary-XML reader, with log
-      clears, service installs, account and privileged-group changes, Defender
-      detections, and the shared command-line analytics applied to 4688/4104/7045;
-      plus **offline mode** (`-evtx <file|dir>`) that triages a supplied log on
-      any OS through the same parser and rules. *(v0.7)*
-- [x] **Event-log ↔ live-state correlation** (`correlate.go`): a 7045 service
-      install cross-checked against the services present now (gone →
-      `correlate.service_installed_absent`, T1070.009), a 4698/106 task
-      registration cross-checked against the live Task Scheduler store (gone →
-      `correlate.task_registered_absent`), and a 1102/104 log clear measured
-      against the surviving record-id and time range (folded into the
-      `defense.clear_event_logs` finding). *(v0.7)*
-- [x] **Logon-session analysis**: remote-interactive (RDP, type 10) and
-      network (type 3) 4624 logons and 4625 failures from external addresses
-      (`logon.remote_interactive` / `logon.network_external` /
-      `logon.failed_external`). *(v0.7)*
-- [x] **Sigma-rule support** (`-sigma`): compile and evaluate Sigma detection
-      rules against the event log (live and offline) with a dependency-free
-      YAML-subset parser; a match is a `sigma.<rule>` finding, and a rule using
-      an unsupported construct is skipped with a reason rather than mis-scored.
-      Ships with an embedded starter pack (`-sigma builtin`). *(v0.7)*
-- [x] **Unified super-timeline** (`-timeline`): merge every timestamped artifact
-      (prefetch runs, service/autorun/registry key-last-write, task cache
-      writes, account logons, shimcache/amcache, event times) into one
-      oldest-first view, with detections anchored in time. *(v0.7)*
-- [x] **Sigma, completed**: the `|cidr` and `|fieldref` modifiers, the
-      `min`/`max`/`avg`/`sum` aggregations and the temporal `| near` (with a
-      detection `timeframe` window), plus two new bundled rules — external RDP by
-      source CIDR, and a log clear temporally correlated with a service install.
-      *(v0.7)*
-- [x] **Sigma, completed (windowing)**: `timeframe` now drives a sliding window
-      for `count`/`count(field)`/`sum` aggregations (`>`/`>=`), so a burst, a
-      spray or a volume spike is detected within its window rather than summed
-      across the whole run; plus three more bundled rules (windowed failed-logon
-      burst, password spray, Defender real-time-protection change). *(v0.7)*
-- [x] **Indicator (IOC) export** (`-iocs`): a post-pass that distils the
-      network addresses, hostnames, file hashes and on-disk paths out of every
-      detection-linked record into one deduplicated, severity-ranked `iocs`
-      result — each indicator carrying the rules and max severity that flagged
-      it and back-pointers to its source records — so a triage report yields a
-      copy-and-go blocklist / hunt list. *(v0.8)*
-- [x] **Offline endpoint intelligence** (`-intel`): attribute the run's public
-      remote addresses to their ASN / organisation, country and infrastructure
-      category (cloud / CDN / hosting / DNS / Tor / anonymiser) through a bundled,
-      air-gapped dataset and an in-memory longest-prefix match, with Tor- and
-      anonymiser-contact findings, IOC-set enrichment, and a generator
-      (`cmd/intelgen`) that refreshes the dataset from public sources. *(v0.9)*
-- [x] **Linux collectors behind the same interface** (`*_linux.go`): processes,
-      network (TCP + UDP, with per-socket process attribution), modules, local
-      accounts and persistence (cron, systemd, ld.so.preload, rc.local, XDG
-      autostart), read from `/proc` and the standard config files and judged by
-      Linux-specific path and command-line heuristics; AI module A runs on Linux
-      too. *(v0.10)*
-- [x] **COM/WMI persistence, extended**: COM **type-library hijacking** in the
-      `comhijack` collector (`TypeLib` script monikers, unusual-path libraries,
-      per-user shadows); **timer-triggered WMI subscriptions** in the `wmi`
-      collector (`__IntervalTimerInstruction`/`__AbsoluteTimerInstruction` and
-      `__TimerEvent` filters); and a **scheduled-task → COM-handler**
-      cross-check (`correlate.task_comhandler_hijacked`) that flags a task firing
-      a hijacked COM CLSID. *(v0.11)*
-- [x] **Memory: hollowed and module-stomped images**: an image-integrity check
-      that compares mapped code with its file (Windows: relocation-aware, per
-      section; Linux: against `/proc/<pid>/map_files`), plus AMSI/ETW patch
-      detection and a header-identity check. *(v0.11)*
-- [x] **Remaining Linux surfaces**: `kmod` (loaded modules, boot lists,
-      modprobe hooks, a hidden-module cross-view, taint), `ebpf` (programs and
-      the helpers they call, pins) and `journald` (a dependency-free journal
-      reader with SSH, sudo/su, account, cron and kernel triage). *(v0.11)*
-- [ ] zstd decoding for journal fields above journald's compression threshold
-      (they are counted, not read, today).
+What's still to come. Everything already shipped is in
+[CHANGELOG.md](CHANGELOG.md), release by release.
+
+- [ ] **Module stomping into a data section (Windows).** Image integrity
+      compares the sections a module's file marks as code, so a payload written
+      into a data section whose pages were then made executable isn't compared.
+      Flag executable pages anywhere else in a loaded image as well. (Linux
+      already covers this: it compares every executable file mapping.)
+- [ ] **zstd decoding for journal fields** above journald's compression
+      threshold (they are counted, not read, today).
 
 ---
 

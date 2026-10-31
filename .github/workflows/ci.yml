@@ -100,6 +100,7 @@ jobs:
         run: |
           go build -o lrng ./cmd/lrng
           ./lrng -no-dns -timeline -iocs -intel -quiet -out linux.json
+          ./lrng -no-dns -timeline -iocs -intel -quiet -format html -out linux.html
       - name: Playwright and Chromium
         run: |
           npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright@1.63.0
@@ -107,7 +108,7 @@ jobs:
       - name: walk every view; nothing from a report may execute or load
         env:
           NODE_PATH: ${{ runner.temp }}/pw/node_modules
-        run: node viewer/browsertest/browser_test.cjs windows/report.json windows/report.jsonl linux.json
+        run: node viewer/browsertest/browser_test.cjs windows/report.json windows/report.jsonl windows/report.html linux.json linux.html
 
   rust-linux:
     name: Rust sidecar (Linux; type-check Windows code)

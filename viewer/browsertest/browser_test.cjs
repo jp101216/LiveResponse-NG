@@ -28,8 +28,11 @@ const PLACEHOLDER = '<script type="application/json" id="lrng-report"></script>'
 // What `viewer.Render` does: the report's JSON, HTML-escaped, in the data block.
 function embed(report) {
   const data = JSON.stringify(report).replace(/[<>&\u2028\u2029]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
-  if (viewer.split(PLACEHOLDER).length !== 2) throw new Error("placeholder missing");
-  return viewer.replace(PLACEHOLDER, '<script type="application/json" id="lrng-report">' + data + "</script>");
+  const parts = viewer.split(PLACEHOLDER);
+  if (parts.length !== 2) throw new Error("placeholder missing");
+  // Joined, not String.replace: a replacement string would expand $' and $`
+  // sequences in the report (Windows paths have them) into copies of the page.
+  return parts[0] + '<script type="application/json" id="lrng-report">' + data + "</script>" + parts[1];
 }
 
 const X = [
@@ -43,6 +46,7 @@ const X = [
   "{{constructor.constructor('alert(1)')()}}",
   "${alert('tpl')}",
   `<a href="javascript:alert('a')">link</a>`,
+  "$' $` $& $1 C:\\$Recycle.Bin\\$'x",
 ];
 const pick = (i) => X[i % X.length];
 
@@ -234,12 +238,15 @@ async function openPage(browser, where, url, shots) {
     await ctx.close();
   }
 
-  // 3. Real reports: every view renders cleanly. JSON is embedded the way
-  // -format html does it; JSONL is opened on the standalone viewer.
+  // 3. Real reports: every view renders cleanly. An .html report (written by
+  // lrng -format html) is opened as it is; JSON is embedded the way -format
+  // html does it; JSONL is opened on the standalone viewer.
   for (const r of reports) {
     const where = path.basename(r);
     let ctx, page;
-    if (r.endsWith(".jsonl")) {
+    if (r.endsWith(".html")) {
+      ({ ctx, page } = await openPage(browser, where, "file://" + path.resolve(r)));
+    } else if (r.endsWith(".jsonl")) {
       ({ ctx, page } = await openPage(browser, where, standalone));
       await page.setInputFiles("#file", r);
       await page.waitForSelector(".case h1", { timeout: 15000 }).catch(() => fail(where, "the report didn't open"));

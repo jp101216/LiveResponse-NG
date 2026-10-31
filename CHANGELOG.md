@@ -29,8 +29,10 @@ everything read-only, no new dependencies, schema unchanged at 1.2.
   sections and headers, byte for byte), and the real-Windows self-test now also
   makes a page of a loaded DLL's `.rsrc` executable, writes 1 KiB into it, and
   requires exactly that page to be reported — after a clean run that must report
-  nothing — and flips a byte of that DLL's copy of Windows' own page, which must
-  be reported too. The live Windows sweep fails CI if the rule fires on the runner. Linux
+  nothing. It also tries to write to that DLL's copy of Windows' own page: on
+  CI's Windows build the page can't even be made writable (`VirtualProtect`
+  fails with `ERROR_INVALID_ADDRESS`), so no payload can be written there from
+  user mode; where it can be, the written copy must be reported. The live Windows sweep fails CI if the rule fires on the runner. Linux
   needed no change: it compares every executable mapping, wherever it lies.
   Counted per process as `image_integrity.exec_outside_code`.
 

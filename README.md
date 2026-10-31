@@ -478,7 +478,8 @@ Recent Windows builds map an executable page of their own just past the end of
 every image with a `fothk` section, the same in every module; each copy is
 judged against the others in the process, so one that differs from a copy two
 or more modules share is reported (*critical*) and matching ones are counted
-under `skipped`.
+under `skipped`. (On the Windows build CI runs, that page can't even be made
+writable from user mode.)
 (On Linux every executable mapping is compared already, wherever it lies.)
 Classic hollowing into private memory is `memory.pe_in_private` above. The PE reader is checked
 byte-for-byte against [pefile](https://github.com/erocarrera/pefile) on real

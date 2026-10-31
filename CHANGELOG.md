@@ -1,5 +1,139 @@
 # Changelog
 
+## 0.11.0
+
+Closes the roadmap's open detection items. On Windows, the COM- and
+WMI-persistence collectors from v0.6 reach three fileless surfaces they did not
+yet cover (all T1546): COM type-library hijacking, timer-triggered WMI
+subscriptions, and scheduled tasks that fire a hijacked COM handler. The memory
+scan gains an image-integrity check on both OSes — mapped code and headers
+compared with their files — for module stomping, hollowing and AMSI/ETW
+patching. Linux gains three collectors (loaded kernel modules, loaded eBPF
+programs, and a journal triage read straight from journald's files), and the
+Unix command-line rules learn anti-forensics. 32 new rule ids, everything
+read-only, no new dependencies, and the schema is unchanged at 1.2 — these are
+new records and findings within the existing envelope.
+
+### Added
+- **COM type-library hijacking (`comhijack` collector).** The CLSID-server
+  walk is joined by a walk of the TypeLib class stores —
+  `HKLM\SOFTWARE\Classes\TypeLib` (native and the `Wow6432Node` 32-bit view)
+  and each loaded user's `HKU\<sid>_Classes` — resolving the library path at
+  each `{libid}\{version}\{lcid}\{platform}` leaf. A COM object loads its
+  registered type library when it is instantiated, so a registration that
+  names a COM script moniker instead of a `.tlb`/`.dll`, sits in a
+  user-writable path, or (per-user) shadows a machine entry reaches code the
+  same way a rewritten `InprocServer32` does — and the CLSID walk does not see
+  it. New rules, all T1546.015: `persistence.typelib_script_moniker`,
+  `persistence.typelib_unusual_path`, and `persistence.typelib_user_shadow`
+  (*critical* when the shadowing entry is itself a moniker or an odd path).
+  Reuses the read-only `internal/winreg` reader; the moniker and per-user-shadow
+  judging is portable and unit-tested. The totals scanned go in the result's
+  metadata (`typelib_count_machine` / `typelib_count_user`).
+- **Timer-triggered WMI subscriptions (`wmi` collector).** The namespace sweep
+  now also enumerates `__TimerInstruction` (the `__IntervalTimerInstruction`
+  and `__AbsoluteTimerInstruction` subclasses) over the same hand-rolled COM
+  client, and an `__EventFilter` whose WQL subscribes to `__TimerEvent` is
+  called out as timer-triggered. A timer makes a subscription fire on a
+  schedule, independent of any system event — a trigger legitimate software
+  almost never uses. New rules, T1546.003: `persistence.wmi_timer` for the
+  timer object and `persistence.wmi_timer_filter` for the filter that rides it.
+  A clean host carries neither; a namespace that doesn't carry the class is
+  noted, not failed, so the subscription records are never lost to it.
+- **Scheduled task → COM-handler cross-check (`correlate.go`).** A scheduled
+  task can act through an `IComHandlerAction` (a CLSID) rather than an exec; the
+  scheduledtasks collector already records the ClassId and comhijack already
+  flags hijacked or oddly-served COM registrations, but nothing joined the two.
+  The post-pass now raises `correlate.task_comhandler_hijacked` (T1546.015) on a
+  task whose ComHandler CLSID matches a registration comhijack flagged —
+  *critical* when that registration was — tying the schedule (the trigger) to
+  the hijacked object (the payload). Portable and unit-tested; like the other
+  correlations, a no-op unless both collectors ran, so offline `-evtx` runs are
+  unaffected.
+- **Image integrity in the memory scan (sidecar, Windows and Linux).** Before
+  the YARA walk, with up to a third of each process's budget, every image's
+  executable code in memory is compared with its file. On Windows each loaded
+  module's code sections are compared after applying the base relocations the
+  loader applied (the import table, and the `fothk` section of function-override
+  thunks the loader itself rewrites, are left out), and its header's identity
+  fields — timestamp, image size, section layout — with the file's; on Linux
+  each executable file mapping is compared with `/proc/<pid>/map_files/…`, the
+  very inode that was mapped, so an upgraded package can't look like tampering.
+  Differences merge into change sites judged by length: a long run is code
+  rewritten in place, `memory.image_code_modified` (T1055, *critical* from
+  16 KiB — module stomping); short runs are patches, `memory.image_inline_patch`
+  (low severity, since security products hook too; the .NET runtime, which
+  rewrites its own GC write barriers, is named as expected), except in `amsi.dll`
+  (`defense.amsi_patched`, T1562.001) and at ntdll's ETW event writers
+  (`defense.etw_patched`, T1562.006), named by export. A header that no longer
+  matches its file is `memory.image_header_mismatch` (T1055.012 — hollowing and
+  its relatives); an image whose file can't be read is
+  `memory.image_file_unavailable`. The PE reader is bounds-checked, fuzzed, and
+  checked byte-for-byte against pefile on 188 real images (relocations, section
+  bytes and exports; `LRNG_PE_SAMPLES`, `sidecar-rs/scripts/pe_golden.py`).
+  Results go in the memory record's `image_integrity`.
+- **Loaded kernel modules (`kmod` collector, Linux).** Every module in
+  `/proc/modules` with its size, users and taint flags; what loads at boot
+  (`modules-load.d`, `/etc/modules`); modprobe `install`/`remove` hooks, which
+  run a command as root whenever a module is requested; and the kernel taint,
+  decoded. A cross-view of `/sys/module` against `/proc/modules` exposes a module
+  hidden from the list. New rules (T1547.006 / T1014):
+  `persistence.kmod_hidden`, `persistence.kmod_forced`,
+  `persistence.kmod_unsigned`, `persistence.kmod_out_of_tree`,
+  `persistence.kmod_boot_unknown`, `persistence.modprobe_hook` (stock
+  blacklisting with `/bin/true` and modprobe chaining stay quiet) and
+  `kernel.tainted`. Config files are resolved before reading, so a symlinked
+  `modules.conf` or merged `/usr` is read once — and a dangling link isn't an
+  error.
+- **Loaded eBPF programs (`ebpf` collector, Linux, needs root).** Read with
+  `bpf(2)` directly — no `bpftool`: each program's type, name, tag, loader uid,
+  load time (a timestamp, so `-timeline` places it), maps and run count, and the
+  bpffs paths that keep it alive after its loader exits (pinned itself, or by a
+  pinned link). Each program's translated instructions are decoded and every
+  helper call is named through `/proc/kallsyms`, the way `bpftool` does; programs
+  that act on user space are flagged (T1014): `persistence.ebpf_write_user`
+  (`bpf_probe_write_user`, the eBPF-rootkit helper),
+  `persistence.ebpf_override_return` and `persistence.ebpf_send_signal`. Without
+  root it fails with a clear message rather than an empty result.
+- **Journal triage (`journald` collector, Linux).** The systemd journal, read
+  straight from its files (persistent and volatile, newest first, within a byte
+  budget) by a dependency-free reader for the regular and compact layouts, with
+  LZ4 decoded; checked against `journalctl` on real journal files of every
+  layout and compression (`LRNG_JOURNAL_SAMPLES`). Only security-relevant events
+  become records: SSH failures aggregated per source address
+  (`logon.ssh_bruteforce`), a logon after a burst of failures from the same
+  address (`logon.ssh_bruteforce_success`, *critical*), logons from public
+  addresses (`logon.ssh_external`), sudo refusals and authentication failures
+  (`privesc.sudo_denied`, `privesc.sudo_auth_failure`), failed `su`
+  (`privesc.su_failed`), account and group changes (`persistence.account_created`
+  and `persistence.admin_group_add`, the ids the Windows event rules use, and
+  `persistence.password_changed`), cron commands that trip the command-line
+  rules, and the kernel's own warnings about unsigned modules
+  (`persistence.kmod_unsigned_loaded`) and `bpf_probe_write_user` programs.
+  Fields journald compressed with zstd or xz (only payloads over its 512-byte
+  threshold) are counted, not decoded.
+- **Linux anti-forensics in the command-line rules.** Shared by processes,
+  cron, systemd units and the journal: `defense.clear_linux_logs` (T1070.002 —
+  deleting, shredding, truncating or `/dev/null`-linking `/var/log` files, and
+  `journalctl --vacuum-*`) and `defense.clear_shell_history` (T1070.003 —
+  `history -c`, unsetting `HISTFILE` or pointing it at `/dev/null`, wiping a
+  history file). Reading, rotating and appending to logs stays quiet.
+
+### Fixed
+- **A fetch-and-run wrapped in quotes was missed on Linux.** In
+  `sh -c 'curl … | sh'` the closing quote stayed on the last program's name, so
+  `sh'` wasn't recognised as a shell; the same went for `$(…)` and `{ …; }`
+  wrappers, which is how cron jobs, units and modprobe hooks usually write it.
+  Quotes, parentheses, braces and semicolons are now trimmed first.
+
+### Changed
+- **CI runs the image-integrity check against the real Windows loader.** A
+  self-test loads a copy of a system DLL, checks a clean process (no rewrites,
+  no header mismatches, nothing unreadable), overwrites 4 KiB of its code and
+  requires that exact change to be found; its diagnostics surface as
+  annotations on the pull request. The Windows and Linux sweeps also fail if
+  image integrity compares nothing or raises a finding on the runner itself.
+
 ## 0.10.6
 
 A pre-release correctness pass, mostly over the Linux side, found by running

@@ -119,15 +119,6 @@ func collectServices(ctx context.Context, opts RunOptions) (Result, error) {
 	return res.Finish(), nil
 }
 
-func hasRule(fs []Finding, rule string) bool {
-	for _, f := range fs {
-		if f.Rule == rule {
-			return true
-		}
-	}
-	return false
-}
-
 // underDir reports whether path lies inside dir (case-insensitive).
 func underDir(path, dir string) bool {
 	p := strings.ToLower(path)

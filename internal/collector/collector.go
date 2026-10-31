@@ -99,3 +99,13 @@ func (r *Result) Finish() Result {
 	r.Duration = time.Since(r.StartedAt)
 	return *r
 }
+
+// hasRule reports whether any finding carries the rule id.
+func hasRule(fs []Finding, rule string) bool {
+	for _, f := range fs {
+		if f.Rule == rule {
+			return true
+		}
+	}
+	return false
+}

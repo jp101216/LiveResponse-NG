@@ -29,6 +29,10 @@ sidecar-rs/            Rust sidecar
   src/prompts.rs       AI module B (prompt artifacts, files and memory)
   src/memscan/         scan_memory: region walk, YARA-X block scan,
                        memory heuristics, budgets
+    integrity.rs       image integrity: diffing mapped code against its file,
+                       change sites, verdicts and their findings
+    pe.rs              bounds-checked PE reader (sections, relocations,
+                       exports) and the per-module comparison
     windows.rs         VirtualQueryEx / ReadProcessMemory (read-only)
     linux.rs           /proc/<pid>/maps + /proc/<pid>/mem
     yara.rs            rule loading (file/dir, namespaces) and block scanning
@@ -78,12 +82,16 @@ standard config files; their text parsers follow the same "no build tag, bounds-
 checked, unit-tested on any OS" rule as the Windows decoders — `procfs.go`
 (`/proc/<pid>` status/stat, passwd/group/shadow), `procnet.go`
 (`/proc/net/{tcp,udp}` hex rows), `procmaps.go` (`/proc/<pid>/maps`) and
-`persist_unix.go` (cron, systemd, .desktop, ld.so.preload). The Linux
-heuristics live in `paths_unix.go`, `cmdline_unix.go`, `netrules_unix.go`,
-`modulerules_unix.go` and `accountrules_unix.go`, the counterparts to
-`paths.go`, `cmdline.go` and the `*rules.go` files; AI module A
+`persist_unix.go` (cron, systemd, .desktop, ld.so.preload), and
+`journalfile.go`, the systemd journal reader. The Linux heuristics live in
+`paths_unix.go`, `cmdline_unix.go`, `netrules_unix.go`, `modulerules_unix.go`,
+`accountrules_unix.go`, `kmodrules.go`, `ebpfrules.go` and `journaldrules.go`,
+the counterparts to `paths.go`, `cmdline.go` and the `*rules.go` files; AI module A
 (`internal/aidetect`) is OS-agnostic and the Linux `network` collector feeds it
-directly.
+directly. The Linux-only `kmod` and `journald` collectors read files only, so
+each scan takes a root directory and is tested against fixture trees on any OS;
+`ebpf` needs the `bpf(2)` syscall (`ebpf_linux.go`), but decoding a program's
+helper calls, the kallsyms lookup and judging it are portable.
 
 Two Linux specifics shape those collectors. A process's name (`comm`) is the
 script's name for a `#!` script and can be set to anything with `prctl`, so the
@@ -131,7 +139,7 @@ covering both malicious and ordinary input:
 | `envexpand.go` | Environment expansion: machine variables from the host, per-user ones only from a known profile. |
 | `cmdline.go` | Command-line analytics (encoded PowerShell, cradles, LOLBins, credential theft, recovery inhibition, defence evasion, account changes). RE2 regexes, compiled once. |
 | `proctree.go` | Process-tree checks: masquerading paths, impossible parents, shells under document/server/WMI/service parents, typosquats. |
-| `servicerules.go`, `autorunrules.go`, `taskrules.go`, `accountrules.go`, `netrules.go`, `comrules.go`, `wmirules.go` | Per-collector rules, including comparisons against Windows defaults (Winlogon, BootExecute, LSA packages, print monitors, netsh helpers), the TaskCache cross-check, COM-hijack patterns (per-user shadowing, unusual-path/scriptlet servers, `TreatAs`) and WMI subscription consumers/filters/bindings. |
+| `servicerules.go`, `autorunrules.go`, `taskrules.go`, `accountrules.go`, `netrules.go`, `comrules.go`, `typelibrules.go`, `wmirules.go` | Per-collector rules, including comparisons against Windows defaults (Winlogon, BootExecute, LSA packages, print monitors, netsh helpers), the TaskCache cross-check, COM-hijack patterns (per-user shadowing, unusual-path/scriptlet servers, `TreatAs`), TypeLib hijacking (script monikers, unusual-path libraries, per-user shadows) and WMI subscription consumers/filters/bindings/timers (including `__TimerEvent` schedule triggers). |
 | `filehash.go` | The shared SHA-256 hasher: one read per file per run, size-capped, cancellable. |
 | `authenticode.go` | The signature verdict → record fields (state, catalog, and the `signer` name, sanitized because a certificate's subject is attacker-chosen) and the unsigned/untrusted system-binary finding, which quotes the claimed signer. The WinVerifyTrust embedded-plus-catalog verification, and reading the signer from its state before it is closed, are in `authenticode_windows.go`. |
 | `eventlog.go` | Which events are kept (low-volume security events in full; high-volume command-bearing ones such as 4688 and 4104 only when a rule fires) and the built-in event rules: log clears, service installs, account and privileged-group changes, Defender detections and remote logons. Command lines inside events go through `cmdline.go`, so a running process and a logged one are judged alike. |
@@ -218,6 +226,24 @@ matches that end inside the repeated tail (already counted), so a match that
 straddles a boundary is found exactly once. The first chunk of each
 executable region no image backs is also checked for a PE (or ELF) header.
 
+Before the region walk, with up to a third of the per-process budget, the
+sidecar checks **image integrity** (`integrity.rs`): each image's executable
+code in memory is compared with its file, 64 bytes at a time with equal blocks
+skipped whole. On Windows, `pe.rs` parses the file, applies the base
+relocations the loader applied (HIGHLOW and DIR64; any other kind's bytes are
+masked), masks the IAT, leaves out the `fothk` section (function-override
+thunks the loader rewrites), and compares the mapped header's identity fields —
+timestamp, image size, section layout; not the machine or entry point, which an
+ARM64X image changes for x64 callers — with the file's. A file no drive letter
+reaches is read through its `\\?\GLOBALROOT` device path. On Linux each
+executable file mapping is compared with `/proc/<pid>/map_files/<range>`, the
+inode actually mapped, falling back to the path only when its inode matches.
+Differing bytes merge into change sites across gaps of 16 bytes or less; a site
+of 256 bytes or more is a rewrite, anything shorter a patch; on Windows each
+site is named by the nearest export. The check stops at its deadline or byte
+cap and says so (`stopped`); Linux streams each mapping in chunks rather than
+holding it whole.
+
 ### Event logs
 
 The `eventlog` collector reads the targeted channels from
@@ -262,6 +288,20 @@ any OS. The report has the same envelope; its `host` is `(offline)` and the
 result's `meta.mode` is `offline`. A named file that doesn't exist is an error
 here, unlike a channel missing from a live host.
 
+### Journal
+
+The `journald` collector reads journald's files itself (`journalfile.go`):
+objects walked in append order, both the regular and the compact layout
+(32-bit entry items; data payloads at offset 72 rather than 64), with
+LZ4-compressed payloads decoded and zstd/xz ones counted. Every offset and size
+is checked against the file without overflowing (it is fuzzed in both layouts), and
+the reader is checked against `journalctl` on real files of each layout and
+compression (`LRNG_JOURNAL_SAMPLES`). Files are read newest first within a byte
+budget; each entry becomes a small normalised record (time, identifier, PID,
+transport, message), and `journaldrules.go` keeps only the security-relevant
+ones. SSH failures are aggregated per source address and joined to later
+successful logons from the same address within a day.
+
 ### Post-collection passes
 
 After the dispatcher returns, `main` runs up to four passes over the results
@@ -273,8 +313,12 @@ before summarising, for live and offline runs alike:
    store: still there is annotated, gone is `correlate.service_installed_absent`
    or `correlate.task_registered_absent` (T1070.009). A 1102/104 log clear is
    measured against the record span that survived it, folded into the
-   `defense.clear_event_logs` finding. A cross-check whose inputs weren't
-   collected is skipped, so missing data never turns into an "absent" finding.
+   `defense.clear_event_logs` finding. Independent of the event log, a scheduled
+   task's `IComHandlerAction` CLSID is cross-checked against the COM
+   registrations `comhijack` flagged (`correlate.task_comhandler_hijacked`,
+   T1546.015) — the schedule (trigger) joined to the hijacked object (payload).
+   A cross-check whose inputs weren't collected is skipped, so missing data
+   never turns into an "absent" finding.
 2. **Timeline** (`timeline.go`, with `-timeline`) appends a synthetic
    `timeline` result: every timestamped artifact, oldest first, each entry
    pointing back to its source record and showing that record's top finding.

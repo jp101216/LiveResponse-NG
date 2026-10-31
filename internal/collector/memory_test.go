@@ -45,9 +45,13 @@ func TestMemoryRecordsCoverEveryProcess(t *testing.T) {
 	resp := map[int]*sidecar.Response{
 		20: {OK: true, Meta: map[string]any{"pid": 20.0, "status": "scanned", "bytes_scanned": 1000.0,
 			"unbacked_exec_regions": 2.0, "prompt_verdict": "low",
-			"yara": map[string]any{"rules_loaded": 12.0, "matched_rules": 1.0}},
+			"image_integrity": map[string]any{"supported": true, "images": 40.0, "rewritten": 1.0},
+			"yara":            map[string]any{"rules_loaded": 12.0, "matched_rules": 1.0}},
 			Hits: []sidecar.Hit{{Rule: "yara:x", Severity: "critical", Offset: 0x7ff60000, Confidence: 90,
-				Region: &sidecar.HitRegion{Base: 0x7ff60000, Size: 65536, Protect: "RWX", Kind: "private"}}}},
+				Region: &sidecar.HitRegion{Base: 0x7ff60000, Size: 65536, Protect: "RWX", Kind: "private"}},
+				{Rule: "memory.image_code_modified", Severity: "suspect", Technique: "T1055", Offset: 0x7ffb0001000, Confidence: 70,
+					Context: "section .text of C:\\Windows\\System32\\version.dll: 4096 contiguous byte(s) of code differ from the file on disk",
+					Region:  &sidecar.HitRegion{Base: 0x7ffb0001000, Size: 4096, Protect: "RX", Kind: "image", File: `C:\Windows\System32\version.dll`}}}},
 		30: {OK: false, Error: "pid 30: access denied", Meta: map[string]any{"pid": 30.0, "status": "access_denied"}},
 		// 40 never answered (sidecar killed by the collector timeout).
 	}
@@ -61,9 +65,16 @@ func TestMemoryRecordsCoverEveryProcess(t *testing.T) {
 			t.Fatalf("record %d is pid %v, want %d", i, r.Fields["pid"], order[i])
 		}
 	}
-	if recs[1].Fields["status"] != "scanned" || len(recs[1].Findings) != 1 ||
+	if recs[1].Fields["status"] != "scanned" || len(recs[1].Findings) != 2 ||
 		recs[1].Fields["unbacked_exec_regions"] != 2.0 || recs[1].Fields["prompt_verdict"] != "low" {
 		t.Fatalf("scanned record: %+v", recs[1])
+	}
+	if ii, _ := recs[1].Fields["image_integrity"].(map[string]any); ii["rewritten"] != 1.0 {
+		t.Fatalf("image_integrity not carried into the record: %+v", recs[1].Fields["image_integrity"])
+	}
+	if f := recs[1].Findings[1]; f.Rule != "memory.image_code_modified" || f.Severity != SevSuspect ||
+		f.Technique != "T1055" || !strings.Contains(f.Detail, `image RX region`) || !strings.Contains(f.Detail, "version.dll") {
+		t.Fatalf("integrity finding: %+v", f)
 	}
 	if recs[2].Fields["status"] != "access_denied" || recs[3].Fields["status"] != "not_reached" {
 		t.Fatalf("statuses: %v %v", recs[2].Fields["status"], recs[3].Fields["status"])

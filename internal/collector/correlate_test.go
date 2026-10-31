@@ -224,3 +224,39 @@ func TestCorrelatePartialInventoryIsNotAbsence(t *testing.T) {
 		t.Errorf("task correlation meta = %v, want 1 unverified", tm)
 	}
 }
+
+func TestCorrelateTaskComHandlerHijack(t *testing.T) {
+	com := NewResult("comhijack")
+	// A flagged per-user COM hijack (critical).
+	com.Add(map[string]any{"clsid": "{11111111-0000-0000-0000-000000000001}"},
+		Finding{Rule: "persistence.com_hijack_user_shadow", Severity: SevCritical, Technique: "T1546.015", Confidence: 85, Detail: "a per-user COM registration overrides the machine one"})
+	// A TypeLib record (no "clsid" field) must be ignored by the cross-check.
+	com.Add(map[string]any{"artifact": "typelib", "libid": "{22222222-0000-0000-0000-000000000002}"},
+		Finding{Rule: "persistence.typelib_script_moniker", Severity: SevSuspect})
+	comRes := com.Finish()
+
+	st := NewResult("scheduledtasks")
+	// A task whose ComHandler fires the hijacked CLSID (brace/case differ).
+	st.Add(map[string]any{"task_path": `\Evil`, "com_handlers": []string{"{11111111-0000-0000-0000-000000000001}"}})
+	// A task with an unrelated ComHandler.
+	st.Add(map[string]any{"task_path": `\Good`, "com_handlers": []string{"{99999999-0000-0000-0000-000000000009}"}})
+	stRes := st.Finish()
+
+	results := []Result{comRes, stRes}
+	Correlate(results)
+
+	got := rulesOf(results[1].Records[0].Findings)
+	f, ok := got["correlate.task_comhandler_hijacked"]
+	if !ok {
+		t.Fatalf("correlate.task_comhandler_hijacked missing on the evil task (got %v)", keys(got))
+	}
+	if f.Severity != SevCritical {
+		t.Errorf("a task firing a critical COM hijack should be critical, got %s", f.Severity)
+	}
+	if len(results[1].Records[1].Findings) != 0 {
+		t.Errorf("the unrelated task should carry no correlation finding, got %v", keys(rulesOf(results[1].Records[1].Findings)))
+	}
+	if results[0].Meta["task_comhandler_matches"] != 1 {
+		t.Errorf("expected 1 recorded match in comhijack meta, got %v", results[0].Meta["task_comhandler_matches"])
+	}
+}

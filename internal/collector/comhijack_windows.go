@@ -31,11 +31,18 @@ type comWalker struct {
 	machineCount int
 	userCount    int
 	emitted      int
+
+	// TypeLib walk (see typelib_windows.go). machineTypeLib records the LibIDs
+	// present in HKLM so per-user entries that shadow them are recognised.
+	machineTypeLib      map[string]bool
+	typeLibMachineCount int
+	typeLibUserCount    int
+	typeLibEmitted      int
 }
 
 func collectCOMHijack(ctx context.Context, opts RunOptions) (Result, error) {
 	res := NewResult("comhijack")
-	w := &comWalker{ctx: ctx, res: res, opts: opts, machine: map[string]string{}}
+	w := &comWalker{ctx: ctx, res: res, opts: opts, machine: map[string]string{}, machineTypeLib: map[string]bool{}}
 
 	// Pass 1 — machine CLSIDs. The native pass also records which CLSIDs exist
 	// in HKLM, so per-user registrations that shadow them can be recognised.
@@ -68,12 +75,20 @@ func collectCOMHijack(ctx context.Context, opts RunOptions) (Result, error) {
 		w.walk(winreg.Users, sid+`_Classes\Wow6432Node\CLSID`, hive, "wow64", profile)
 	}
 
+	// TypeLib registrations — the other COM-hijack surface (T1546.015), which
+	// the CLSID-server walk above does not see. Reuses the profiles/hives
+	// already resolved for the per-user CLSID pass.
+	w.walkTypeLibStores(profiles, hives)
+
 	sort.Strings(userStores)
 	res.SetMeta("clsid_count_machine", w.machineCount)
 	res.SetMeta("clsid_count_user", w.userCount)
 	res.SetMeta("user_class_stores", userStores)
 	res.SetMeta("emitted", w.emitted)
-	res.SetMeta("note", "only CLSIDs that tripped a heuristic are recorded; the counts above are the totals scanned")
+	res.SetMeta("typelib_count_machine", w.typeLibMachineCount)
+	res.SetMeta("typelib_count_user", w.typeLibUserCount)
+	res.SetMeta("typelib_emitted", w.typeLibEmitted)
+	res.SetMeta("note", "only CLSID and TypeLib registrations that tripped a heuristic are recorded; the counts above are the totals scanned")
 	return res.Finish(), nil
 }
 

@@ -22,6 +22,8 @@
 //! (only rule, pattern identifiers and addresses). Prompt-scan contexts are the
 //! same sanitised, secret-redacted snippets used for files.
 
+pub mod integrity;
+mod pe;
 pub mod procmem;
 
 #[cfg(target_os = "linux")]
@@ -93,6 +95,8 @@ const DEFAULT_MAX_BYTES: u64 = 4 << 30;
 const MAX_YARA_HITS: usize = 500;
 /// Bounds the memory-heuristic hits reported per process.
 const MAX_HEURISTIC_HITS: usize = 64;
+/// Most image code compared per process by the integrity check.
+const INTEGRITY_MAX_BYTES: u64 = 1 << 30;
 
 /// Processes skipped unless the request sets include_sensitive. Reading
 /// LSASS trips Defender/EDR credential-theft protections and pulls credential
@@ -374,6 +378,13 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
     };
     let bytes_total: u64 = regions.iter().map(|r| r.size as u64).sum();
 
+    // Image integrity first: it reads only code mapped from image files, and
+    // gets at most a third of the budget so the YARA walk keeps the rest.
+    let integrity = mem.image_integrity(
+        started + opts.budget / 3,
+        opts.max_bytes.min(INTEGRITY_MAX_BYTES),
+    );
+
     let mut session = rules.map(yara::Session::new);
     let mut prompt_hits: BTreeMap<(&'static str, &'static str), PromptAgg> = BTreeMap::new();
     let mut scratch = prompts::Scratch::default();
@@ -536,7 +547,7 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
     let (prompt_rules, prompt_score, prompt_verdict) = prompts::tally(&prompt_list);
     hits.append(&mut prompt_list);
     let heuristic_count = heuristic_hits.len();
-    for mut h in heuristic_hits {
+    for mut h in heuristic_hits.into_iter().chain(integrity.hits()) {
         h.region = region_info(&regions, h.offset as usize, mem.as_ref());
         hits.push(h);
     }
@@ -591,6 +602,7 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
             "unbacked_rwx_regions": stats.private_rwx,
             "memory_heuristic_hits": heuristic_count,
             "memory_heuristics_truncated": heuristics_truncated,
+            "image_integrity": integrity.meta(),
         })),
         ..Default::default()
     }

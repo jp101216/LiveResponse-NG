@@ -82,6 +82,49 @@ func TestJudgeWMIBinding(t *testing.T) {
 	}
 }
 
+func TestJudgeWMIFilterTimer(t *testing.T) {
+	// A __TimerEvent filter gets the timer-trigger finding on top of the
+	// generic filter finding.
+	f := wmiFilter{Namespace: `root\subscription`, Name: "TimerFilter",
+		Query: `SELECT * FROM __TimerEvent WHERE TimerID = "Evil"`}
+	got := rulesOf(judgeWMIFilter(f))
+	if _, ok := got["persistence.wmi_filter"]; !ok {
+		t.Errorf("wmi_filter missing (got %v)", keys(got))
+	}
+	tf, ok := got["persistence.wmi_timer_filter"]
+	if !ok {
+		t.Fatalf("wmi_timer_filter missing (got %v)", keys(got))
+	}
+	if tf.Severity != SevSuspect {
+		t.Errorf("timer-triggered filter should be suspect, got %s", tf.Severity)
+	}
+}
+
+func TestWMIFilterTimerID(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`SELECT * FROM __TimerEvent WHERE TimerID = "Evil"`, `"Evil"`},
+		{`select * from __TimerEvent where TimerID='MyId'`, `"MyId"`},
+		{`SELECT * FROM __TimerEvent`, `"(unnamed)"`},
+		{`SELECT * FROM __InstanceModificationEvent WHERE TargetInstance ISA 'Win32_LocalTime'`, ``},
+	}
+	for _, c := range cases {
+		if got := wmiFilterTimerID(c.in); got != c.want {
+			t.Errorf("wmiFilterTimerID(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestJudgeWMITimer(t *testing.T) {
+	interval := wmiTimer{Namespace: `root\subscription`, Class: wmiIntervalTimer, TimerID: "Evil", Interval: "60000"}
+	if got := rulesOf(judgeWMITimer(interval)); func() bool { _, ok := got["persistence.wmi_timer"]; return !ok }() {
+		t.Errorf("interval timer should yield wmi_timer")
+	}
+	abs := wmiTimer{Namespace: `root\subscription`, Class: wmiAbsoluteTimer, TimerID: "Once", When: "20260101000000.000000+000"}
+	if got := judgeWMITimer(abs); len(got) != 1 || got[0].Rule != "persistence.wmi_timer" {
+		t.Errorf("absolute timer should yield one wmi_timer finding, got %v", got)
+	}
+}
+
 func TestParseWMIRef(t *testing.T) {
 	cases := []struct{ in, class, name string }{
 		{`ActiveScriptEventConsumer.Name="evil"`, "ActiveScriptEventConsumer", "evil"},

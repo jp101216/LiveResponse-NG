@@ -129,6 +129,24 @@ jobs:
           go build -o lrng.exe ./cmd/lrng
           cargo build --locked --release --manifest-path sidecar-rs/Cargo.toml
           Copy-Item sidecar-rs/target/release/lrng-sidecar.exe .
+      - name: image-integrity self-test (the real Windows loader)
+        shell: pwsh
+        run: |
+          # Every module the test process loads must compare clean with its file; then a
+          # rewrite planted in its own copy of a DLL must be found at the right address.
+          # The test's "lrng-selftest:" lines, and any panic with its message, are raised
+          # as annotations so the outcome reads from the checks API, not only the log.
+          $out = @(cargo test --locked --release --manifest-path sidecar-rs/Cargo.toml memscan::windows -- --nocapture 2>&1 | ForEach-Object { "$_" })
+          $code = $LASTEXITCODE
+          $out | Write-Output
+          function Esc($s) { $s -replace '%','%25' -replace "`r",'%0D' -replace "`n",'%0A' }
+          $out | Where-Object { $_ -match 'lrng-selftest:' } | Select-Object -First 9 | ForEach-Object { Write-Output ("::notice::" + (Esc $_)) }
+          if ($code -ne 0) {
+            $p = -1
+            for ($i = 0; $i -lt $out.Count; $i++) { if ($out[$i] -match 'panicked at') { $p = $i; break } }
+            if ($p -ge 0) { Write-Output ("::error::" + (Esc ($out[$p..([math]::Min($p + 6, $out.Count - 1))] -join ' | '))) }
+            exit 1
+          }
       - name: ping, prompt scan, memory scan
         shell: pwsh
         run: |
@@ -147,6 +165,17 @@ jobs:
           $hits = $r.summary.by_rule.'yara:ci_marker'
           Stop-Process -Id $p.Id
           if (-not $hits) { throw "YARA marker not found in live process memory" }
+          # Image integrity ran over the live PowerShell's ~100 modules and found nothing
+          # rewritten: a false-positive gate on real system DLLs and .NET native images.
+          $recs = @($r.results | Where-Object { $_.collector -eq 'memory' } | ForEach-Object { $_.records })
+          $ii = @($recs | ForEach-Object { $_.fields.image_integrity } | Where-Object { $_ })
+          Write-Output ("::notice::image integrity (live PowerShell): " + ($ii | ConvertTo-Json -Compress -Depth 6))
+          $recs | ForEach-Object { $_.findings } | Where-Object { $_ -and ($_.rule -like 'memory.image_*' -or $_.rule -like 'defense.*') } |
+            Select-Object -First 8 | ForEach-Object { Write-Output ("::notice::" + $_.rule + " [" + $_.severity + "]: " + ($_.detail -replace '%','%25')) }
+          if ($ii.Count -lt 1 -or $ii[0].images -lt 1 -or $ii[0].bytes_compared -lt 1) { throw "image integrity compared nothing in a live process" }
+          foreach ($rule in 'memory.image_code_modified', 'memory.image_header_mismatch', 'defense.amsi_patched', 'defense.etw_patched') {
+            if ($r.summary.by_rule.$rule) { throw "false positive: $rule on a clean PowerShell process" }
+          }
 
   linux-release:
     name: Linux release set (static musl sidecars) + live integration
@@ -213,6 +242,17 @@ jobs:
           kill "$pid"
           echo "yara:ci_marker hits: $hits"
           test "$hits" -gt 0
+          # Image integrity ran over the live process's mapped code and found nothing rewritten.
+          sudo cat mem.json | python3 -c '
+          import json, sys
+          r = json.load(sys.stdin)
+          ii = [rec["fields"].get("image_integrity") for res in r["results"] if res["collector"] == "memory" for rec in res["records"]]
+          ii = [x for x in ii if x]
+          print("image integrity:", ii)
+          assert ii and ii[0]["images"] > 0 and ii[0]["bytes_compared"] > 0, "image integrity compared nothing"
+          bad = {k: v for k, v in r["summary"]["by_rule"].items() if k in ("memory.image_code_modified", "memory.image_header_mismatch")}
+          assert not bad, "false positive on a clean process: %s" % bad
+          '
       - uses: actions/upload-artifact@v6
         if: always()
         with:

@@ -1,6 +1,6 @@
 [package]
 name = "lrng-sidecar"
-version = "0.10.6"
+version = "0.11.0"
 edition = "2021"
 rust-version = "1.93" # yara-x 1.21
 description = "Live Response NG sidecar: memory-safe hostile-input scanning (prompt artifacts, YARA over process memory)."
@@ -36,6 +36,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_ProcessStatus",
     "Win32_Storage_FileSystem",
 ] }
+
+# The Windows image-integrity self-test loads a module of its own to rewrite.
+[target.'cfg(any(windows, lrng_typecheck_windows))'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(lrng_typecheck_windows)'] }

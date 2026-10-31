@@ -22,6 +22,9 @@ import (
 // annotations. Safe to call on any result set; callers run it after collection
 // and before summarising, so the findings it adds roll up like any other.
 func Correlate(results []Result) {
+	// Independent of the event log: lines up two live collectors.
+	correlateTaskComHandlers(results)
+
 	el := findResult(results, "eventlog")
 	if el == nil {
 		return
@@ -160,6 +163,114 @@ func correlateScheduledTasks(results []Result, el *Result) {
 		}
 		el.SetMeta("task_register_correlation", m)
 	}
+}
+
+// correlateTaskComHandlers cross-references scheduled tasks that fire a COM
+// handler (an IComHandlerAction, identified by its CLSID) against the COM
+// registrations the comhijack collector flagged. A scheduled task is a tidy
+// trigger for a hijacked COM object: the task runs on its schedule and loads
+// whatever the (rewritten) CLSID registration resolves to. Neither collector
+// sees this alone — the scheduledtasks collector records the ClassId, the
+// comhijack collector flags the server — so the link is drawn here. A no-op
+// unless both collectors ran (e.g. not in offline -evtx mode).
+func correlateTaskComHandlers(results []Result) {
+	st := findResult(results, "scheduledtasks")
+	com := findResult(results, "comhijack")
+	if st == nil || com == nil {
+		return
+	}
+
+	// The strongest severity comhijack gave each flagged CLSID (its CLSID
+	// records carry a "clsid" field; TypeLib records do not).
+	flagged := map[string]Severity{}
+	why := map[string]string{}
+	for _, r := range com.Records {
+		key := clsidKey(stringField(r.Fields, "clsid"))
+		if key == "" {
+			continue
+		}
+		sev, detail := strongestFinding(r.Findings)
+		if sev == "" {
+			continue
+		}
+		if sevRank(sev) > sevRank(flagged[key]) {
+			flagged[key] = sev
+			why[key] = detail
+		}
+	}
+	if len(flagged) == 0 {
+		return
+	}
+
+	matched := 0
+	for i := range st.Records {
+		rec := &st.Records[i]
+		for _, h := range stringSliceField(rec.Fields, "com_handlers") {
+			key := clsidKey(h)
+			sev, ok := flagged[key]
+			if !ok {
+				continue
+			}
+			taskSev, conf := SevSuspect, 70
+			if sev == SevCritical {
+				taskSev, conf = SevCritical, 85
+			}
+			name := firstNonEmpty(stringField(rec.Fields, "task_path"), stringField(rec.Fields, "name"))
+			rec.Findings = append(rec.Findings, Finding{
+				Rule:       "correlate.task_comhandler_hijacked",
+				Severity:   taskSev,
+				Technique:  "T1546.015",
+				Confidence: conf,
+				Detail: fmt.Sprintf("scheduled task %q fires a COM handler (CLSID %s) whose registration comhijack flagged: %s",
+					name, key, why[key]),
+			})
+			matched++
+			break // one correlation finding per task is enough
+		}
+	}
+	if matched > 0 {
+		com.SetMeta("task_comhandler_matches", matched)
+	}
+}
+
+// clsidKey normalises a CLSID to a brace-insensitive, lower-case key, so a
+// task's ComHandler ClassId and a comhijack record's clsid compare equal
+// regardless of brace or case differences.
+func clsidKey(s string) string {
+	return strings.ToLower(strings.Trim(strings.TrimSpace(s), "{}"))
+}
+
+// strongestFinding returns the highest-severity finding's severity and detail.
+func strongestFinding(fs []Finding) (Severity, string) {
+	best := Finding{}
+	rank := -1
+	for _, f := range fs {
+		if r := sevRank(f.Severity); r > rank {
+			rank, best = r, f
+		}
+	}
+	if rank < 0 {
+		return "", ""
+	}
+	return best.Severity, best.Detail
+}
+
+// stringSliceField reads a []string field, tolerating a []any of strings (the
+// shape a round-tripped record would hold).
+func stringSliceField(f map[string]any, key string) []string {
+	switch v := f[key].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // inventoryPartial reports whether a live collector stopped before it had

@@ -252,6 +252,11 @@ const CORE_ELF: &[&str] = &[
     "libselinux.so",
 ];
 
+/// Runtimes that rewrite their own code as they run: the .NET runtimes patch
+/// their GC write-barrier helpers in place as the heap's bounds change, so
+/// every process running .NET shows patches in them.
+const SELF_PATCHING: &[&str] = &["clr.dll", "coreclr.dll", "mscorwks.dll"];
+
 fn is_core(name: &str) -> bool {
     CORE_PE.contains(&name) || CORE_ELF.iter().any(|p| name.starts_with(p))
 }
@@ -452,28 +457,47 @@ fn patch_hit(ps: &[&Change]) -> Hit {
         e.1.extend(c.near.iter().filter(|s| !s.is_empty()).take(3).cloned());
     }
     let core = by.keys().any(|n| is_core(n));
+    let self_patching = |n: &str| SELF_PATCHING.contains(&n);
+    let expected = by.keys().all(|n| self_patching(n));
     let mut list: Vec<String> = by
         .iter()
         .take(8)
         .map(|(n, (sites, near))| {
-            if near.is_empty() {
-                format!("{n} ({sites} site(s))")
+            let near = if near.is_empty() {
+                String::new()
             } else {
-                format!("{n} ({sites} site(s), near {})", near.join(", "))
-            }
+                format!(", near {}", near.join(", "))
+            };
+            let note = if self_patching(n) {
+                ": the .NET runtime, which rewrites its own GC write-barrier code as the heap changes"
+            } else {
+                ""
+            };
+            format!("{n} ({sites} site(s){near}){note}")
         })
         .collect();
     if by.len() > 8 {
         list.push(format!("and {} more", by.len() - 8));
     }
+    let advice = if expected {
+        "Expected in a process running .NET; no other module was patched"
+    } else {
+        "Inline hooks look like this (security products, debuggers, uprobes, hot-patches) and so does tampering; check which product owns them"
+    };
     hit(
         "memory.image_inline_patch",
         if core { "notable" } else { "info" },
         "T1055",
-        if core { 45 } else { 30 },
+        if core {
+            45
+        } else if expected {
+            15
+        } else {
+            30
+        },
         ps[0].first_site(),
         format!(
-            "short in-memory patches to image code in {} module(s): {}. Inline hooks look like this (security products, debuggers, uprobes, hot-patches) and so does tampering; check which product owns them",
+            "short in-memory patches to image code in {} module(s): {}. {advice}",
             by.len(),
             list.join("; ")
         ),
@@ -662,6 +686,41 @@ mod tests {
         assert_eq!(
             (h.rule.as_str(), h.severity.as_str()),
             ("memory.image_code_modified", "critical")
+        );
+    }
+
+    #[test]
+    fn dotnet_runtime_self_patching_is_explained() {
+        // What CI's live sweep sees in every PowerShell process.
+        let mut r = Report {
+            supported: true,
+            ..Default::default()
+        };
+        r.changes.push(change(
+            r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\clr.dll",
+            &[(5, 0x11), (40, 0x22)],
+            64,
+            &["DllCanUnloadNowInternal+0x21b3"],
+        ));
+        let h = &r.hits()[0];
+        assert_eq!((h.severity.as_str(), h.confidence), ("info", 15));
+        assert!(
+            h.context.contains(
+                "clr.dll (2 site(s), near DllCanUnloadNowInternal+0x21b3): the .NET runtime"
+            ) && h.context.ends_with("no other module was patched"),
+            "{}",
+            h.context
+        );
+
+        // Any other module patched beside it gets the general advice.
+        r.changes
+            .push(change("/opt/app/libplugin.so", &[(1, 0xCC)], 64, &[]));
+        let h = &r.hits()[0];
+        assert_eq!(h.confidence, 30);
+        assert!(
+            h.context.contains("check which product owns them"),
+            "{}",
+            h.context
         );
     }
 

@@ -464,7 +464,8 @@ was mapped, so a package upgrade can't look like tampering. Differences are
 merged into change sites and judged by length: a long run is code rewritten in
 place (`memory.image_code_modified`); short ones are patches, reported together
 at low severity (`memory.image_inline_patch`) since security products hook
-code too — except in `amsi.dll` (`defense.amsi_patched`) and at ntdll's ETW
+code too (the .NET runtime, which rewrites its own GC write barriers, is named
+as expected) — except in `amsi.dll` (`defense.amsi_patched`) and at ntdll's ETW
 event writers (`defense.etw_patched`), named by export. A header that no longer
 matches its file is `memory.image_header_mismatch`. Classic hollowing into
 private memory is `memory.pe_in_private` above. The PE reader is checked

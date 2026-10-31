@@ -62,7 +62,8 @@ new records and findings within the existing envelope.
   Differences merge into change sites judged by length: a long run is code
   rewritten in place, `memory.image_code_modified` (T1055, *critical* from
   16 KiB — module stomping); short runs are patches, `memory.image_inline_patch`
-  (low severity, since security products hook too), except in `amsi.dll`
+  (low severity, since security products hook too; the .NET runtime, which
+  rewrites its own GC write barriers, is named as expected), except in `amsi.dll`
   (`defense.amsi_patched`, T1562.001) and at ntdll's ETW event writers
   (`defense.etw_patched`, T1562.006), named by export. A header that no longer
   matches its file is `memory.image_header_mismatch` (T1055.012 — hollowing and

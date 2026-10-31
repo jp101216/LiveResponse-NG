@@ -29,7 +29,9 @@ func hash(s string) string {
 // Editing either without refreshing the hashes leaves the page blank, so this
 // fails first (and -update fixes it).
 func TestContentSecurityPolicy(t *testing.T) {
-	src := string(page)
+	// Browsers hash the text after the HTML parser has turned CRLF and CR into
+	// LF, so a checkout with Windows line endings still matches.
+	src := strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(string(page))
 	styles := styleRe.FindAllStringSubmatch(src, -1)
 	scripts := scriptRe.FindAllStringSubmatch(src, -1)
 	if len(styles) != 1 || len(scripts) != 1 {

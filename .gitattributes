@@ -1,0 +1,2 @@
+# The viewer is embedded byte for byte (go:embed): the same page on every platform.
+viewer/lrng-viewer.html text eol=lf

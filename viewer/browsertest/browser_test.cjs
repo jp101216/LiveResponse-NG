@@ -94,6 +94,15 @@ function jsonl(rep) {
 
 const failures = [];
 const fail = (where, what) => failures.push(`${where}: ${what}`);
+// In GitHub Actions, failures and progress become annotations on the run.
+const gha = !!process.env.GITHUB_ACTIONS;
+const esc = (s) => String(s).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+const note = (s) => { if (gha) console.log("::notice title=viewer browser test::" + esc(s)); else console.log(s); };
+// One interaction; if it can't happen, that's a failure with its context, not a crash.
+async function act(where, what, fn) {
+  try { await fn(); } catch (e) { fail(where, `${what}: ${String(e.message).split("\n")[0]}`); }
+}
+const CLICK = { timeout: 8000 };
 
 async function exercise(page, where) {
   // Every view, then every collector's data; open everything that opens.
@@ -103,34 +112,40 @@ async function exercise(page, where) {
     await page.waitForTimeout(60);
     if (v === "findings") {
       const rows = await page.locator(".f-row").count();
-      for (let i = 0; i < Math.min(rows, 40); i++) await page.locator(".f-row").nth(i).click();
+      for (let i = 0; i < Math.min(rows, 40); i++) await act(where, `open finding ${i}`, () => page.locator(".f-row").nth(i).click(CLICK));
       const more = page.locator(".pager .btn");
-      if (await more.count()) await more.first().click();
+      if (await more.count()) await act(where, "show more findings", () => more.first().click(CLICK));
     }
     if (v === "processes") {
       const expand = page.getByRole("button", { name: "Expand all" });
-      if (await expand.count()) await expand.click();
+      if (await expand.count()) await act(where, "expand all", () => expand.click(CLICK));
       const names = await page.locator(".p-name").count();
-      for (let i = 0; i < Math.min(names, 12); i++) await page.locator(".p-name").nth(i).click();
+      for (let i = 0; i < Math.min(names, 12); i++) await act(where, `open process ${i}`, () => page.locator(".p-name").nth(i).click(CLICK));
       const search = page.locator("main .search");
-      if (await search.count()) { await search.fill("deep2999"); await page.waitForTimeout(250); await search.fill(""); await page.waitForTimeout(250); }
+      if (await search.count()) {
+        await act(where, "search processes", async () => {
+          await search.fill("deep2999", CLICK); await page.waitForTimeout(250); await search.fill("", CLICK); await page.waitForTimeout(250);
+        });
+      }
     }
   }
-  const collectors = await page.locator("nav .nav-item").evaluateAll((els) => els.length);
-  for (let i = views.length; i < collectors; i++) {
-    await page.locator("nav .nav-item").nth(i).click();
+  const navs = await page.locator("nav .nav-item").evaluateAll((els) => els.map((e) => e.textContent));
+  for (let i = views.length; i < navs.length; i++) {
+    const name = navs[i];
+    await act(where, `open ${name}`, () => page.locator("nav .nav-item").nth(i).click(CLICK));
     await page.waitForTimeout(40);
     const opens = await page.locator(".row-btn").count();
-    for (let j = 0; j < Math.min(opens, 6); j++) await page.locator(".row-btn").nth(j * 2 < opens ? j : 0).click();
+    for (let j = 0; j < Math.min(opens, 6); j++) await act(where, `${name}: open row ${j}`, () => page.locator(".row-btn").nth(j * 2 < opens ? j : 0).click(CLICK));
     const all = page.locator("main .filters .btn");
-    if (await all.count()) await all.first().click();
+    if (await all.count()) await act(where, `${name}: all columns`, () => all.first().click(CLICK));
     const ths = await page.locator("th.sortable").count();
-    for (let j = 0; j < Math.min(ths, 4); j++) await page.locator("th.sortable").nth(j).click();
+    for (let j = 0; j < Math.min(ths, 4); j++) await act(where, `${name}: sort by column ${j}`, () => page.locator("th.sortable").nth(j).click(CLICK));
   }
   // A hash naming something that isn't a collector is ignored.
   await page.evaluate(() => { location.hash = "#collector/" + encodeURIComponent("<img src=x onerror=alert('hash')>"); });
   await page.waitForTimeout(60);
-  for (const t of await page.locator(".tactic").all()) await t.click();
+  const tactics = await page.locator(".tactic").count();
+  for (let i = 0; i < tactics; i++) await act(where, `tactic ${i}`, () => page.locator(".tactic").nth(i).click(CLICK));
 
   const audit = await page.evaluate(() => ({
     foreign: [...document.querySelectorAll("img, svg, iframe, object, embed, frame, form, b, a:not(.tech)")].map((e) => e.outerHTML.slice(0, 80)),
@@ -234,6 +249,7 @@ async function openPage(browser, where, url, shots) {
       ({ ctx, page } = await openPage(browser, where, "file://" + p));
     }
     await exercise(page, where);
+    note(`${where}: ${await page.locator(".f-row").count()} finding rows shown, ${await page.locator("nav .nav-item").count()} views`);
     if (shotDir) {
       for (const v of ["findings", "processes", "timeline", "indicators", "run"]) {
         await page.evaluate((x) => { location.hash = "#" + x; window.scrollTo(0, 0); }, v);
@@ -249,7 +265,12 @@ async function openPage(browser, where, url, shots) {
   if (failures.length) {
     console.error(`viewer browser test: ${failures.length} failure(s)`);
     for (const f of failures) console.error("  " + f);
+    if (gha) for (const f of failures.slice(0, 30)) console.log("::error title=viewer browser test::" + esc(f));
     process.exit(1);
   }
   console.log(`viewer browser test: passed (hostile report embedded, as JSON and as JSONL; ${reports.length} real report(s))`);
-})().catch((e) => { console.error(e); process.exit(1); });
+})().catch((e) => {
+  console.error(e);
+  if (gha) console.log("::error title=viewer browser test crashed::" + esc(String(e.stack || e).split("\n").slice(0, 6).join("\n")));
+  process.exit(1);
+});

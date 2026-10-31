@@ -14,10 +14,15 @@
 #
 # Usage:   sudo ./linux-detection-demo.sh            # root sees the most
 #          LRNG=/path/to/lrng ./linux-detection-demo.sh
+#          REPORT=/path/to/report.html ./linux-detection-demo.sh
+#
+# It leaves one thing behind on purpose: the report, as an HTML page with the
+# report viewer built in (lrng -format html), to open in a browser.
 #
 set -euo pipefail
 
 LRNG="${LRNG:-./lrng}"
+REPORT="${REPORT:-$PWD/lrng-demo-report.html}"
 if ! command -v "$LRNG" >/dev/null 2>&1 && [ ! -x "$LRNG" ]; then
 	echo "error: lrng not found (set LRNG=/path/to/lrng, or run from a dir with ./lrng)" >&2
 	exit 1
@@ -91,17 +96,22 @@ echo "  [4] $UNIT_FILE   -> expect persistence.unusual_path"
 sleep 1   # let the staged processes settle into /proc
 
 echo
-echo "== running: lrng triage (processes, network, udp, modules, localaccounts, autoruns) + IOC + intel =="
+echo "== running: lrng triage (processes, network, udp, modules, localaccounts, autoruns) + timeline, IOC, intel =="
 set -x
 "$LRNG" -collectors processes,network,udp,modules,localaccounts,autoruns \
-	-iocs -intel -no-dns -no-hash -quiet -force -out "$WORK/report.json"
+	-timeline -iocs -intel -no-dns -no-hash -quiet -force -format html -out "$REPORT"
 set +x
+# Under sudo, hand the report to the user who ran the demo (lrng writes it 0600).
+if [ -n "${SUDO_UID:-}" ]; then chown "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$REPORT" "$REPORT.sha256"; fi
 
 echo
 echo "== what lrng flagged =="
-python3 - "$WORK/report.json" <<'PY'
+python3 - "$REPORT" <<'PY'
 import json, sys
-rep = json.load(open(sys.argv[1]))
+# The report is the page's data block: JSON, HTML-escaped (\u003c and so on).
+page = open(sys.argv[1], encoding="utf-8").read()
+start = page.index('<script type="application/json" id="lrng-report">') + len('<script type="application/json" id="lrng-report">')
+rep = json.loads(page[start:page.index("</script>", start)])
 rank = {"critical": 0, "suspect": 1, "notable": 2, "info": 3}
 rows = []
 for r in rep["results"]:
@@ -117,4 +127,6 @@ for _, sev, rule, tech, coll, detail in rows:
     print(f"             {detail[:150]}")
 PY
 echo
-echo "(Full structured report with IOC + endpoint-intel attribution: $WORK/report.json — removed on exit.)"
+echo "The full report, in the report viewer (findings, process tree, timeline, IOCs with intel):"
+echo "  $REPORT"
+echo "Open it in any browser. It stays after the demo cleans up; delete it when you're done."

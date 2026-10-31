@@ -26,3 +26,7 @@
 
 # Windows test binaries
 *.test.exe
+
+# The Linux demo leaves its report where it was run.
+lrng-demo-report.html
+lrng-demo-report.html.sha256

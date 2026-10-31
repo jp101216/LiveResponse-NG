@@ -584,19 +584,28 @@ mod tests {
         }
 
         // Write to Windows' page in our module, when its copies elsewhere agree.
-        let tamper = loader_page.filter(|_| shared >= 2);
-        if let Some(lp) = tamper {
+        // Windows may refuse to make its page writable at all, in which case no
+        // payload can be written there from user mode either.
+        let tamper = loader_page.filter(|_| shared >= 2).filter(|&lp| {
+            let mut old = 0u32;
             // SAFETY: a byte of our own module's page, restored below.
-            unsafe {
-                let mut old = 0u32;
-                assert_ne!(
-                    VirtualProtect(lp as *const c_void, 1, PAGE_EXECUTE_READWRITE, &mut old),
-                    0
+            let ok = unsafe {
+                VirtualProtect(lp as *const c_void, 1, PAGE_EXECUTE_READWRITE, &mut old)
+            };
+            if ok == 0 {
+                eprintln!(
+                    "lrng-selftest: Windows' page in our module can't be made writable (Win32 error {}): no payload can be written there from user mode",
+                    unsafe { GetLastError() }
                 );
+                return false;
+            }
+            unsafe {
                 *(lp as *mut u8) ^= 0xFF;
                 VirtualProtect(lp as *const c_void, 1, old, &mut old);
             }
-        } else {
+            true
+        });
+        if tamper.is_none() {
             eprintln!(
                 "lrng-selftest: loader page not tampered with (ours: {loader_page:?}, identical copies elsewhere: {shared})"
             );

@@ -474,10 +474,11 @@ So on Windows every executable page of a loaded module is also placed against
 the file's layout, and any outside the sections the file marks as code is
 `memory.image_exec_outside_code` — *critical* when the bytes there differ from
 the file (a payload was written), *suspect* when only the protection changed.
-Recent Windows builds add an executable page of their own, which no section
-covers, to every image with a `fothk` section; each copy is judged against the
-others in the process, so one that differs from a copy two or more modules
-share is reported (*critical*) and matching ones are counted under `skipped`.
+Recent Windows builds map an executable page of their own just past the end of
+every image with a `fothk` section, the same in every module; each copy is
+judged against the others in the process, so one that differs from a copy two
+or more modules share is reported (*critical*) and matching ones are counted
+under `skipped`.
 (On Linux every executable mapping is compared already, wherever it lies.)
 Classic hollowing into private memory is `memory.pe_in_private` above. The PE reader is checked
 byte-for-byte against [pefile](https://github.com/erocarrera/pefile) on real

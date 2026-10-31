@@ -12,7 +12,7 @@ use super::integrity::{Report, Unavailable};
 use super::pe;
 use super::procmem::{OpenError, ProcessMemory, Region};
 use core::ffi::c_void;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read};
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -188,7 +188,7 @@ impl ProcessMemory for WinProcess {
             supported: true,
             ..Default::default()
         };
-        for base in self.image_bases() {
+        for (base, exec) in self.images() {
             if Instant::now() >= deadline {
                 rep.stopped = Some("time budget exhausted".into());
                 break;
@@ -226,7 +226,7 @@ impl ProcessMemory for WinProcess {
             header.truncate(n);
             rep.images += 1;
             let mut read = |addr: usize, buf: &mut [u8]| self.read(addr, buf);
-            let c = pe::check_image(&path, &file, &header, base, &mut read);
+            let c = pe::check_image(&path, &file, &header, base, &exec, &mut read);
             rep.compared += c.compared;
             rep.bytes += c.bytes;
             for why in c.skipped {
@@ -234,16 +234,18 @@ impl ProcessMemory for WinProcess {
             }
             rep.changes.extend(c.changes);
             rep.headers.extend(c.header);
+            rep.exec_outside.extend(c.exec_outside);
         }
         rep
     }
 }
 
 impl WinProcess {
-    /// Allocation bases of the process's committed image mappings
-    /// (MEM_IMAGE), one per loaded module, in address order.
-    fn image_bases(&self) -> Vec<usize> {
-        let mut out = BTreeSet::new();
+    /// The process's committed image mappings (MEM_IMAGE), one per loaded
+    /// module in address order: each allocation base, with the executable
+    /// stretches inside it as offsets from that base.
+    fn images(&self) -> Vec<(usize, Vec<pe::ExecRange>)> {
+        let mut out: BTreeMap<usize, Vec<pe::ExecRange>> = BTreeMap::new();
         let mut addr: usize = 0;
         let len = core::mem::size_of::<MEMORY_BASIC_INFORMATION>();
         for _ in 0..MAX_REGIONS {
@@ -254,7 +256,15 @@ impl WinProcess {
                 break;
             }
             if mbi.State == MEM_COMMIT && mbi.Type == MEM_IMAGE {
-                out.insert(mbi.AllocationBase as usize);
+                let alloc = mbi.AllocationBase as usize;
+                let exec = out.entry(alloc).or_default();
+                if executable(mbi.Protect) {
+                    exec.push(pe::ExecRange {
+                        rva: (mbi.BaseAddress as usize).wrapping_sub(alloc),
+                        len: mbi.RegionSize,
+                        protect: protect_name(mbi.Protect),
+                    });
+                }
             }
             match (mbi.BaseAddress as usize).checked_add(mbi.RegionSize) {
                 Some(next) if next > addr => addr = next,
@@ -338,6 +348,14 @@ fn readable(protect: u32) -> bool {
     )
 }
 
+fn executable(protect: u32) -> bool {
+    protect & (PAGE_GUARD | PAGE_NOACCESS) == 0
+        && matches!(
+            protect & 0xff,
+            PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY
+        )
+}
+
 fn protect_name(protect: u32) -> &'static str {
     match protect & 0xff {
         PAGE_READONLY => "R",
@@ -413,6 +431,12 @@ mod tests {
                 u.path, u.why
             );
         }
+        for e in &clean.exec_outside {
+            eprintln!(
+                "lrng-selftest: clean-run executable outside code: {} {} at 0x{:x} ({} bytes, {}, {:?})",
+                e.path, e.what, e.start, e.len, e.protect, e.stats
+            );
+        }
         assert!(
             clean.images > 1 && clean.bytes > 0,
             "nothing compared: {}",
@@ -436,6 +460,11 @@ mod tests {
         assert!(
             rewrites.is_empty(),
             "rewritten code in a clean process: {rewrites:?}"
+        );
+        assert!(
+            clean.exec_outside.is_empty(),
+            "executable memory outside the code sections in a clean process: {:?}",
+            clean.exec_outside
         );
 
         let file = std::fs::read(&dst).unwrap();
@@ -464,9 +493,49 @@ mod tests {
             }
             assert_ne!(VirtualProtect(at as *const c_void, 4096, old, &mut old), 0);
         }
-        let after = me.image_integrity(deadline(), 1 << 32);
-        // SAFETY: loaded above and not used after this.
+        // Module stomping into a data section: the first page of .rsrc made
+        // executable, with a payload written into it.
+        let rsrc = disk
+            .sections
+            .iter()
+            .find(|s| s.name == ".rsrc" && !s.exec())
+            .expect("version.dll has a .rsrc section");
+        let page = base + rsrc.va as usize;
+        let mut rsrc_old = 0u32;
+        // SAFETY: the page belongs to the module loaded above; it is made
+        // executable and writable (copy-on-write) and 1 KiB of it inverted,
+        // all undone before the module is freed.
         unsafe {
+            assert_ne!(
+                VirtualProtect(
+                    page as *const c_void,
+                    4096,
+                    PAGE_EXECUTE_READWRITE,
+                    &mut rsrc_old
+                ),
+                0,
+                "VirtualProtect: Win32 error {}",
+                GetLastError()
+            );
+            for b in std::slice::from_raw_parts_mut(page as *mut u8, 1024).iter_mut() {
+                *b = !*b;
+            }
+        }
+
+        let after = me.image_integrity(deadline(), 1 << 32);
+        // SAFETY: as above; both changes are undone (the module's DllMain runs
+        // as it unloads), then the module is freed and not used again.
+        unsafe {
+            for b in std::slice::from_raw_parts_mut(page as *mut u8, 1024).iter_mut() {
+                *b = !*b;
+            }
+            let mut old = 0u32;
+            VirtualProtect(page as *const c_void, 4096, rsrc_old, &mut old);
+            VirtualProtect(at as *const c_void, 4096, PAGE_EXECUTE_READWRITE, &mut old);
+            for b in std::slice::from_raw_parts_mut(at as *mut u8, 4096).iter_mut() {
+                *b = !*b;
+            }
+            VirtualProtect(at as *const c_void, 4096, old, &mut old);
             FreeLibrary(module);
         }
         let _ = std::fs::remove_file(&dst);
@@ -492,5 +561,36 @@ mod tests {
             "{:?}",
             s
         );
+
+        for e in &after.exec_outside {
+            eprintln!(
+                "lrng-selftest: after-run executable outside code: {} {} at 0x{:x} ({} bytes, {}, {:?})",
+                e.path, e.what, e.start, e.len, e.protect, e.stats
+            );
+        }
+        let outside: Vec<_> = after
+            .exec_outside
+            .iter()
+            .filter(|e| file_name_lower(&e.path) == name)
+            .collect();
+        assert_eq!(outside.len(), 1, "{:?}", after.exec_outside);
+        let e = outside[0];
+        assert_eq!(
+            (e.what.as_str(), e.start, e.len),
+            ("section .rsrc", page, 4096),
+            "{e:?}"
+        );
+        assert_eq!(e.stats.verdict(), Verdict::Rewritten, "{e:?}");
+        assert_eq!(
+            (e.stats.differing, e.stats.largest, e.stats.largest_at),
+            (1024, 1024, 0),
+            "{e:?}"
+        );
+        let h = after
+            .hits()
+            .into_iter()
+            .find(|h| h.rule == "memory.image_exec_outside_code")
+            .expect("an image_exec_outside_code finding");
+        assert_eq!((h.severity.as_str(), h.offset as usize), ("critical", page));
     }
 }

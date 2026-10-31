@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.11.1
+
+Closes the gap 0.11.0's image-integrity check left on Windows: module stomping
+that writes its payload outside a module's code sections. One new rule id,
+everything read-only, no new dependencies, schema unchanged at 1.2.
+
+### Added
+- **Executable pages outside a module's code sections (Windows,
+  `memory.image_exec_outside_code`, T1055).** 0.11.0 compared the sections a
+  module's file marks as code, so a stomper that leaves `.text` alone — writing
+  its payload into a data section, the headers or past the last section, and
+  making those pages executable — went unseen. The image walk now records every
+  executable stretch of each loaded module and places it against the file's own
+  layout; any outside the code sections is reported with the section it lies in
+  and its protection, and its bytes are compared with what the file maps there
+  (relocated, IAT masked, zero fill past the raw data): *critical* when a
+  payload was written, *suspect* when only the protection changed. Images whose
+  sections share pages (section alignment below a page, so the memory manager
+  gives the whole image one protection) are counted under `skipped` instead.
+  The expected bytes are checked against pefile on 188 real images (962 data
+  sections and headers, byte for byte), and the real-Windows self-test now also
+  makes a page of a loaded DLL's `.rsrc` executable, writes 1 KiB into it, and
+  requires exactly that page to be reported — after a clean run that must report
+  nothing. The live Windows sweep fails CI if the rule fires on the runner. Linux
+  needed no change: it compares every executable mapping, wherever it lies.
+  Counted per process as `image_integrity.exec_outside_code`.
+
+### Fixed
+- **A memory scan without YARA rules and without the prompt scan refused to
+  run** ("nothing to do"), though image integrity and the memory heuristics
+  need no rules. It now runs them, reading only each region's first chunk, so
+  `-collectors memory -mem-no-prompts` is a quick integrity sweep. The
+  `-mem-no-prompts` help no longer says "YARA only".
+
 ## 0.11.0
 
 Closes the roadmap's open detection items. On Windows, the COM- and

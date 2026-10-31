@@ -43,7 +43,7 @@ import (
 // Set at build time: go build -ldflags "-X main.version=... -X main.commit=...".
 // These must be vars — -X silently does nothing to a const.
 var (
-	version = "0.11.0"
+	version = "0.11.1"
 	commit  = ""
 )
 
@@ -82,7 +82,7 @@ func main() {
 	flag.DurationVar(&cfg.MemBudget, "mem-budget", cfg.MemBudget, "memory scan: time budget per process")
 	flag.DurationVar(&cfg.MemTimeout, "mem-timeout", cfg.MemTimeout, "memory scan: time limit for the whole memory collector")
 	flag.IntVar(&cfg.MemWorkers, "mem-workers", cfg.MemWorkers, "memory scan: processes scanned in parallel")
-	flag.BoolVar(&cfg.MemNoPrompts, "mem-no-prompts", false, "memory scan: YARA only, skip the prompt-artifact scan")
+	flag.BoolVar(&cfg.MemNoPrompts, "mem-no-prompts", false, "memory scan: skip the prompt-artifact scan (YARA, the heuristics and image integrity still run)")
 	flag.BoolVar(&cfg.MemIncludeLsass, "mem-include-lsass", false, "memory scan: also scan lsass.exe (skipped by default; trips EDR credential-theft protection)")
 	flag.Usage = usage
 	flag.Parse()

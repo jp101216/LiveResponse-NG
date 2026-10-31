@@ -234,15 +234,20 @@ relocations the loader applied (HIGHLOW and DIR64; any other kind's bytes are
 masked), masks the IAT, leaves out the `fothk` section (function-override
 thunks the loader rewrites), and compares the mapped header's identity fields —
 timestamp, image size, section layout; not the machine or entry point, which an
-ARM64X image changes for x64 callers — with the file's. A file no drive letter
-reaches is read through its `\\?\GLOBALROOT` device path. On Linux each
+ARM64X image changes for x64 callers — with the file's. The same region walk
+records each module's executable stretches; any outside the sections the file
+marks as code (headers, data sections, past the last section) is reported and
+its bytes compared with what the file maps there, so stomping that leaves
+`.text` intact is still seen. A file no drive letter reaches is read through
+its `\\?\GLOBALROOT` device path. On Linux each
 executable file mapping is compared with `/proc/<pid>/map_files/<range>`, the
 inode actually mapped, falling back to the path only when its inode matches.
 Differing bytes merge into change sites across gaps of 16 bytes or less; a site
 of 256 bytes or more is a rewrite, anything shorter a patch; on Windows each
 site is named by the nearest export. The check stops at its deadline or byte
 cap and says so (`stopped`); Linux streams each mapping in chunks rather than
-holding it whole.
+holding it whole. With no YARA rules and no prompt scan, the region walk after
+it reads only each region's first chunk, which is all the heuristics need.
 
 ### Event logs
 

@@ -177,6 +177,21 @@ pub struct HeaderMismatch {
     pub fields: Vec<String>,
 }
 
+/// Executable memory in a mapped image outside the sections its file marks
+/// as code (PE images only: on Linux every executable mapping is compared).
+#[derive(Debug, Clone)]
+pub struct ExecOutside {
+    pub path: String,
+    pub start: usize,
+    pub len: usize,
+    /// Where it lies: "headers", "section .data", "no section".
+    pub what: String,
+    /// The protections seen there ("RX", "RWX", "RX+RWX").
+    pub protect: String,
+    /// Those bytes compared with what the file maps there.
+    pub stats: DiffStats,
+}
+
 /// Executable image memory whose backing file can't be read back.
 #[derive(Debug, Clone)]
 pub struct Unavailable {
@@ -197,6 +212,7 @@ pub struct Report {
     pub skipped: BTreeMap<&'static str, usize>,
     pub changes: Vec<Change>,
     pub headers: Vec<HeaderMismatch>,
+    pub exec_outside: Vec<ExecOutside>,
     pub unavailable: Vec<Unavailable>,
     pub stopped: Option<String>,
 }
@@ -348,6 +364,13 @@ impl Report {
                 ),
             ));
         }
+        let mut by_image: BTreeMap<&str, Vec<&ExecOutside>> = BTreeMap::new();
+        for e in &self.exec_outside {
+            by_image.entry(e.path.as_str()).or_default().push(e);
+        }
+        for group in by_image.values() {
+            out.push(exec_outside_hit(group));
+        }
         for u in &self.unavailable {
             out.push(hit(
                 "memory.image_file_unavailable",
@@ -383,6 +406,7 @@ impl Report {
             "rewritten": count(Verdict::Rewritten),
             "patched": count(Verdict::Patched),
             "header_mismatch": self.headers.len(),
+            "exec_outside_code": self.exec_outside.len(),
             "unavailable": self.unavailable.len(),
             "skipped": self.skipped,
             "stopped": self.stopped,
@@ -446,6 +470,60 @@ fn tamper_hit(c: &Change) -> Option<Hit> {
         ));
     }
     None
+}
+
+fn size_label(n: usize) -> String {
+    if n >= 1024 && n.is_multiple_of(1024) {
+        format!("{} KiB", n / 1024)
+    } else {
+        format!("{n} bytes")
+    }
+}
+
+/// One hit per image with executable memory outside its code sections.
+fn exec_outside_hit(group: &[&ExecOutside]) -> Hit {
+    let written = group
+        .iter()
+        .any(|e| e.stats.verdict() == Verdict::Rewritten);
+    let mut parts: Vec<String> = group
+        .iter()
+        .take(4)
+        .map(|e| {
+            let bytes = if e.stats.differing > 0 {
+                format!("{} byte(s) differ from the file", e.stats.differing)
+            } else {
+                "same bytes as the file".to_string()
+            };
+            format!(
+                "{} at 0x{:x} ({}, {}; {bytes})",
+                e.what,
+                e.start,
+                size_label(e.len),
+                e.protect
+            )
+        })
+        .collect();
+    if group.len() > 4 {
+        parts.push(format!("and {} more", group.len() - 4));
+    }
+    let first = group[0];
+    hit(
+        "memory.image_exec_outside_code",
+        if written { "critical" } else { "suspect" },
+        "T1055",
+        if written { 85 } else { 65 },
+        first.start + first.stats.site_offsets.first().copied().unwrap_or(0),
+        format!(
+            "executable memory in {} outside the sections its file marks as code: {}. {}",
+            first.path,
+            parts.join("; "),
+            if written {
+                "Code was written there and made executable: module stomping that places its payload past the code sections looks like this"
+            } else {
+                "Pages that should hold data, headers or nothing were made executable: module stomping prepares memory like this"
+            }
+        ),
+    )
 }
 
 /// One hit for all of a process's short patches, grouped by module.
@@ -722,6 +800,56 @@ mod tests {
             "{}",
             h.context
         );
+    }
+
+    #[test]
+    fn exec_outside_code_is_suspect_and_critical_when_written() {
+        let e = |what: &str, start: usize, differing: u64| ExecOutside {
+            path: r"C:\Windows\System32\netshell.dll".into(),
+            start,
+            len: 0x1000,
+            what: what.into(),
+            protect: "RWX".into(),
+            stats: DiffStats {
+                compared: 0x1000,
+                differing,
+                sites: usize::from(differing > 0),
+                largest: differing as usize,
+                largest_at: 0x10,
+                site_offsets: if differing > 0 { vec![0x10] } else { vec![] },
+            },
+        };
+        let mut r = Report {
+            supported: true,
+            ..Default::default()
+        };
+        // Only the protection changed.
+        r.exec_outside
+            .push(e("section .rdata", 0x7ff8_0000_5000, 0));
+        let h = &r.hits()[0];
+        assert_eq!(
+            (h.rule.as_str(), h.severity.as_str(), h.offset),
+            (
+                "memory.image_exec_outside_code",
+                "suspect",
+                0x7ff8_0000_5000
+            )
+        );
+        assert!(
+            h.context
+                .contains("section .rdata at 0x7ff800005000 (4 KiB, RWX; same bytes as the file)"),
+            "{}",
+            h.context
+        );
+        // A payload written into another section of the same image: one
+        // finding for the image, now critical.
+        r.exec_outside
+            .push(e("section .data", 0x7ff8_0000_9000, 600));
+        let hs = r.hits();
+        assert_eq!(hs.len(), 1);
+        assert_eq!(hs[0].severity, "critical");
+        assert!(hs[0].context.contains("600 byte(s) differ from the file"));
+        assert_eq!(r.meta()["exec_outside_code"], 2);
     }
 
     #[test]

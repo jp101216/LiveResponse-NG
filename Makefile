@@ -51,7 +51,7 @@ LXARM := $(DIST)/linux-arm64
 .PHONY: help all build sidecar windows windows-x86 windows-arm64 \
         linux linux-arm64 \
         sidecar-windows sidecar-windows-x86 sidecar-linux sidecar-linux-arm64 \
-        release release-windows release-linux checksums \
+        release release-windows release-linux viewer-dist checksums \
         intelgen intel-data \
         test test-race wine-test vet check-windows-rs fmt-check lint audit check clean
 
@@ -146,13 +146,16 @@ WINDOWS_RELEASE := windows windows-x86 windows-arm64 sidecar-windows sidecar-win
 LINUX_RELEASE   := linux linux-arm64 sidecar-linux sidecar-linux-arm64
 
 release: $(WINDOWS_RELEASE) $(LINUX_RELEASE) ## Every Windows + Linux build + dist/SHA256SUMS
-	$(MAKE) checksums   # sequenced after the builds, even under make -j
+	$(MAKE) viewer-dist checksums   # sequenced after the builds, even under make -j
 
 release-windows: $(WINDOWS_RELEASE) ## Windows builds only + dist/SHA256SUMS (needs mingw-w64)
-	$(MAKE) checksums
+	$(MAKE) viewer-dist checksums
 
 release-linux: $(LINUX_RELEASE) ## Linux builds only + dist/SHA256SUMS (needs cargo-zigbuild)
-	$(MAKE) checksums
+	$(MAKE) viewer-dist checksums
+
+viewer-dist: ## Put the report viewer beside the agent in every dist/<os>-<arch>/
+	for d in $(DIST)/*/; do cp viewer/lrng-viewer.html "$$d"; done
 
 checksums: ## Write dist/SHA256SUMS (record these in your case notes)
 	cd $(DIST) && rm -f SHA256SUMS && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS && cat SHA256SUMS

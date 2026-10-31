@@ -2,7 +2,8 @@
 // ingested by a SIEM or piped into jq: one object per run with per-collector
 // results nested inside (format "json"), or one event per line — run,
 // collector, record and finding events sharing a run_id — for line-oriented
-// pipelines (format "jsonl").
+// pipelines (format "jsonl"), or that envelope inside the report viewer, one
+// HTML file to open in a browser or attach to a ticket (format "html").
 package output
 
 import (
@@ -22,6 +23,7 @@ import (
 
 	"github.com/jp101216/liveresponse-ng/internal/collector"
 	"github.com/jp101216/liveresponse-ng/internal/hostinfo"
+	"github.com/jp101216/liveresponse-ng/viewer"
 )
 
 // SchemaVersion lets downstream parsers detect format changes.
@@ -37,6 +39,7 @@ const SchemaVersion = "1.2"
 const (
 	FormatJSON  = "json"
 	FormatJSONL = "jsonl"
+	FormatHTML  = "html"
 )
 
 // maxTopFindings bounds summary.top_findings.
@@ -174,8 +177,13 @@ func Write(w io.Writer, rep Report, format string, pretty bool) error {
 		err = enc.Encode(rep)
 	case FormatJSONL:
 		err = writeJSONL(bw, rep)
+	case FormatHTML:
+		var data []byte
+		if data, err = json.Marshal(rep); err == nil {
+			err = viewer.Render(bw, data)
+		}
 	default:
-		return fmt.Errorf("unknown output format %q (want json or jsonl)", format)
+		return fmt.Errorf("unknown output format %q (want json, jsonl or html)", format)
 	}
 	if err != nil {
 		return err

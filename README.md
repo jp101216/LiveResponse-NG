@@ -8,7 +8,7 @@ handling of hostile input. It builds from any OS; Windows has the full collector
 set, and Linux covers processes, network, modules, accounts, persistence, kernel
 modules, eBPF and the systemd journal behind the same interface.
 
-> **Status:** v0.11. On **Linux**, a default run covers processes, network
+> **Status:** v0.12. On **Linux**, a default run covers processes, network
 > (TCP + UDP, with per-socket process attribution via `/proc`), loaded modules,
 > local accounts, persistence (cron, systemd, ld.so.preload, rc.local, XDG
 > autostart), kernel modules (with a cross-view that exposes a module hidden from
@@ -34,7 +34,9 @@ modules, eBPF and the systemd journal behind the same interface.
 > module A (LLM-callout detection), the Rust sidecar with AI module B
 > (embedded-prompt-artifact scanner), and opt-in live process-memory scanning
 > with YARA, memory-structure heuristics and an image-integrity check that finds
-> code overwritten in memory (module stomping, hollowing, AMSI/ETW patching). See
+> code overwritten in memory (module stomping, hollowing, AMSI/ETW patching).
+> Reports open in a [report viewer](#report-viewer): one offline HTML page, or
+> `-format html` for the report and viewer in one file. See
 > [Roadmap](#roadmap).
 
 ---
@@ -1037,6 +1039,7 @@ Run from an elevated prompt. Keep `lrng-sidecar.exe` in the same folder as
 .\lrng.exe -collectors default,dnscache -out E:\case42\HOST01.json   # + DNS cache & correlation
 .\lrng.exe -no-dns -out E:\case42\HOST01.json     # don't touch the DNS cache
 .\lrng.exe -format jsonl -out E:\case42\HOST01.jsonl   # one event per line, for a SIEM
+.\lrng.exe -timeline -iocs -format html -out E:\case42\HOST01.html   # the report in the viewer, one file
 .\lrng.exe -collectors network -allow myaiapp.exe,tools.exe
 .\lrng.exe -collectors services,autoruns,scheduledtasks    # just persistence
 .\lrng.exe -collectors eventlog -out E:\case42\HOST01-logs.json   # just the event-log triage
@@ -1057,7 +1060,7 @@ lrng -evtx Security.evtx -fail-on critical       # offline triage of one exporte
 |---|---|---|
 | `-collectors` | `default` | comma-separated collectors; `default` is the default set |
 | `-out` | stdout | report path; also writes `<path>.sha256` |
-| `-format` | `json` | `json` (one envelope) or `jsonl` (one event per line) |
+| `-format` | `json` | `json` (one envelope), `jsonl` (one event per line) or `html` (the [report viewer](#report-viewer) with the report inside) |
 | `-force` | off | let `-out` overwrite an existing file |
 | `-quiet` | off | don't print the findings summary to stderr |
 | `-fail-on` | — | exit with status 3 if any finding is at or above this severity |
@@ -1102,8 +1105,53 @@ records (`results[result].records[record]`).
 per record, and a `finding` event per finding — so a SIEM can alert on
 findings without unpacking nested arrays.
 
+**`html`**: the `json` envelope inside the [report viewer](#report-viewer), one
+file to open in any browser or attach to a ticket. The report is the page's
+data, so the `.sha256` beside it covers both.
+
 The shape is in [`docs/architecture.md`](docs/architecture.md);
 `schema_version` (now `1.2`) tracks format changes so a parser can adapt.
+
+---
+
+## Report viewer
+
+The agent stays a command-line tool: it runs on machines with no desktop, over
+a remote shell, and in scripted sweeps. Reading a report happens on the
+analyst's own machine, in `viewer/lrng-viewer.html` (also in every release
+archive): a single offline HTML page with nothing to install. Drop a `.json` or
+`.jsonl` report onto it, or open the `.html` that `-format html` wrote.
+
+- **The run at a glance**: the host, when and how it was collected (elevated
+  or not, interrupted or not, collector errors), the report's SHA-256 to check
+  against the `.sha256` lrng wrote, and a strip of ATT&CK tactics in kill-chain
+  order, each with its number of findings and coloured by the worst of them.
+- **Findings**, most severe first, filterable by severity, collector, tactic
+  and text; each opens to the record behind it.
+- **Process tree**, with the processes that have findings marked, and search
+  that keeps the path down to each match.
+- **Timeline**: the `-timeline` result, or one built from the report's own
+  timestamps, grouped by day, with each entry linked to its record.
+- **Indicators** from `-iocs`, with `-intel` attribution, copyable as a list.
+- **Run and errors**, and every collector's records as a sortable, searchable
+  table.
+
+Reports carry attacker-controlled text: process names, command lines, event
+data. The viewer never parses any of it as markup: every value becomes a text
+node, field names are looked up without a prototype (so `__proto__` is just a
+key), and the only links it makes go to `attack.mitre.org` for technique IDs it
+has validated. The page's content security policy allows exactly its own
+script and stylesheet, by hash, and nothing else, so it can't load or send
+anything; a report you open stays on your machine. Monospace marks verbatim
+evidence from the host; everything else is the viewer's own words.
+
+CI opens a deliberately hostile report (markup, script and URL payloads in
+every field, prototype keys, process cycles, a chain thousands of processes
+deep) embedded, as JSON and as JSONL, plus real reports from Windows and Linux
+runners, walks every view in Chromium, and fails if anything executes, any
+report markup becomes an element, any request leaves the page, or the console
+logs an error (`viewer/browsertest`). A Go test keeps the policy's hashes in
+step with the page (`go test ./viewer -update` after editing it).
 
 ---
 
@@ -1114,6 +1162,8 @@ What's still to come. Everything already shipped is in
 
 - [ ] **zstd decoding for journal fields** above journald's compression
       threshold (they are counted, not read, today).
+- [ ] **Report viewer: compare two reports** of the same host (what appeared
+      and disappeared between runs), and a printable findings summary.
 
 ---
 

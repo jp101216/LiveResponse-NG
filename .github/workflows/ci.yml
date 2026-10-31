@@ -74,11 +74,41 @@ jobs:
           ./lrng.exe -list
           ./lrng.exe -no-dns -out report.json
           ./lrng.exe -no-dns -collectors default,dnscache -format jsonl -out report.jsonl
+          ./lrng.exe -no-dns -timeline -iocs -intel -format html -out report.html
           if (-not (Test-Path report.json.sha256)) { throw "checksum file missing" }
+          if (-not (Select-String -Path report.html -Pattern 'id="lrng-report">{' -SimpleMatch -Quiet)) { throw "report.html has no embedded report" }
       - uses: actions/upload-artifact@v6
         with:
           name: windows-runner-report
-          path: report.json*
+          path: report.*
+
+  viewer:
+    name: Report viewer in Chromium (hostile and real reports)
+    needs: go-windows # its real Windows reports are opened here too
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: windows-runner-report
+          path: windows
+      - name: a Linux report from this runner
+        run: |
+          go build -o lrng ./cmd/lrng
+          ./lrng -no-dns -timeline -iocs -intel -quiet -out linux.json
+          ./lrng -no-dns -timeline -iocs -intel -quiet -format html -out linux.html
+      - name: Playwright and Chromium
+        run: |
+          npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright@1.63.0
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install chromium
+      - name: walk every view; nothing from a report may execute or load
+        env:
+          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+        run: node viewer/browsertest/browser_test.cjs windows/report.json windows/report.jsonl windows/report.html linux.json linux.html
 
   rust-linux:
     name: Rust sidecar (Linux; type-check Windows code)

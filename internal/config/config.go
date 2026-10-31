@@ -20,8 +20,9 @@ type Config struct {
 	Force bool
 	// Pretty indents the JSON for human reading.
 	Pretty bool
-	// Format is the report format: "json" (one envelope) or "jsonl" (one
-	// event per line, for SIEM pipelines).
+	// Format is the report format: "json" (one envelope), "jsonl" (one
+	// event per line, for SIEM pipelines) or "html" (the report viewer with
+	// the envelope inside).
 	Format string
 	// Quiet suppresses the human summary printed to stderr after a run.
 	Quiet bool

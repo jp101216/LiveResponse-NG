@@ -1,0 +1,1345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-0jhU1u6kqE0VmaIKll6Wyu3GCTaXdkeDSSkBKY24+Vs='; style-src 'sha256-Wc4NmCupTVhifFhPynu7lj87HqfxS67UPc0crnq8tvs='; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>lrng report viewer</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --paper: #f2f4f7;
+  --panel: #ffffff;
+  --ink: #17202b;
+  --muted: #5b6676;
+  --faint: #8a94a3;
+  --rule: #d9dee5;
+  --hover: #edf1f6;
+  --accent: #2a53c9;
+  --accent-ink: #ffffff;
+  --focus: #2a53c9;
+  --crit: #b0102a; --crit-bg: #fbe5e8;
+  --susp: #a85000; --susp-bg: #ffeedb;
+  --note: #735b00; --note-bg: #fbf1c4;
+  --info: #4d5b6b; --info-bg: #e9edf2;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", "JetBrains Mono", Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #151d27;
+    --panel: #1b2532;
+    --ink: #e3e8ee;
+    --muted: #9ba7b6;
+    --faint: #6f7b8b;
+    --rule: #2c3846;
+    --hover: #223040;
+    --accent: #8aaaff;
+    --accent-ink: #0f1722;
+    --focus: #8aaaff;
+    --crit: #ff6f7d; --crit-bg: #3b1b22;
+    --susp: #ffad5c; --susp-bg: #3a2816;
+    --note: #e6c84d; --note-bg: #34301b;
+    --info: #a6b2c0; --info-bg: #243040;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font: 14px/1.45 var(--sans);
+  -webkit-text-size-adjust: 100%;
+}
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+[hidden] { display: none !important; }
+.mono, .ev { font-family: var(--mono); font-size: 12.5px; }
+.ev { overflow-wrap: anywhere; }
+.ev.num, .ev.stamp { white-space: nowrap; }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.faint { color: var(--faint); }
+
+/* The case label: what was examined, when, and how far to trust it. */
+.case {
+  background: var(--panel);
+  border-bottom: 1px solid var(--rule);
+  padding: 18px 24px 16px;
+}
+.case-top { display: flex; gap: 16px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+.case h1 { font-size: 26px; line-height: 1.15; margin: 0; font-weight: 650; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.case .os { margin: 4px 0 0; color: var(--muted); }
+.case-fields {
+  display: flex; flex-wrap: wrap;
+  gap: 10px 36px;
+  margin: 16px 0 0;
+}
+.case-fields div { min-width: 0; max-width: 100%; }
+.case-fields dt { color: var(--muted); font-size: 12px; }
+.case-fields dd { margin: 1px 0 0; overflow-wrap: anywhere; }
+.warn-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.warn {
+  border: 1px solid var(--susp); color: var(--susp); background: var(--susp-bg);
+  border-radius: 4px; padding: 3px 9px; font-size: 13px;
+}
+.btn {
+  border: 1px solid var(--rule); background: var(--panel); border-radius: 6px;
+  padding: 6px 12px; cursor: pointer; white-space: nowrap;
+}
+.btn:hover { background: var(--hover); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.08); }
+.link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+a { color: var(--accent); }
+
+/* ATT&CK tactics, in kill-chain order: where the evidence falls. */
+.tactics {
+  display: grid;
+  grid-template-columns: repeat(var(--tactic-count, 12), minmax(86px, 1fr));
+  gap: 1px;
+  background: var(--rule);
+  border-bottom: 1px solid var(--rule);
+  overflow-x: auto;
+}
+.tactic {
+  background: var(--panel);
+  border: 0;
+  border-top: 4px solid transparent;
+  padding: 9px 10px 10px;
+  text-align: left;
+  cursor: pointer;
+  min-height: 74px;
+  display: flex; flex-direction: column; justify-content: space-between; gap: 6px;
+}
+.tactic:hover { background: var(--hover); }
+.tactic .t-name { font-size: 12px; line-height: 1.2; color: var(--muted); }
+.tactic .t-count { font-size: 24px; line-height: 1; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tactic.t-zero .t-count { color: var(--faint); font-weight: 400; }
+.tactic.s-critical { border-top-color: var(--crit); background: var(--crit-bg); }
+.tactic.s-critical .t-count { color: var(--crit); }
+.tactic.s-suspect { border-top-color: var(--susp); background: var(--susp-bg); }
+.tactic.s-suspect .t-count { color: var(--susp); }
+.tactic.s-notable { border-top-color: var(--note); background: var(--note-bg); }
+.tactic.s-notable .t-count { color: var(--note); }
+.tactic.s-info { border-top-color: var(--info); }
+.tactic[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: -2px; }
+
+.layout.with-nav { display: grid; grid-template-columns: 228px minmax(0, 1fr); align-items: start; }
+nav.views {
+  position: sticky; top: 0;
+  max-height: 100vh; overflow-y: auto;
+  padding: 16px 10px 24px;
+  border-right: 1px solid var(--rule);
+  min-height: calc(100vh - 1px);
+}
+nav.views h2 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 18px 10px 6px; }
+.nav-item {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  width: 100%; border: 0; background: none; text-align: left; cursor: pointer;
+  padding: 6px 10px; border-radius: 6px; color: var(--ink);
+}
+.nav-item:hover { background: var(--hover); }
+.nav-item[aria-current="page"] { background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); font-weight: 600; }
+.nav-item .n { color: var(--muted); font-weight: 400; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.nav-item .n.err { color: var(--susp); }
+.nav-item .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+main { padding: 20px 28px 64px; min-width: 0; }
+main h2.view-title { font-size: 20px; margin: 0 0 4px; font-weight: 650; }
+.view-sub { margin: 0 0 16px; color: var(--muted); max-width: 78ch; }
+
+/* Filters */
+.filters { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 0 0 12px; }
+.search {
+  flex: 1 1 260px; max-width: 460px;
+  border: 1px solid var(--rule); background: var(--panel); border-radius: 6px; padding: 6px 10px;
+}
+select.pick { border: 1px solid var(--rule); background: var(--panel); border-radius: 6px; padding: 5px 8px; max-width: 240px; }
+.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+.sev-filter { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.sev-filter button { cursor: pointer; }
+.sev-filter button[aria-pressed="false"] { opacity: 0.45; text-decoration: line-through; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--rule); background: var(--panel); border-radius: 999px; padding: 2px 4px 2px 10px; font-size: 13px;
+}
+.chip button { border: 0; background: none; cursor: pointer; color: var(--muted); padding: 0 6px; font-size: 15px; line-height: 1; }
+.count-line { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+
+/* Severity tags carry the word, not only the colour. */
+.sev {
+  display: inline-block; min-width: 64px; text-align: center;
+  font-size: 12px; font-weight: 600; border-radius: 4px; padding: 1px 6px; border: 1px solid transparent;
+}
+.sev-critical { color: var(--crit); background: var(--crit-bg); border-color: var(--crit); }
+.sev-suspect { color: var(--susp); background: var(--susp-bg); border-color: var(--susp); }
+.sev-notable { color: var(--note); background: var(--note-bg); border-color: var(--note); }
+.sev-info { color: var(--info); background: var(--info-bg); border-color: var(--rule); }
+.sev-unknown { color: var(--muted); border-color: var(--rule); }
+
+/* Findings list: one hairline row per finding, evidence on demand. */
+.findings { list-style: none; margin: 0; padding: 0; background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; }
+.finding { border-top: 1px solid var(--rule); }
+.finding:first-child { border-top: 0; }
+.f-row {
+  display: grid; grid-template-columns: 80px minmax(0, 1fr) auto;
+  gap: 4px 14px; width: 100%; padding: 10px 14px; border: 0; background: none; text-align: left; cursor: pointer; color: inherit;
+}
+.f-row:hover { background: var(--hover); }
+.f-rule { font-weight: 600; overflow-wrap: anywhere; }
+.f-detail { grid-column: 2 / 4; color: var(--ink); overflow-wrap: anywhere; }
+.f-meta { display: flex; gap: 12px; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.f-meta .tech { font-family: var(--mono); }
+.f-row .sev { align-self: start; margin-top: 1px; }
+.finding.flash, .p-row.flash, tr.flash { animation: flash 1.6s ease-out 1; }
+@keyframes flash { from { background: var(--note-bg); } to { background: transparent; } }
+@media (prefers-reduced-motion: reduce) { .finding.flash, .p-row.flash, tr.flash { animation: none; background: var(--note-bg); } }
+
+.evidence { padding: 4px 14px 14px 108px; }
+.evidence h3 { font-size: 13px; color: var(--muted); font-weight: 600; margin: 10px 0 6px; }
+.kv { display: grid; grid-template-columns: minmax(120px, max-content) minmax(0, 1fr); gap: 3px 16px; margin: 0; }
+.kv dt { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.kv dd { margin: 0; min-width: 0; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.more { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; font: 12.5px var(--sans); text-decoration: underline; text-underline-offset: 2px; }
+.pager { margin: 14px 0 0; }
+
+/* Process tree */
+.tree, .tree ul { list-style: none; margin: 0; padding: 0; }
+.tree { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 6px 0; }
+.tree ul { margin-left: 15px; border-left: 1px solid var(--rule); padding-left: 6px; }
+.p-row { display: flex; align-items: baseline; gap: 10px; padding: 3px 10px 3px 6px; border-radius: 4px; min-width: 0; }
+.p-row > :not(.p-cmd) { flex: 0 0 auto; white-space: nowrap; }
+.p-row:hover { background: var(--hover); }
+.twisty {
+  width: 18px; flex: 0 0 18px; border: 0; background: none; cursor: pointer; color: var(--muted); padding: 0; font-size: 11px;
+}
+.twisty:disabled { cursor: default; opacity: 0; }
+.p-name { border: 0; background: none; padding: 0; cursor: pointer; color: var(--ink); font-family: var(--mono); font-size: 12.5px; font-weight: 600; text-align: left; }
+.p-pid { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.p-cmd { color: var(--muted); font-family: var(--mono); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 auto; }
+.p-row.hit .p-name { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+.p-row.hit.s-critical .p-name { text-decoration-color: var(--crit); }
+.p-row.hit.s-suspect .p-name { text-decoration-color: var(--susp); }
+.p-row.hit.s-notable .p-name { text-decoration-color: var(--note); }
+.p-row .sev { min-width: 0; }
+.p-detail { margin: 2px 10px 8px 30px; padding: 8px 12px; border: 1px solid var(--rule); border-radius: 6px; background: var(--paper); }
+.p-detail .kv { margin-top: 2px; }
+.lrng-tag { font: 11.5px var(--mono); color: var(--muted); border: 1px solid var(--rule); border-radius: 4px; padding: 0 5px; }
+
+/* Timeline */
+.day { margin: 18px 0 6px; font-size: 13px; font-weight: 650; position: sticky; top: 0; background: var(--paper); padding: 4px 0; z-index: 1; }
+.events { list-style: none; margin: 0; padding: 0; background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; }
+.event { display: grid; grid-template-columns: 74px 120px minmax(0, 1fr) auto; gap: 12px; padding: 6px 14px; border-top: 1px solid var(--rule); align-items: baseline; }
+.event:first-child { border-top: 0; }
+.event .when { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
+.event .src { font-size: 13px; overflow-wrap: anywhere; }
+.event .what { min-width: 0; }
+.event .art { color: var(--muted); font-size: 12px; margin-right: 8px; }
+
+/* Tables */
+.table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; vertical-align: top; padding: 6px 10px; border-top: 1px solid var(--rule); }
+thead th { border-top: 0; font-size: 12.5px; color: var(--muted); font-weight: 600; white-space: nowrap; background: var(--panel); position: sticky; top: 0; }
+th.sortable { cursor: pointer; }
+th.sortable:hover { color: var(--ink); }
+th[aria-sort="ascending"]::after { content: " \2191"; }
+th[aria-sort="descending"]::after { content: " \2193"; }
+td { max-width: 46ch; }
+td .ev { display: block; max-height: 7.2em; overflow: hidden; }
+tr.detail-row td { max-width: none; background: var(--paper); }
+.row-btn { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; font-size: 12.5px; }
+
+/* Run */
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
+.panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; }
+.panel h3 { margin: 0 0 10px; font-size: 15px; }
+.errors { margin: 6px 0 0; padding-left: 18px; }
+.errors li { margin: 2px 0; overflow-wrap: anywhere; }
+
+/* Intake */
+.intake { max-width: 620px; margin: 9vh auto 0; text-align: left; }
+.intake h1 { font-size: 30px; line-height: 1.15; margin: 0 0 10px; letter-spacing: -0.01em; }
+.intake p { color: var(--muted); margin: 0 0 18px; max-width: 60ch; }
+.intake .fine { font-size: 13px; margin-top: 22px; }
+.intake .error { color: var(--crit); background: var(--crit-bg); border: 1px solid var(--crit); border-radius: 6px; padding: 10px 12px; }
+.dropzone {
+  position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--paper) 86%, transparent);
+  border: 3px dashed var(--accent); font-size: 22px; font-weight: 600; pointer-events: none;
+}
+.empty { background: var(--panel); border: 1px dashed var(--rule); border-radius: 8px; padding: 22px; color: var(--muted); max-width: 70ch; }
+
+@media (max-width: 860px) {
+  .layout.with-nav { grid-template-columns: 1fr; }
+  nav.views {
+    position: static; max-height: none; min-height: 0; border-right: 0; border-bottom: 1px solid var(--rule);
+    display: flex; gap: 4px; overflow-x: auto; padding: 8px 12px;
+  }
+  nav.views h2 { display: none; }
+  .nav-item { width: auto; flex: 0 0 auto; }
+  main { padding: 16px 16px 48px; }
+  .case { padding: 16px; }
+  .evidence { padding-left: 14px; }
+  .f-row { grid-template-columns: 1fr; }
+  .f-row .sev { justify-self: start; }
+  .f-detail { grid-column: auto; }
+  .event { grid-template-columns: 64px minmax(0, 1fr); }
+  .event .src, .event .sevcell { grid-column: 2; }
+  .kv { grid-template-columns: 1fr; }
+}
+@media print {
+  nav.views, .filters, .btn, .pager, .dropzone { display: none !important; }
+  .layout { grid-template-columns: 1fr; }
+  body { background: #fff; }
+}
+</style>
+</head>
+<body>
+<header class="case" id="case" hidden></header>
+<div class="tactics" id="tactics" role="group" aria-label="Findings by ATT&amp;CK tactic" hidden></div>
+<div class="layout" id="layout">
+<nav class="views" id="nav" aria-label="Report views" hidden></nav>
+<main id="main">
+<section class="intake" id="intake">
+<h1>Open a report</h1>
+<p>Drop a report from <span class="ev">lrng</span> (.json or .jsonl) anywhere on this page, or choose one.</p>
+<button class="btn primary" id="choose" type="button">Choose a report</button>
+<p class="error" id="load-error" hidden></p>
+<p class="fine">The report stays on this computer. This page has no network access: its content security policy blocks every connection, and everything in the report is shown as plain text.</p>
+</section>
+</main>
+</div>
+<input type="file" id="file" accept=".json,.jsonl,.ndjson,application/json" hidden>
+<div class="dropzone" id="dropzone" hidden>Drop to open this report</div>
+<script type="application/json" id="lrng-report"></script>
+<script>
+"use strict";
+(() => {
+  // ---- Text-only DOM helpers --------------------------------------------
+  // Every string from a report is attacker-controlled (process names, command
+  // lines, event data). It only ever reaches the page as a Text node or an
+  // attribute value; nothing here parses HTML.
+  const $ = (id) => document.getElementById(id);
+  function h(tag, props, ...kids) {
+    const el = document.createElement(tag);
+    if (props) {
+      for (const [k, v] of Object.entries(props)) {
+        if (v === null || v === undefined || v === false) continue;
+        if (k === "class") el.className = v;
+        else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+        else el.setAttribute(k, v === true ? "" : String(v));
+      }
+    }
+    return add(el, kids);
+  }
+  function add(el, ...kids) {
+    for (const k of kids.flat(Infinity)) {
+      if (k === null || k === undefined || k === false) continue;
+      el.append(k instanceof Node ? k : String(k));
+    }
+    return el;
+  }
+  function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); return el; }
+
+  // ---- Severity, ATT&CK ---------------------------------------------------
+  const RANK = new Map([["critical", 4], ["suspect", 3], ["notable", 2], ["info", 1]]);
+  const SEVS = ["critical", "suspect", "notable", "info"];
+  const rank = (s) => RANK.get(s) || 0;
+  function sevTag(s) {
+    const known = RANK.has(s);
+    return h("span", { class: "sev " + (known ? "sev-" + s : "sev-unknown") }, known ? s : (s ? String(s) : "unrated"));
+  }
+  const TACTICS = [
+    ["ia", "Initial access"], ["ex", "Execution"], ["pe", "Persistence"], ["pr", "Privilege escalation"],
+    ["de", "Defense evasion"], ["ca", "Credential access"], ["di", "Discovery"], ["lm", "Lateral movement"],
+    ["co", "Collection"], ["cc", "Command and control"], ["ef", "Exfiltration"], ["im", "Impact"],
+  ];
+  const TACTIC_NAME = new Map(TACTICS);
+  // Enterprise ATT&CK: technique -> tactics, for the techniques lrng's rules
+  // and common Sigma rules use. A sub-technique takes its parent's tactics.
+  const TECH = new Map(Object.entries({
+    T1003: "ca", T1005: "co", T1007: "di", T1010: "di", T1012: "di", T1014: "de", T1016: "di", T1018: "di",
+    T1020: "ef", T1021: "lm", T1027: "de", T1033: "di", T1036: "de", T1037: "pe pr", T1040: "ca di",
+    T1041: "ef", T1046: "di", T1047: "ex", T1048: "ef", T1049: "di", T1053: "ex pe pr", T1055: "de pr",
+    T1056: "co ca", T1057: "di", T1059: "ex", T1068: "pr", T1069: "di", T1070: "de", T1071: "cc",
+    T1072: "ex lm", T1074: "co", T1078: "de pe pr ia", T1082: "di", T1083: "di", T1087: "di", T1090: "cc",
+    T1091: "lm ia", T1095: "cc", T1098: "pe pr", T1102: "cc", T1105: "cc", T1106: "ex", T1110: "ca",
+    T1112: "de", T1113: "co", T1115: "co", T1119: "co", T1120: "di", T1124: "di", T1127: "de", T1129: "ex",
+    T1133: "pe ia", T1134: "de pr", T1135: "di", T1136: "pe", T1137: "pe", T1140: "de", T1176: "pe",
+    T1185: "co", T1187: "ca", T1189: "ia", T1190: "ia", T1195: "ia", T1197: "de pe", T1199: "ia",
+    T1201: "di", T1202: "de", T1203: "ex", T1204: "ex", T1207: "de", T1210: "lm", T1211: "de", T1212: "ca",
+    T1216: "de", T1217: "di", T1218: "de", T1219: "cc", T1220: "de", T1221: "de", T1222: "de", T1480: "de",
+    T1482: "di", T1484: "de pr", T1485: "im", T1486: "im", T1489: "im", T1490: "im", T1491: "im",
+    T1495: "im", T1496: "im", T1497: "de di", T1498: "im", T1499: "im", T1505: "pe", T1518: "di",
+    T1529: "im", T1531: "im", T1534: "lm", T1539: "ca", T1542: "de pe", T1543: "pe pr", T1546: "pr pe",
+    T1547: "pe pr", T1548: "pr de", T1550: "de lm", T1552: "ca", T1553: "de", T1554: "pe", T1555: "ca",
+    T1556: "ca de pe", T1557: "ca co", T1558: "ca", T1559: "ex", T1560: "co", T1562: "de", T1563: "lm",
+    T1564: "de", T1565: "im", T1566: "ia", T1567: "ef", T1568: "cc", T1569: "ex", T1570: "lm", T1571: "cc",
+    T1572: "cc", T1573: "cc", T1574: "pe pr de", T1578: "de", T1580: "di", T1606: "ca", T1610: "de ex",
+    T1611: "pr", T1612: "de", T1613: "di", T1614: "di", T1615: "di", T1619: "di", T1620: "de", T1621: "ca",
+    T1622: "de di", T1647: "de", T1649: "ca", T1652: "di", T1654: "di", T1656: "de", T1657: "im",
+  }));
+  const TECH_RE = /^T\d{4}(\.\d{3})?$/;
+  function tacticsOf(technique) {
+    if (typeof technique !== "string" || !TECH_RE.test(technique)) return [];
+    const t = TECH.get(technique.slice(0, 5));
+    return t ? t.split(" ") : [];
+  }
+  // A link out only ever goes to attack.mitre.org, for an ID that matched.
+  function techLink(technique) {
+    if (typeof technique !== "string" || !technique) return null;
+    if (!TECH_RE.test(technique)) return h("span", { class: "tech" }, technique);
+    const path = technique.replace(".", "/");
+    return h("a", {
+      class: "tech", href: "https://attack.mitre.org/techniques/" + path + "/",
+      target: "_blank", rel: "noopener noreferrer", title: "Open " + technique + " on attack.mitre.org",
+    }, technique);
+  }
+
+  // ---- Formatting ----------------------------------------------------------
+  const nf = new Intl.NumberFormat("en-US");
+  const fmtNum = (n) => nf.format(n);
+  const TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+  // Go writes RFC 3339 with nanoseconds; Date only takes milliseconds.
+  function parseTime(s) {
+    if (typeof s !== "string" || !TIME_RE.test(s)) return NaN;
+    return Date.parse(s.replace(/(\.\d{3})\d+/, "$1"));
+  }
+  const pad = (n, w = 2) => String(n).padStart(w, "0");
+  function fmtTime(s) {
+    const t = parseTime(s);
+    if (Number.isNaN(t)) return s ? String(s) : "";
+    const d = new Date(t);
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} UTC`;
+  }
+  function fmtDuration(ns) {
+    if (typeof ns !== "number" || !Number.isFinite(ns) || ns < 0) return "";
+    const ms = ns / 1e6;
+    if (ms < 1000) return `${Math.round(ms)} ms`;
+    const s = ms / 1000;
+    if (s < 120) return `${s.toFixed(s < 10 ? 2 : 1)} s`;
+    return `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
+  }
+  function fmtBytes(n) {
+    if (typeof n !== "number" || !Number.isFinite(n)) return "";
+    const u = ["bytes", "KiB", "MiB", "GiB"];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return `${i ? n.toFixed(1) : n} ${u[i]}`;
+  }
+  function stringify(v, space) {
+    let s;
+    try { s = JSON.stringify(v, null, space); } catch { s = undefined; }
+    return typeof s === "string" ? s : String(v);
+  }
+  // A long string shown in part, with the rest a click away.
+  function longText(s, max, cls) {
+    if (s.length <= max) return h("span", { class: cls }, s);
+    const span = h("span", { class: cls }, s.slice(0, max) + "…");
+    const btn = h("button", { class: "more", type: "button" }, `show all ${fmtNum(s.length)} characters`);
+    btn.addEventListener("click", (e) => { e.stopPropagation(); span.textContent = s; btn.remove(); });
+    return h("span", null, span, " ", btn);
+  }
+  // A field value as evidence: verbatim, in the evidence face.
+  function valueNode(v, max = 600) {
+    if (v === null || v === undefined) return h("span", { class: "faint" }, "none");
+    if (typeof v === "string") {
+      if (v === "") return h("span", { class: "faint" }, "empty");
+      return longText(v, max, TIME_RE.test(v) ? "ev stamp" : "ev");
+    }
+    if (typeof v === "number" || typeof v === "boolean") return h("span", { class: "ev num" }, String(v));
+    if (Array.isArray(v) && v.every((x) => typeof x === "string" || typeof x === "number")) {
+      return longText(v.join(", "), max, "ev");
+    }
+    return longText(stringify(v), max, "ev");
+  }
+  function plain(v) {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string") return v;
+    if (typeof v === "number" || typeof v === "boolean") return String(v);
+    return stringify(v);
+  }
+  const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const entries = (o) => (isObj(o) ? Object.entries(o) : []);
+
+  // ---- Loading -------------------------------------------------------------
+  function parseReport(text) {
+    let rep = null;
+    let skipped = 0;
+    try {
+      rep = JSON.parse(text);
+    } catch (whole) {
+      // JSONL: a run event, then collector, record and finding events.
+      const lines = text.split(/\r?\n/);
+      const results = [];
+      const byName = new Map();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch { skipped++; continue; }
+        if (!isObj(ev)) { skipped++; continue; }
+        if (ev.type === "run") {
+          rep = Object.assign({}, ev);
+          delete rep.type;
+          rep.results = results;
+        } else if (ev.type === "collector" && typeof ev.collector === "string") {
+          const r = { collector: ev.collector, started_at: ev.started_at, duration_ns: ev.duration_ns, records: [], meta: ev.meta, errors: ev.errors };
+          results.push(r);
+          byName.set(ev.collector, r);
+        } else if (ev.type === "record") {
+          const r = byName.get(ev.collector);
+          if (!r) { skipped++; continue; }
+          const rec = { fields: ev.fields, findings: ev.findings };
+          if (Number.isInteger(ev.record) && ev.record >= 0 && ev.record < 1e7) r.records[ev.record] = rec;
+          else r.records.push(rec);
+        }
+      }
+      if (!rep) {
+        throw new Error(lines.length > 1
+          ? "it's neither a JSON report nor JSONL with a run event"
+          : "it isn't JSON (" + whole.message + ")");
+      }
+      for (const r of results) r.records = Array.from(r.records, (x) => x || { fields: {} });
+    }
+    if (!isObj(rep)) throw new Error("its top level isn't an object");
+    if (!Array.isArray(rep.results)) throw new Error("it has no results list");
+    return { rep, skipped };
+  }
+
+  // ---- The model -----------------------------------------------------------
+  let model = null;
+  function buildModel(rep, source) {
+    const results = rep.results.filter(isObj).map((r) => ({
+      name: typeof r.collector === "string" ? r.collector : "(unnamed)",
+      started: r.started_at,
+      duration: r.duration_ns,
+      // Fields go into prototype-less objects: a report's keys are looked up
+      // by name ("constructor", "__proto__" ...), never through a prototype.
+      records: Array.isArray(r.records) ? r.records.map((x) => ({
+        fields: Object.assign(Object.create(null), isObj(x && x.fields) ? x.fields : null),
+        findings: Array.isArray(x && x.findings) ? x.findings.filter(isObj) : [],
+      })) : [],
+      meta: isObj(r.meta) ? r.meta : null,
+      errors: Array.isArray(r.errors) ? r.errors.map(plain) : [],
+    }));
+    const byName = new Map();
+    for (const r of results) if (!byName.has(r.name)) byName.set(r.name, r);
+
+    const findings = [];
+    results.forEach((r, ri) => r.records.forEach((rec, i) => rec.findings.forEach((f) => {
+      findings.push({
+        sev: typeof f.severity === "string" ? f.severity : "",
+        rule: plain(f.rule),
+        technique: typeof f.technique === "string" ? f.technique : "",
+        confidence: Number.isFinite(f.confidence) ? f.confidence : null,
+        detail: plain(f.detail),
+        collector: r.name, ri, i,
+      });
+    })));
+    findings.sort((a, b) => rank(b.sev) - rank(a.sev) || (b.confidence ?? -1) - (a.confidence ?? -1));
+
+    const bySev = new Map(SEVS.map((s) => [s, 0]));
+    for (const f of findings) if (bySev.has(f.sev)) bySev.set(f.sev, bySev.get(f.sev) + 1);
+
+    const tactics = new Map(TACTICS.map(([k]) => [k, { n: 0, worst: 0 }]));
+    let unmapped = { n: 0, worst: 0 };
+    for (const f of findings) {
+      const ts = tacticsOf(f.technique);
+      if (!ts.length) { unmapped.n++; unmapped.worst = Math.max(unmapped.worst, rank(f.sev)); }
+      for (const t of ts) { const e = tactics.get(t); e.n++; e.worst = Math.max(e.worst, rank(f.sev)); }
+    }
+    return { rep, source, results, byName, findings, bySev, tactics, unmapped, tree: null, timeline: null };
+  }
+  const worstOf = (rec) => rec.findings.reduce((m, f) => Math.max(m, rank(f.severity)), 0);
+  const sevName = (r) => ["", "info", "notable", "suspect", "critical"][r] || "";
+
+  // ---- Shell: header, tactics, navigation ------------------------------------
+  function renderCase() {
+    const rep = model.rep;
+    const hi = isObj(rep.host_info) ? rep.host_info : {};
+    const run = isObj(rep.run) ? rep.run : {};
+    const osLine = [hi.os_name, hi.os_version, hi.os_build && `(build ${hi.os_build})`].filter(Boolean).map(plain).join(" ")
+      || [rep.os, rep.arch].filter(Boolean).map(plain).join(" ");
+    const where = [hi.join_type === "domain" && hi.domain ? `domain ${plain(hi.domain)}` : "", hi.fqdn ? plain(hi.fqdn) : ""].filter(Boolean).join(", ");
+    const elevated = run.elevated === true ? "yes" : run.elevated === false ? "no" : "unknown";
+    const started = parseTime(run.started_at), finished = parseTime(run.finished_at);
+    const took = Number.isFinite(started) && Number.isFinite(finished) && finished >= started ? fmtDuration((finished - started) * 1e6) : "";
+    const field = (label, ...v) => h("div", null, h("dt", null, label), h("dd", null, ...v));
+    const src = model.source;
+    const reportField = src.embedded
+      ? field("Report", "embedded in this page")
+      : field("Report", h("span", { class: "ev" }, src.name), src.size ? ` (${fmtBytes(src.size)})` : "");
+    const hash = src.sha256
+      ? field("Report SHA-256", h("span", { class: "ev", title: "Compare with the .sha256 file lrng wrote beside the report" }, src.sha256))
+      : null;
+    const warns = [];
+    if (run.elevated === false) warns.push("Not elevated: some artifacts were unreadable");
+    if (run.interrupted) warns.push("Run interrupted: results are partial");
+    const errs = model.results.reduce((n, r) => n + r.errors.length, 0);
+    if (errs) warns.push(`${fmtNum(errs)} collector error${errs === 1 ? "" : "s"}: coverage has gaps`);
+    if (src.skipped) warns.push(`${fmtNum(src.skipped)} unreadable line${src.skipped === 1 ? "" : "s"} skipped`);
+    const open = h("button", { class: "btn", type: "button", onclick: () => $("file").click() }, "Open another report");
+    add(clear($("case")),
+      h("div", { class: "case-top" },
+        h("div", null, h("h1", null, plain(rep.host) || "Unnamed host"),
+          h("p", { class: "os" }, [osLine, where].filter(Boolean).join(", "))),
+        open),
+      h("dl", { class: "case-fields" },
+        field("Collected", plain(fmtTime(rep.collected_at))),
+        field("Run", h("span", { class: "ev" }, plain(rep.run_id))),
+        field("Agent", h("span", { class: "ev" }, `lrng ${plain(rep.tool_version)}`), rep.tool_commit ? h("span", { class: "faint" }, ` (${plain(rep.tool_commit).slice(0, 12)})`) : ""),
+        field("Elevated", elevated),
+        took ? field("Run time", took) : null,
+        reportField, hash),
+      warns.length ? h("div", { class: "warn-row" }, warns.map((w) => h("span", { class: "warn" }, w))) : null);
+    $("case").hidden = false;
+  }
+
+  function renderTactics() {
+    const strip = clear($("tactics"));
+    const cells = TACTICS.map(([k, name]) => [k, name, model.tactics.get(k)]);
+    if (model.unmapped.n) cells.push(["none", "No tactic", model.unmapped]);
+    strip.style.setProperty("--tactic-count", String(cells.length));
+    for (const [k, name, e] of cells) {
+      const worst = sevName(e.worst);
+      const b = h("button", {
+        class: "tactic" + (e.n ? " s-" + worst : " t-zero"), type: "button",
+        "aria-pressed": state.findings.tactic === k ? "true" : "false",
+        title: e.n ? `${fmtNum(e.n)} finding${e.n === 1 ? "" : "s"}, worst ${worst}` + (k === "none" ? " (no ATT&CK technique, or one this viewer can't place)" : "") : "No findings",
+        onclick: () => {
+          state.findings.tactic = state.findings.tactic === k ? "" : k;
+          state.findings.shown = PAGE;
+          go("findings");
+          renderTactics();
+        },
+      }, h("span", { class: "t-name" }, name), h("span", { class: "t-count" }, e.n ? fmtNum(e.n) : "0"));
+      strip.append(b);
+    }
+    strip.hidden = false;
+  }
+
+  const VIEWS = [
+    ["findings", "Findings", () => model.findings.length],
+    ["processes", "Process tree", () => (model.byName.get("processes") || { records: [] }).records.length],
+    ["timeline", "Timeline", () => timeline().events.length],
+    ["indicators", "Indicators", () => (model.byName.get("iocs") || { records: [] }).records.length],
+    ["run", "Run and errors", () => model.results.reduce((n, r) => n + r.errors.length, 0)],
+  ];
+  function renderNav() {
+    const nav = clear($("nav"));
+    const cur = route();
+    for (const [id, label, count] of VIEWS) {
+      const n = count();
+      nav.append(h("button", {
+        class: "nav-item", type: "button", "aria-current": cur.view === id ? "page" : null,
+        onclick: () => go(id),
+      }, h("span", { class: "label" }, label), h("span", { class: "n" + (id === "run" && n ? " err" : "") }, fmtNum(n))));
+    }
+    nav.append(h("h2", null, "Collector data"));
+    for (const r of model.results) {
+      nav.append(h("button", {
+        class: "nav-item", type: "button", title: r.name,
+        "aria-current": cur.view === "collector" && cur.arg === r.name ? "page" : null,
+        onclick: () => go("collector", r.name),
+      }, h("span", { class: "label" }, r.name), h("span", { class: "n" + (r.errors.length ? " err" : "") }, fmtNum(r.records.length))));
+    }
+    nav.hidden = false;
+    $("layout").classList.add("with-nav");
+  }
+
+  // ---- Routing ---------------------------------------------------------------
+  // The hash names a view, and for collector data a collector; anything it
+  // names is looked up, never inserted.
+  function route() {
+    const raw = location.hash.slice(1);
+    const [view, ...rest] = raw.split("/");
+    let arg = "";
+    try { arg = decodeURIComponent(rest.join("/")); } catch { arg = ""; }
+    if (view === "collector" && model && model.byName.has(arg)) return { view, arg };
+    if (VIEWS.some(([id]) => id === view)) return { view, arg: "" };
+    return { view: model && model.findings.length ? "findings" : "run", arg: "" };
+  }
+  function go(view, arg) {
+    const hash = "#" + view + (arg ? "/" + encodeURIComponent(arg) : "");
+    if (location.hash === hash) render(); else location.hash = hash;
+  }
+  window.addEventListener("hashchange", () => { if (model) render(); });
+
+  const PAGE = 200;
+  const state = {
+    findings: { sevs: new Set(SEVS.concat([""])), collector: "", tactic: "", q: "", shown: PAGE, open: new Set() },
+    processes: { q: "", onlyHits: false, open: null, detail: new Set() },
+    timeline: { q: "", source: "", onlyHits: false, newest: false, shown: 500 },
+    indicators: { q: "", type: "" },
+    tables: new Map(),
+  };
+  let pendingFocus = null; // { kind, key } to scroll to after the next render
+
+  let lastRoute = "";
+  function render() {
+    const { view, arg } = route();
+    const key = view + "/" + arg;
+    const changed = key !== lastRoute;
+    lastRoute = key;
+    const y = window.scrollY;
+    renderNav();
+    const main = clear($("main"));
+    const v = { findings: viewFindings, processes: viewProcesses, timeline: viewTimeline, indicators: viewIndicators, run: viewRun, collector: viewCollector }[view];
+    main.append(v(arg));
+    if (pendingFocus) {
+      const el = pendingFocus.el;
+      pendingFocus = null;
+      if (el && el.isConnected) {
+        el.scrollIntoView({ block: "center" });
+        el.classList.add("flash");
+      }
+    } else {
+      window.scrollTo(0, changed ? Math.min(y, $("layout").offsetTop) : y);
+    }
+  }
+
+  function searchBox(value, placeholder, onInput) {
+    const inp = h("input", { class: "search", type: "search", placeholder, value, "aria-label": placeholder });
+    let t = 0;
+    inp.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => onInput(inp.value), 140); });
+    return inp;
+  }
+  function rerenderKeepingFocus() {
+    const active = document.activeElement;
+    const wasSearch = active && active.classList && active.classList.contains("search");
+    const pos = wasSearch ? active.selectionStart : 0;
+    render();
+    if (wasSearch) {
+      const s = document.querySelector("main .search");
+      if (s) { s.focus(); try { s.setSelectionRange(pos, pos); } catch { /* not a text input */ } }
+    }
+  }
+
+  // ---- Findings ----------------------------------------------------------------
+  function recordOf(f) { return model.results[f.ri].records[f.i]; }
+  function findingMatches(f, q) {
+    if (!q) return true;
+    if ((f.rule + "\n" + f.detail + "\n" + f.technique + "\n" + f.collector).toLowerCase().includes(q)) return true;
+    for (const [, v] of entries(recordOf(f).fields)) if (plain(v).toLowerCase().includes(q)) return true;
+    return false;
+  }
+  function viewFindings() {
+    const st = state.findings;
+    const q = st.q.trim().toLowerCase();
+    const list = model.findings.filter((f) =>
+      st.sevs.has(RANK.has(f.sev) ? f.sev : "") &&
+      (!st.collector || f.collector === st.collector) &&
+      (!st.tactic || (st.tactic === "none" ? tacticsOf(f.technique).length === 0 : tacticsOf(f.technique).includes(st.tactic))) &&
+      findingMatches(f, q));
+    const wrap = h("section", null, h("h2", { class: "view-title" }, "Findings"),
+      h("p", { class: "view-sub" }, "What the rules flagged, most severe first. Open a finding for the record behind it."));
+    if (!model.findings.length) {
+      wrap.append(h("p", { class: "empty" }, "No findings in this report. Nothing lrng checks for was seen; the collector data still shows everything that was collected."));
+      return wrap;
+    }
+    const sevButtons = SEVS.map((s) => h("button", {
+      class: "sev sev-" + s, type: "button", "aria-pressed": st.sevs.has(s) ? "true" : "false",
+      title: `${st.sevs.has(s) ? "Hide" : "Show"} ${s} findings`,
+      onclick: () => { st.sevs.has(s) ? st.sevs.delete(s) : st.sevs.add(s); st.shown = PAGE; render(); },
+    }, `${s} ${fmtNum(model.bySev.get(s))}`));
+    const collectors = [...new Set(model.findings.map((f) => f.collector))];
+    const pick = h("select", { class: "pick", "aria-label": "Collector", onchange: (e) => { st.collector = e.target.value; st.shown = PAGE; render(); } },
+      h("option", { value: "" }, "All collectors"),
+      collectors.map((c) => { const o = h("option", { value: c }, c); if (c === st.collector) o.selected = true; return o; }));
+    const filters = h("div", { class: "filters" },
+      searchBox(st.q, "Search rules, details and evidence", (v) => { st.q = v; st.shown = PAGE; rerenderKeepingFocus(); }),
+      h("span", { class: "sev-filter", role: "group", "aria-label": "Severities" }, sevButtons), pick,
+      st.tactic ? h("span", { class: "chip" }, `Tactic: ${st.tactic === "none" ? "no tactic" : TACTIC_NAME.get(st.tactic)}`,
+        h("button", { type: "button", "aria-label": "Clear tactic filter", onclick: () => { st.tactic = ""; renderTactics(); render(); } }, "×")) : null);
+    wrap.append(filters, h("p", { class: "count-line" }, `${fmtNum(list.length)} of ${fmtNum(model.findings.length)} findings`));
+    if (!list.length) { wrap.append(h("p", { class: "empty" }, "No findings match these filters.")); return wrap; }
+    const ul = h("ul", { class: "findings" });
+    for (const f of list.slice(0, st.shown)) ul.append(findingItem(f));
+    wrap.append(ul);
+    if (list.length > st.shown) {
+      wrap.append(h("p", { class: "pager" }, h("button", { class: "btn", type: "button", onclick: () => { st.shown += PAGE; render(); } },
+        `Show ${fmtNum(Math.min(PAGE, list.length - st.shown))} more`)));
+    }
+    return wrap;
+  }
+  const findingKey = (f) => f.ri + ":" + f.i + ":" + f.rule;
+  function findingItem(f) {
+    const st = state.findings;
+    const key = findingKey(f);
+    const li = h("li", { class: "finding" });
+    const open = st.open.has(key);
+    const row = h("button", { class: "f-row", type: "button", "aria-expanded": open ? "true" : "false" },
+      sevTag(f.sev),
+      h("span", { class: "f-rule" }, f.rule || "(no rule id)"),
+      h("span", { class: "f-meta" },
+        f.technique ? h("span", { class: "tech" }, f.technique) : null,
+        f.confidence !== null ? h("span", { class: "num", title: "Confidence" }, f.confidence + "%") : null,
+        h("span", null, f.collector)),
+      h("span", { class: "f-detail" }, f.detail));
+    row.addEventListener("click", () => {
+      if (st.open.has(key)) st.open.delete(key); else st.open.add(key);
+      const fresh = findingItem(f);
+      li.replaceWith(fresh);
+    });
+    li.append(row);
+    if (open) li.append(evidence(f));
+    return li;
+  }
+  function evidence(f) {
+    const rec = recordOf(f);
+    const box = h("div", { class: "evidence" });
+    const tl = techLink(f.technique);
+    if (tl) box.append(h("p", { class: "muted" }, "ATT&CK ", tl,
+      tacticsOf(f.technique).length ? ` (${tacticsOf(f.technique).map((t) => TACTIC_NAME.get(t)).join(", ")})` : ""));
+    box.append(h("h3", null, `Record ${f.i + 1} of ${f.collector}`), kvList(rec.fields));
+    const others = rec.findings.filter((x) => !(plain(x.rule) === f.rule && plain(x.detail) === f.detail));
+    if (others.length) {
+      box.append(h("h3", null, "Other findings on this record"),
+        h("ul", { class: "errors" }, others.map((x) => h("li", null, sevTag(x.severity), " ", plain(x.rule), ": ", plain(x.detail)))));
+    }
+    const actions = h("div", { class: "actions" });
+    if (f.collector === "processes" && rec.fields.pid !== undefined) {
+      actions.append(h("button", { class: "btn", type: "button", onclick: () => showProcess(rec.fields.pid) }, "Show in the process tree"));
+    }
+    actions.append(h("button", { class: "btn", type: "button", onclick: () => showRecord(f.ri, f.i) }, `Show in ${f.collector} data`));
+    box.append(actions);
+    return box;
+  }
+  function kvList(fields) {
+    const dl = h("dl", { class: "kv" });
+    const list = entries(fields);
+    if (!list.length) return h("p", { class: "faint" }, "No fields.");
+    for (const [k, v] of list) dl.append(h("dt", null, k), h("dd", null, valueNode(v)));
+    return dl;
+  }
+
+  // ---- Process tree --------------------------------------------------------------
+  function procTree() {
+    if (model.tree) return model.tree;
+    const r = model.byName.get("processes");
+    const nodes = [];
+    const byPid = new Map();
+    if (r) r.records.forEach((rec, i) => {
+      const pid = rec.fields.pid;
+      if (typeof pid !== "number" && typeof pid !== "string") return;
+      const key = String(pid);
+      if (byPid.has(key)) return;
+      const n = { rec, i, pid: key, kids: [], parent: null, worst: worstOf(rec), subWorst: 0, depth: 0 };
+      byPid.set(key, n);
+      nodes.push(n);
+    });
+    const roots = [];
+    for (const n of nodes) {
+      const pp = n.rec.fields.ppid;
+      const parent = (typeof pp === "number" || typeof pp === "string") && !n.rec.fields.parent_pid_reused ? byPid.get(String(pp)) : null;
+      if (parent && parent !== n) { n.parent = parent; parent.kids.push(n); } else roots.push(n);
+    }
+    // A cycle in hostile data leaves nodes unreachable from any root: break it.
+    const seen = new Set();
+    const order = [];
+    const walk = (n, depth) => {
+      const stack = [[n, depth]];
+      while (stack.length) {
+        const [x, d] = stack.pop();
+        if (seen.has(x)) continue;
+        seen.add(x); x.depth = d; order.push(x);
+        for (const k of x.kids) stack.push([k, d + 1]);
+      }
+    };
+    const byNum = (a, b) => (Number(a.pid) - Number(b.pid)) || (a.pid < b.pid ? -1 : a.pid > b.pid ? 1 : 0);
+    roots.sort(byNum);
+    for (const n of roots) walk(n, 0);
+    for (const n of nodes) if (!seen.has(n)) { if (n.parent) n.parent.kids = n.parent.kids.filter((k) => k !== n); n.parent = null; roots.push(n); walk(n, 0); }
+    for (const n of nodes) n.kids.sort(byNum);
+    for (let j = order.length - 1; j >= 0; j--) {
+      const n = order[j];
+      n.subWorst = n.worst;
+      for (const k of n.kids) if (k.subWorst > n.subWorst) n.subWorst = k.subWorst;
+    }
+    model.tree = { roots, byPid, count: nodes.length };
+    return model.tree;
+  }
+  function procMatches(n, q) {
+    if (!q) return true;
+    const f = n.rec.fields;
+    return [f.pid, f.name, f.image_path, f.command_line, f.user].some((v) => plain(v).toLowerCase().includes(q));
+  }
+  const procNodes = new Map();
+  function viewProcesses() {
+    const st = state.processes;
+    const wrap = h("section", null, h("h2", { class: "view-title" }, "Process tree"),
+      h("p", { class: "view-sub" }, "Every process at collection time, under its parent. Underlined names have findings; open one for its details."));
+    const t = procTree();
+    if (!t.count) {
+      wrap.append(h("p", { class: "empty" }, "This report has no process list. The processes collector is in the default set; offline event-log reports don't have one."));
+      return wrap;
+    }
+    if (!st.open) {
+      // Open what leads to findings, and the top two levels.
+      st.open = new Set();
+      for (const n of t.byPid.values()) if (n.subWorst > 0 || n.depth < 1) st.open.add(n.pid);
+    }
+    const q = st.q.trim().toLowerCase();
+    // With a search or "with findings" on, show matches and the path to them.
+    let keep = null;
+    if (q || st.onlyHits) {
+      keep = new Set();
+      for (const n of t.byPid.values()) {
+        if ((q ? procMatches(n, q) : true) && (!st.onlyHits || n.worst > 0)) {
+          for (let x = n; x && !keep.has(x.pid); x = x.parent) keep.add(x.pid);
+        }
+      }
+    }
+    wrap.append(h("div", { class: "filters" },
+      searchBox(st.q, "Search names, PIDs, paths and command lines", (v) => { st.q = v; rerenderKeepingFocus(); }),
+      h("label", { class: "toggle" }, h("input", { type: "checkbox", checked: st.onlyHits || null, onchange: (e) => { st.onlyHits = e.target.checked; render(); } }), "Only with findings"),
+      h("button", { class: "btn", type: "button", onclick: () => { st.open = new Set(t.byPid.keys()); render(); } }, "Expand all"),
+      h("button", { class: "btn", type: "button", onclick: () => { st.open = new Set(); render(); } }, "Collapse all")));
+    const tree = h("ul", { class: "tree", role: "tree", "aria-label": "Processes" });
+    let shown = 0;
+    const MAX_DEPTH = 200; // a hostile report could nest processes without end
+    const build = (n, into, depth) => {
+      if (keep && !keep.has(n.pid)) return;
+      shown++;
+      const f = n.rec.fields;
+      const open = keep ? true : st.open.has(n.pid);
+      const kids = n.kids.filter((k) => !keep || keep.has(k.pid));
+      const li = h("li", { role: "treeitem", "aria-expanded": kids.length ? String(open) : null });
+      const twisty = h("button", {
+        class: "twisty", type: "button", disabled: kids.length ? null : true,
+        "aria-label": kids.length ? (open ? "Collapse" : "Expand") + " " + plain(f.name) : null,
+        onclick: () => { st.open.has(n.pid) ? st.open.delete(n.pid) : st.open.add(n.pid); render(); },
+      }, kids.length ? (open ? "▾" : "▸") : "");
+      const worst = sevName(n.worst);
+      const row = h("div", { class: "p-row" + (n.worst ? " hit s-" + worst : "") },
+        twisty,
+        h("button", { class: "p-name", type: "button", "aria-expanded": st.detail.has(n.pid) ? "true" : "false",
+          onclick: () => { st.detail.has(n.pid) ? st.detail.delete(n.pid) : st.detail.add(n.pid); render(); } },
+          plain(f.name) || "(no name)"),
+        h("span", { class: "p-pid" }, "pid " + n.pid),
+        n.worst ? sevTag(worst) : null,
+        f.lrng_component ? h("span", { class: "lrng-tag" }, "lrng") : null,
+        !open && kids.length ? h("span", { class: "faint" }, `${fmtNum(kids.length)} child${kids.length === 1 ? "" : "ren"}`) : null,
+        h("span", { class: "p-cmd", title: plain(f.command_line) || null }, plain(f.command_line)));
+      procNodes.set(n.pid, row);
+      li.append(row);
+      if (st.detail.has(n.pid)) li.append(procDetail(n));
+      if (kids.length && open) {
+        if (depth >= MAX_DEPTH) {
+          li.append(h("p", { class: "faint" }, `Deeper processes aren't shown here (more than ${MAX_DEPTH} levels); search for them.`));
+        } else {
+          const ul = h("ul", { role: "group" });
+          for (const k of kids) build(k, ul, depth + 1);
+          li.append(ul);
+        }
+      }
+      into.append(li);
+    };
+    for (const r of t.roots) build(r, tree, 0);
+    wrap.append(h("p", { class: "count-line" }, `${fmtNum(keep ? keep.size : t.count)} of ${fmtNum(t.count)} processes`));
+    wrap.append(shown ? tree : h("p", { class: "empty" }, "No processes match."));
+    return wrap;
+  }
+  function procDetail(n) {
+    const box = h("div", { class: "p-detail" }, kvList(n.rec.fields));
+    if (n.rec.findings.length) {
+      box.append(h("ul", { class: "errors" }, n.rec.findings.map((x) => h("li", null, sevTag(x.severity), " ", plain(x.rule), ": ", plain(x.detail)))));
+    }
+    const r = model.byName.get("processes");
+    box.append(h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onclick: () => showRecord(model.results.indexOf(r), n.i) }, "Show in processes data")));
+    return box;
+  }
+  function showProcess(pid) {
+    const t = procTree();
+    const n = t.byPid.get(String(pid));
+    if (!n) return go("processes");
+    const st = state.processes;
+    if (!st.open) st.open = new Set();
+    for (let x = n.parent; x; x = x.parent) st.open.add(x.pid);
+    st.q = ""; st.onlyHits = false; st.detail.add(n.pid);
+    pendingFocus = { get el() { return procNodes.get(n.pid); } };
+    go("processes");
+  }
+
+  // ---- Timeline -------------------------------------------------------------------
+  const DETAIL_KEYS = ["message", "name", "executable", "image", "image_path", "path", "file", "command_line", "command",
+    "service_name", "provider", "channel", "event_id", "target_user_name", "user", "account", "value"];
+  const FALLBACK_KEYS = ["kind", "source", "remote_address", "address", "ip", "domain", "rule"];
+  // A record's label: its two most identifying values, skipping a repeat.
+  function summary(rec) {
+    const has = (k) => rec.fields[k] !== undefined && rec.fields[k] !== "" && rec.fields[k] !== null;
+    let keys = DETAIL_KEYS.filter(has);
+    if (!keys.length) keys = FALLBACK_KEYS.filter(has);
+    const parts = [];
+    for (const k of keys) {
+      const v = plain(rec.fields[k]);
+      if (parts.some((p) => p.includes(v))) continue;
+      parts.push(v);
+      if (parts.length === 2) break;
+    }
+    return parts.join(", ").slice(0, 240);
+  }
+  function timeline() {
+    if (model.timeline) return model.timeline;
+    const events = [];
+    const tl = model.byName.get("timeline");
+    let derived = false;
+    if (tl && tl.records.length) {
+      for (const rec of tl.records) {
+        const f = rec.fields;
+        const t = parseTime(f.time);
+        if (Number.isNaN(t)) continue;
+        const ri = model.results.findIndex((x) => x.name === f.source);
+        const i = Number.isInteger(f.source_record) ? f.source_record : -1;
+        const src = ri >= 0 && i >= 0 ? model.results[ri].records[i] : null;
+        events.push({ t, iso: plain(f.time), source: plain(f.source), artifact: plain(f.artifact),
+          detail: (src && summary(src)) || plain(f.detail),
+          worst: rank(f.top_severity), rule: plain(f.top_rule), ri: src ? ri : -1, i: src ? i : -1 });
+      }
+    } else {
+      // No -timeline result: build one from the report's own timestamps.
+      derived = true;
+      model.results.forEach((r, ri) => {
+        if (r.name === "timeline") return;
+        r.records.forEach((rec, i) => {
+          let detail = null;
+          const worst = worstOf(rec);
+          const top = rec.findings.slice().sort((a, b) => rank(b.severity) - rank(a.severity))[0];
+          const addAt = (iso, artifact) => {
+            const t = parseTime(iso);
+            if (Number.isNaN(t) || events.length >= 200000) return;
+            if (detail === null) detail = summary(rec);
+            events.push({ t, iso, source: r.name, artifact, detail, worst, rule: top ? plain(top.rule) : "", ri, i });
+          };
+          for (const [k, v] of entries(rec.fields)) {
+            if (typeof v === "string") addAt(v, k);
+            else if (Array.isArray(v)) for (const x of v) if (typeof x === "string") addAt(x, k);
+          }
+        });
+      });
+    }
+    events.sort((a, b) => a.t - b.t || (a.iso < b.iso ? -1 : a.iso > b.iso ? 1 : 0));
+    model.timeline = { events, derived };
+    return model.timeline;
+  }
+  function viewTimeline() {
+    const st = state.timeline;
+    const tl = timeline();
+    const wrap = h("section", null, h("h2", { class: "view-title" }, "Timeline"),
+      h("p", { class: "view-sub" }, tl.derived
+        ? "Every timestamp in the report, oldest first (built here; the report has no -timeline result). Times are UTC."
+        : "The super-timeline from the report: every timestamped artifact, oldest first. Times are UTC."));
+    if (!tl.events.length) { wrap.append(h("p", { class: "empty" }, "This report has no timestamps to place on a timeline.")); return wrap; }
+    const q = st.q.trim().toLowerCase();
+    let list = tl.events.filter((e) => (!st.source || e.source === st.source) && (!st.onlyHits || e.worst > 0) &&
+      (!q || (e.source + "\n" + e.artifact + "\n" + e.detail + "\n" + e.rule).toLowerCase().includes(q)));
+    if (st.newest) list = list.slice().reverse();
+    const sources = [...new Set(tl.events.map((e) => e.source))].sort();
+    wrap.append(h("div", { class: "filters" },
+      searchBox(st.q, "Search the timeline", (v) => { st.q = v; st.shown = 500; rerenderKeepingFocus(); }),
+      h("select", { class: "pick", "aria-label": "Source", onchange: (e) => { st.source = e.target.value; st.shown = 500; render(); } },
+        h("option", { value: "" }, "All sources"),
+        sources.map((s) => { const o = h("option", { value: s }, s); if (s === st.source) o.selected = true; return o; })),
+      h("label", { class: "toggle" }, h("input", { type: "checkbox", checked: st.onlyHits || null, onchange: (e) => { st.onlyHits = e.target.checked; st.shown = 500; render(); } }), "Only with findings"),
+      h("label", { class: "toggle" }, h("input", { type: "checkbox", checked: st.newest || null, onchange: (e) => { st.newest = e.target.checked; st.shown = 500; render(); } }), "Newest first")));
+    wrap.append(h("p", { class: "count-line" }, `${fmtNum(list.length)} of ${fmtNum(tl.events.length)} events`));
+    if (!list.length) { wrap.append(h("p", { class: "empty" }, "No events match these filters.")); return wrap; }
+    let day = "";
+    let ul = null;
+    for (const e of list.slice(0, st.shown)) {
+      const stamp = fmtTime(e.iso);
+      const d = stamp.slice(0, 10);
+      if (d !== day) {
+        day = d;
+        wrap.append(h("h3", { class: "day" }, d));
+        ul = h("ul", { class: "events" });
+        wrap.append(ul);
+      }
+      const what = h("span", { class: "what" }, h("span", { class: "art" }, e.artifact), e.detail ? h("span", { class: "ev" }, e.detail) : null);
+      const src = e.ri >= 0 && e.i >= 0
+        ? h("button", { class: "link src", type: "button", title: "Show the source record", onclick: () => showRecord(e.ri, e.i) }, e.source)
+        : h("span", { class: "src" }, e.source);
+      ul.append(h("li", { class: "event" }, h("span", { class: "when" }, stamp.slice(11, 19)), src, what,
+        h("span", { class: "sevcell", title: e.rule || null }, e.worst ? sevTag(sevName(e.worst)) : null)));
+    }
+    if (list.length > st.shown) {
+      wrap.append(h("p", { class: "pager" }, h("button", { class: "btn", type: "button", onclick: () => { st.shown += 500; render(); } },
+        `Show ${fmtNum(Math.min(500, list.length - st.shown))} more`)));
+    }
+    return wrap;
+  }
+
+  // ---- Indicators -------------------------------------------------------------------
+  function viewIndicators() {
+    const st = state.indicators;
+    const r = model.byName.get("iocs");
+    const wrap = h("section", null, h("h2", { class: "view-title" }, "Indicators"),
+      h("p", { class: "view-sub" }, "Addresses, domains, hashes and paths from the records that findings point at, ranked by severity, with offline intel attribution where the report has it."));
+    if (!r || !r.records.length) {
+      wrap.append(h("p", { class: "empty" }, r ? "No indicators: no finding pointed at an address, domain, hash or path." : "This report has no indicator list. Run lrng with -iocs (and -intel to attribute addresses)."));
+      return wrap;
+    }
+    const q = st.q.trim().toLowerCase();
+    const types = [...new Set(r.records.map((x) => plain(x.fields.type)))].sort();
+    const rows = r.records.map((rec, i) => ({ rec, i })).filter(({ rec }) =>
+      (!st.type || plain(rec.fields.type) === st.type) &&
+      (!q || entries(rec.fields).some(([, v]) => plain(v).toLowerCase().includes(q))));
+    const copy = h("button", { class: "btn", type: "button" }, "Copy values");
+    copy.addEventListener("click", () => copyText(rows.map(({ rec }) => plain(rec.fields.value)).join("\n"), copy));
+    wrap.append(h("div", { class: "filters" },
+      searchBox(st.q, "Search indicators", (v) => { st.q = v; rerenderKeepingFocus(); }),
+      h("select", { class: "pick", "aria-label": "Indicator type", onchange: (e) => { st.type = e.target.value; render(); } },
+        h("option", { value: "" }, "All types"),
+        types.map((t) => { const o = h("option", { value: t }, t); if (t === st.type) o.selected = true; return o; })),
+      copy));
+    wrap.append(h("p", { class: "count-line" }, `${fmtNum(rows.length)} of ${fmtNum(r.records.length)} indicators`));
+    const tbody = h("tbody");
+    for (const { rec } of rows) {
+      const f = rec.fields;
+      const intel = [f.intel_org, f.intel_asn !== undefined ? "AS" + plain(f.intel_asn) : "", f.intel_country, Array.isArray(f.intel_categories) ? f.intel_categories.map(plain).join(", ") : ""]
+        .filter((x) => x !== undefined && x !== "").map(plain).join(", ");
+      tbody.append(h("tr", null,
+        h("td", null, plain(f.type)),
+        h("td", null, valueNode(f.value, 200)),
+        h("td", null, sevTag(plain(f.max_severity))),
+        h("td", null, Array.isArray(f.rules) ? f.rules.map(plain).join(", ") : plain(f.rules)),
+        h("td", { class: "num" }, plain(f.source_count)),
+        h("td", null, intel || h("span", { class: "faint" }, "none"))));
+    }
+    wrap.append(h("div", { class: "table-wrap" }, h("table", null,
+      h("thead", null, h("tr", null, ["Type", "Value", "Severity", "Rules", "Seen in", "Intel"].map((x) => h("th", null, x)))), tbody)));
+    return wrap;
+  }
+  function copyText(text, btn) {
+    const done = (ok) => { const was = btn.textContent; btn.textContent = ok ? "Copied" : "Copy failed"; setTimeout(() => { btn.textContent = was; }, 1400); };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => done(true), () => fallback());
+    } else fallback();
+    function fallback() {
+      const ta = h("textarea", { "aria-hidden": "true" });
+      ta.value = text;
+      document.body.append(ta);
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand("copy"); } catch { ok = false; }
+      ta.remove();
+      done(ok);
+    }
+  }
+
+  // ---- Run and errors -------------------------------------------------------------------
+  function viewRun() {
+    const rep = model.rep;
+    const run = isObj(rep.run) ? rep.run : {};
+    const hi = isObj(rep.host_info) ? rep.host_info : {};
+    const wrap = h("section", null, h("h2", { class: "view-title" }, "Run and errors"),
+      h("p", { class: "view-sub" }, "How the evidence was collected, and where coverage has gaps."));
+    const kv = (pairs) => {
+      const dl = h("dl", { class: "kv" });
+      for (const [k, v] of pairs) if (v !== undefined && v !== null && v !== "") dl.append(h("dt", null, k), h("dd", null, v instanceof Node ? v : valueNode(v)));
+      return dl;
+    };
+    const hostPairs = entries(hi).filter(([k]) => k !== "errors").map(([k, v]) => [k.replace(/_/g, " "), typeof v === "string" && TIME_RE.test(v) ? fmtTime(v) : v]);
+    const runPairs = [
+      ["started", fmtTime(run.started_at)], ["finished", fmtTime(run.finished_at)],
+      ["elevated", run.elevated === true ? "yes" : run.elevated === false ? "no" : "unknown"],
+      ["elevation error", run.elevation_error], ["arguments", Array.isArray(run.args) ? run.args.map(plain).join(" ") : run.args],
+      ["collectors", Array.isArray(run.collectors) ? run.collectors.map(plain).join(", ") : run.collectors],
+      ["workers", run.workers], ["timeout", run.timeout], ["DNS lookups", run.dns_lookups], ["DNS correlation", run.dns_correlation],
+      ["hashing", run.hashing], ["YARA rules", run.yara_rules], ["intel", run.intel], ["intel dataset", run.intel_dataset],
+      ["interrupted", run.interrupted], ["agent path", run.exe_path], ["agent SHA-256", run.exe_sha256],
+      ["schema", rep.schema_version],
+    ];
+    wrap.append(h("div", { class: "grid-2" },
+      h("div", { class: "panel" }, h("h3", null, "Host"), hostPairs.length ? kv(hostPairs) : h("p", { class: "faint" }, "No host details in this report."),
+        Array.isArray(hi.errors) && hi.errors.length ? h("ul", { class: "errors" }, hi.errors.map((e) => h("li", null, plain(e)))) : null),
+      h("div", { class: "panel" }, h("h3", null, "Run"), kv(runPairs))));
+    const tbody = h("tbody");
+    for (const r of model.results) {
+      const nf = r.records.reduce((n, rec) => n + rec.findings.length, 0);
+      tbody.append(h("tr", null,
+        h("td", null, h("button", { class: "link", type: "button", onclick: () => go("collector", r.name) }, r.name)),
+        h("td", { class: "num" }, fmtNum(r.records.length)), h("td", { class: "num" }, fmtNum(nf)),
+        h("td", { class: "num" }, r.errors.length ? fmtNum(r.errors.length) : h("span", { class: "faint" }, "0")),
+        h("td", { class: "num" }, fmtDuration(r.duration))));
+      if (r.errors.length) {
+        tbody.append(h("tr", { class: "detail-row" }, h("td", { colspan: "5" },
+          h("ul", { class: "errors" }, r.errors.slice(0, 50).map((e) => h("li", null, h("span", { class: "ev" }, e))),
+            r.errors.length > 50 ? h("li", { class: "faint" }, `and ${fmtNum(r.errors.length - 50)} more`) : null))));
+      }
+    }
+    wrap.append(h("h3", { class: "day" }, "Collectors"), h("div", { class: "table-wrap" }, h("table", null,
+      h("thead", null, h("tr", null, ["Collector", "Records", "Findings", "Errors", "Time"].map((x) => h("th", null, x)))), tbody)));
+    return wrap;
+  }
+
+  // ---- Collector data -------------------------------------------------------------------
+  function tableState(name) {
+    if (!state.tables.has(name)) state.tables.set(name, { q: "", sort: "", dir: 1, allCols: false, shown: PAGE, open: new Set(), onlyHits: false });
+    return state.tables.get(name);
+  }
+  const rowNodes = new Map();
+  function viewCollector(name) {
+    const ri = model.results.findIndex((r) => r.name === name);
+    const r = model.results[ri];
+    const st = tableState(name);
+    const wrap = h("section", null, h("h2", { class: "view-title" }, name),
+      h("p", { class: "view-sub" }, `${fmtNum(r.records.length)} record${r.records.length === 1 ? "" : "s"}` +
+        (r.started ? `, collected ${fmtTime(r.started)}` : "") + (r.duration ? ` in ${fmtDuration(r.duration)}` : "") + "."));
+    if (r.errors.length) {
+      wrap.append(h("div", { class: "panel" }, h("h3", null, `Errors (${fmtNum(r.errors.length)})`),
+        h("ul", { class: "errors" }, r.errors.slice(0, 100).map((e) => h("li", null, h("span", { class: "ev" }, e))))));
+    }
+    if (r.meta) {
+      const det = h("details", { class: "panel" }, h("summary", null, "About this collection"), kvList(r.meta));
+      wrap.append(det);
+    }
+    if (!r.records.length) { wrap.append(h("p", { class: "empty" }, "No records.")); return wrap; }
+    // Columns: the keys records carry, most common first.
+    const freq = new Map();
+    for (const rec of r.records) for (const k of Object.keys(rec.fields)) freq.set(k, (freq.get(k) || 0) + 1);
+    const allCols = [...freq.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k);
+    const cols = st.allCols ? allCols : allCols.slice(0, 8);
+    const q = st.q.trim().toLowerCase();
+    let rows = r.records.map((rec, i) => ({ rec, i })).filter(({ rec }) =>
+      (!st.onlyHits || rec.findings.length) &&
+      (!q || entries(rec.fields).some(([, v]) => plain(v).toLowerCase().includes(q)) ||
+        rec.findings.some((f) => (plain(f.rule) + plain(f.detail)).toLowerCase().includes(q))));
+    if (st.sort) {
+      const k = st.sort;
+      const val = (rec) => (k === "\u0000sev" ? worstOf(rec) : rec.fields[k]);
+      rows = rows.slice().sort((a, b) => cmp(val(a.rec), val(b.rec)) * st.dir);
+    }
+    wrap.append(h("div", { class: "filters" },
+      searchBox(st.q, `Search ${name} records`, (v) => { st.q = v; st.shown = PAGE; rerenderKeepingFocus(); }),
+      h("label", { class: "toggle" }, h("input", { type: "checkbox", checked: st.onlyHits || null, onchange: (e) => { st.onlyHits = e.target.checked; st.shown = PAGE; render(); } }), "Only with findings"),
+      allCols.length > 8 ? h("button", { class: "btn", type: "button", onclick: () => { st.allCols = !st.allCols; render(); } },
+        st.allCols ? "Fewer columns" : `All ${fmtNum(allCols.length)} columns`) : null));
+    wrap.append(h("p", { class: "count-line" }, `${fmtNum(rows.length)} of ${fmtNum(r.records.length)} records`));
+    const head = (label, key) => {
+      const sorted = st.sort === key;
+      return h("th", { class: "sortable", scope: "col", "aria-sort": sorted ? (st.dir > 0 ? "ascending" : "descending") : null,
+        tabindex: "0", onclick: () => sortBy(key), onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sortBy(key); } } }, label);
+    };
+    function sortBy(key) {
+      if (st.sort === key) st.dir = -st.dir; else { st.sort = key; st.dir = key === "\u0000sev" ? -1 : 1; }
+      render();
+    }
+    const tbody = h("tbody");
+    for (const { rec, i } of rows.slice(0, st.shown)) {
+      const key = ri + ":" + i;
+      const open = st.open.has(i);
+      const worst = worstOf(rec);
+      const tr = h("tr", null,
+        h("td", null, h("button", { class: "row-btn", type: "button", "aria-expanded": open ? "true" : "false",
+          onclick: () => { st.open.has(i) ? st.open.delete(i) : st.open.add(i); render(); } }, open ? "Hide" : "Details"),
+          worst ? h("div", null, sevTag(sevName(worst))) : null),
+        cols.map((c) => h("td", null, rec.fields[c] === undefined ? "" : valueNode(rec.fields[c], 160))));
+      rowNodes.set(key, tr);
+      tbody.append(tr);
+      if (open) {
+        const box = h("td", { colspan: String(cols.length + 1) }, kvList(rec.fields));
+        if (rec.findings.length) box.append(h("ul", { class: "errors" }, rec.findings.map((f) => h("li", null, sevTag(f.severity), " ", plain(f.rule), ": ", plain(f.detail)))));
+        if (name === "processes" && rec.fields.pid !== undefined) {
+          box.append(h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onclick: () => showProcess(rec.fields.pid) }, "Show in the process tree")));
+        }
+        tbody.append(h("tr", { class: "detail-row" }, box));
+      }
+    }
+    wrap.append(h("div", { class: "table-wrap" }, h("table", null,
+      h("thead", null, h("tr", null, head("Findings", "\u0000sev"), cols.map((c) => head(c, c)))), tbody)));
+    if (rows.length > st.shown) {
+      wrap.append(h("p", { class: "pager" }, h("button", { class: "btn", type: "button", onclick: () => { st.shown += PAGE; render(); } },
+        `Show ${fmtNum(Math.min(PAGE, rows.length - st.shown))} more`)));
+    }
+    return wrap;
+  }
+  function cmp(a, b) {
+    if (a === undefined || a === null) return b === undefined || b === null ? 0 : 1;
+    if (b === undefined || b === null) return -1;
+    if (typeof a === "number" && typeof b === "number") return a - b;
+    return plain(a).localeCompare(plain(b), undefined, { numeric: true });
+  }
+  function showRecord(ri, i) {
+    const r = model.results[ri];
+    if (!r) return;
+    const st = tableState(r.name);
+    st.q = ""; st.onlyHits = false; st.open.add(i);
+    // Page far enough to reach it in the current order.
+    st.sort = ""; st.shown = Math.max(st.shown, (Math.floor(i / PAGE) + 1) * PAGE);
+    pendingFocus = { get el() { return rowNodes.get(ri + ":" + i); } };
+    go("collector", r.name);
+  }
+
+  // ---- Startup ---------------------------------------------------------------------------
+  async function sha256Hex(buf) {
+    if (!(window.crypto && crypto.subtle && window.isSecureContext)) return "";
+    try {
+      const d = await crypto.subtle.digest("SHA-256", buf);
+      return Array.from(new Uint8Array(d), (b) => b.toString(16).padStart(2, "0")).join("");
+    } catch { return ""; }
+  }
+  function showError(msg) {
+    const e = $("load-error");
+    if (!e) return;
+    e.textContent = msg;
+    e.hidden = false;
+  }
+  function open(text, source) {
+    let parsed;
+    try { parsed = parseReport(text); } catch (err) {
+      if (model) { alertBar("Couldn't open " + (source.name || "that file") + ": " + err.message); return; }
+      showError("This isn't an lrng report: " + err.message + ".");
+      return;
+    }
+    source.skipped = parsed.skipped;
+    model = buildModel(parsed.rep, source);
+    state.findings = { sevs: new Set(SEVS.concat([""])), collector: "", tactic: "", q: "", shown: PAGE, open: new Set() };
+    state.processes = { q: "", onlyHits: false, open: null, detail: new Set() };
+    state.timeline = { q: "", source: "", onlyHits: false, newest: false, shown: 500 };
+    state.indicators = { q: "", type: "" };
+    state.tables = new Map();
+    document.title = (plain(parsed.rep.host) || "Report") + " – lrng report";
+    renderCase();
+    renderTactics();
+    render();
+  }
+  function alertBar(msg) {
+    const warnRow = document.querySelector(".case .warn-row") || $("case").appendChild(h("div", { class: "warn-row" }));
+    warnRow.append(h("span", { class: "warn" }, msg));
+  }
+  async function openFile(file) {
+    if (!file) return;
+    const buf = await file.arrayBuffer();
+    const text = new TextDecoder("utf-8").decode(buf);
+    const sha = await sha256Hex(buf);
+    open(text, { name: file.name, size: file.size, sha256: sha, embedded: false });
+  }
+  $("file").addEventListener("change", (e) => { openFile(e.target.files[0]); e.target.value = ""; });
+  const choose = $("choose");
+  if (choose) choose.addEventListener("click", () => $("file").click());
+  let drags = 0;
+  const dz = $("dropzone");
+  window.addEventListener("dragenter", (e) => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) { drags++; dz.hidden = false; } });
+  window.addEventListener("dragleave", () => { if (--drags <= 0) { drags = 0; dz.hidden = true; } });
+  window.addEventListener("dragover", (e) => { e.preventDefault(); });
+  window.addEventListener("drop", (e) => {
+    e.preventDefault(); drags = 0; dz.hidden = true;
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) openFile(f);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "/" && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement)) {
+      const s = document.querySelector("main .search");
+      if (s) { e.preventDefault(); s.focus(); }
+    }
+  });
+  const embedded = $("lrng-report");
+  if (embedded && embedded.textContent.trim()) open(embedded.textContent, { name: "", size: 0, sha256: "", embedded: true });
+})();
+</script>
+</body>
+</html>

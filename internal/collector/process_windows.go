@@ -170,25 +170,66 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 
 	tree := analyzeProcessTree(views, systemRoot())
 	hashed, envRead, envUnread := 0, 0, 0
+	critRead, critUnread := 0, 0
+	critical := map[string]int{} // name -> processes marked critical
+	desktops := map[string]int{}
+	dated := map[string][2]time.Time{} // image path -> created, modified
+	now := time.Now()
 	for i, r := range rows {
 		findings := tree[r.e.pid]
+		label := fmt.Sprintf("process %s (pid %d)", r.e.name, r.e.pid)
 		if !views[i].Self && r.d.commandLine != "" {
-			findings = mergeFindings(findings, analyzeCommandLine(
-				fmt.Sprintf("process %s (pid %d) command line", r.e.name, r.e.pid), r.d.imagePath, r.d.commandLine)...)
+			findings = mergeFindings(findings, analyzeCommandLine(label+" command line", r.d.imagePath, r.d.commandLine)...)
 		}
-		// The .NET runtime's environment variables (ETW off, profilers).
+		// Marked critical: ending it crashes Windows.
+		switch {
+		case r.d.critical == nil:
+			if r.e.pid > 4 {
+				critUnread++
+			}
+		case *r.d.critical:
+			critRead++
+			r.fields["critical"] = true
+			critical[strings.ToLower(r.e.name)]++
+			if f, ok := criticalProcessFinding(label, r.e.name, r.d.imagePath, systemRoot()); ok && !views[i].Self {
+				findings = mergeFindings(findings, f)
+			}
+		default:
+			critRead++
+		}
+		// The process's parameters: the .NET runtime's environment variables
+		// (ETW off, profilers) and the desktop it started on (hidden VNC).
 		if r.e.pid > 4 && !views[i].Self && !strings.EqualFold(r.e.name, "lsass.exe") {
-			if env, err := processRuntimeEnv(r.e.pid); err != nil {
+			if pp, err := processParams(r.e.pid); err != nil {
 				envUnread++
 			} else {
 				envRead++
-				if len(env) > 0 {
+				if env := pp.Env; len(env) > 0 {
 					r.fields["runtime_env"] = env
 					sid := r.d.userSID
-					findings = mergeFindings(findings, runtimeEnvFindings(
-						fmt.Sprintf("process %s (pid %d)'s environment", r.e.name, r.e.pid), env,
+					findings = mergeFindings(findings, runtimeEnvFindings(label+"'s environment", env,
 						func(clsid string) string { return clsidServer(sid, clsid) })...)
 				}
+				if pp.Desktop != "" {
+					desktops[pp.Desktop]++
+					if f, ok := desktopFinding(label, r.e.name, r.d.commandLine, pp.Desktop); ok {
+						r.fields["desktop"] = pp.Desktop
+						findings = mergeFindings(findings, f)
+					}
+				}
+			}
+		}
+		// The image file's times: set by hand to look old (timestomping).
+		if img := r.d.imagePath; img != "" && !views[i].Self {
+			t, seen := dated[img]
+			if !seen {
+				if c, m, ok := statTimes(img); ok {
+					t = [2]time.Time{c, m}
+				}
+				dated[img] = t
+			}
+			if f, ok := timestompFinding("the image of "+label, img, t[0], t[1], now); ok {
+				findings = mergeFindings(findings, f)
 			}
 		}
 		if r.d.imagePath != "" && ctx.Err() == nil {
@@ -207,6 +248,11 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 	res.SetMeta("images_hashed", hashed)
 	res.SetMeta("environments_read", envRead)
 	res.SetMeta("environments_unreadable", envUnread)
+	res.SetMeta("critical_flags_read", critRead)
+	res.SetMeta("critical_flags_unreadable", critUnread)
+	res.SetMeta("critical_processes", critical)
+	res.SetMeta("desktops", desktops)
+	res.SetMeta("image_files_dated", len(dated))
 	res.SetMeta("hashing", opts.Hasher != nil)
 	res.SetMeta("signature_checks", opts.Signer != nil)
 	if opts.Hasher != nil && ctx.Err() != nil {
@@ -222,6 +268,7 @@ type procDetail struct {
 	userSID     string
 	user        string
 	integrity   string
+	critical    *bool // marked critical (nil: not read)
 	errs        []string
 }
 
@@ -257,6 +304,9 @@ func queryProcess(pid uint32, owners sidCache) procDetail {
 		}
 	} else {
 		d.errs = append(d.errs, "times: "+err.Error())
+	}
+	if crit, err := processCritical(h); err == nil {
+		d.critical = &crit
 	}
 
 	var tok syscall.Token
@@ -409,4 +459,21 @@ func (c sidCache) owner(tok syscall.Token) (sid, account string, err error) {
 	}
 	c[sid] = account
 	return sid, account, nil
+}
+
+var procIsProcessCritical = modkernel32.NewProc("IsProcessCritical")
+
+// processCritical reports whether a process is marked critical
+// (ProcessBreakOnTermination), so that its exit stops Windows. IsProcessCritical
+// (Windows 8.1+) needs only PROCESS_QUERY_LIMITED_INFORMATION.
+func processCritical(h syscall.Handle) (bool, error) {
+	if err := procIsProcessCritical.Find(); err != nil {
+		return false, err
+	}
+	var crit int32
+	r, _, err := procIsProcessCritical.Call(uintptr(h), uintptr(unsafe.Pointer(&crit)))
+	if r == 0 {
+		return false, err
+	}
+	return crit != 0, nil
 }

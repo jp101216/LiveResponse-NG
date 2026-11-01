@@ -94,6 +94,7 @@ func collectAutoruns(ctx context.Context, opts RunOptions) (Result, error) {
 			a.runKey(winreg.Users, sid+`\`+loc.path, loc.kind, `HKU\`+sid+`\`+loc.path, profile, sid)
 		}
 		a.userValues(sid, profile)
+		a.uacBypass(sid, profile)
 	}
 	a.startupFolders(profiles)
 
@@ -159,6 +160,17 @@ func (a *asepWalker) emit(e autorunEntry, raw string, keyWrite time.Time, sid st
 	}
 	findings := judgeAutorun(e, a.sysRoot)
 	fields["suspicious_path"] = hasRule(findings, "persistence.autorun_unusual_path")
+	// The program's file times: set by hand to look old (timestomping).
+	for _, p := range []string{img, payload} {
+		if !strings.ContainsAny(p, `\/`) {
+			continue
+		}
+		if c, m, ok := statTimes(p); ok {
+			if f, ok := timestompFinding("autostart program", p, c, m, time.Now()); ok {
+				findings = mergeFindings(findings, f)
+			}
+		}
+	}
 	if a.opts.Hasher != nil && a.ctx.Err() == nil {
 		if strings.ContainsAny(img, `\/`) && (len(findings) > 0 || !underDir(img, a.sysRoot)) {
 			a.opts.Hasher.Fields(a.ctx, fields, "image", img)

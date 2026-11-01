@@ -279,12 +279,15 @@ fn place(p: &WinProcess, addr: usize, nt: &Ntdll, is_copy: &mut dyn FnMut(usize)
     }
     let path = p.mapped_file(base);
     let name = file_name_lower(&path);
-    // win32u holds the win32k system calls; wow64cpu, in a 32-bit process,
-    // makes the calls WoW64 dispatches itself.
-    if matches!(name.as_str(), "win32u.dll" | "wow64cpu.dll")
-        && path
-            .to_ascii_lowercase()
-            .ends_with(&format!(r"\system32\{name}"))
+    // win32u holds the win32k system calls; in a 32-bit process, wow64cpu
+    // makes the calls WoW64 dispatches itself, and wow64win makes the win32k
+    // ones (its own stubs for the 32-bit user32 and gdi32).
+    if matches!(
+        name.as_str(),
+        "win32u.dll" | "wow64cpu.dll" | "wow64win.dll"
+    ) && path
+        .to_ascii_lowercase()
+        .ends_with(&format!(r"\system32\{name}"))
     {
         return Place::System(name);
     }

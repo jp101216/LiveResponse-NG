@@ -584,6 +584,10 @@ func eventFindings(ev winEvent) []Finding {
 		if isSysmon(ev) {
 			out = append(out, tamperingFindings(ev)...)
 		}
+	case 12, 13: // Sysmon: a registry key created or deleted / a value set (the System log uses both ids too)
+		if isSysmon(ev) {
+			out = append(out, registryEventFindings(ev)...)
+		}
 	case 41: // KDC: a certificate's SID didn't match the account it maps to (Kernel-Power writes a 41 too)
 		if isKDC(ev) {
 			out = append(out, kdcCertificateFindings(ev)...)

@@ -16,7 +16,9 @@ import (
 // a secret, and reads them back out of its memory: only the runtime ones come
 // back, and they are judged.
 func TestProcessRuntimeEnvOnWindows(t *testing.T) {
-	cmd := exec.Command(filepath.Join(systemRoot(), "System32", "cmd.exe"), "/c", "ping -n 30 127.0.0.1 >nul")
+	// ping itself, not through cmd.exe: killing cmd wouldn't stop its child,
+	// which would carry these variables on into later tests.
+	cmd := exec.Command(filepath.Join(systemRoot(), "System32", "PING.EXE"), "-n", "30", "127.0.0.1")
 	cmd.Env = append(os.Environ(), "COMPlus_ETWEnabled=0", "COR_ENABLE_PROFILING=1",
 		"COR_PROFILER={11111111-2222-3333-4444-555555555555}", `COR_PROFILER_PATH=C:\Users\Public\prof.dll`, "LRNG_SECRET=hunter2")
 	if err := cmd.Start(); err != nil {

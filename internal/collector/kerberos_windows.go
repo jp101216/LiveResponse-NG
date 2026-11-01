@@ -70,7 +70,30 @@ type kerbTicketCacheInfoEx struct {
 	TicketFlags                                      uint32
 }
 
-const kerbQueryTicketCacheExMessage = 14
+const (
+	kerbQueryTicketCacheExMessage = 14
+	tokenStatisticsClass          = 10         // TOKEN_INFORMATION_CLASS TokenStatistics
+	statusNoSuchLogonSession      = 0xC000005F // Kerberos holds nothing for the session
+)
+
+// errNoKerberosSession is a session the Kerberos package doesn't know: a
+// logon that never used Kerberos (a local account, a service's own session),
+// which has no tickets to read.
+var errNoKerberosSession = errors.New("no Kerberos logon session")
+
+// tokenStatistics is TOKEN_STATISTICS.
+type tokenStatistics struct {
+	TokenID            lsaLUID
+	AuthenticationID   lsaLUID
+	ExpirationTime     int64
+	TokenType          uint32
+	ImpersonationLevel uint32
+	DynamicCharged     uint32
+	DynamicAvailable   uint32
+	GroupCount         uint32
+	PrivilegeCount     uint32
+	ModifiedID         lsaLUID
+}
 
 func newLsaString(s string) lsaString {
 	b := append([]byte(s), 0)
@@ -123,23 +146,66 @@ func collectKerberos(ctx context.Context) (Result, error) {
 		res.Fail("logon sessions: " + err.Error())
 	}
 	var out []kerbSessionTickets
-	unreadable := 0
-	for _, s := range sessions {
-		if ctx.Err() != nil {
-			res.Fail("cancelled: " + ctx.Err().Error())
-			break
-		}
-		tickets, err := sessionTickets(lsa, pkg, s.LogonID)
-		if err != nil {
+	unreadable, noKerberos := 0, 0
+	read := func(s logonSession, ask uint64) {
+		tickets, err := sessionTickets(lsa, pkg, ask)
+		switch {
+		case errors.Is(err, errNoKerberosSession):
+			noKerberos++
+		case err != nil:
 			unreadable++
-			continue
+		default:
+			out = append(out, kerbSessionTickets{Session: s, Tickets: tickets})
 		}
-		out = append(out, kerbSessionTickets{Session: s, Tickets: tickets})
+	}
+	if trusted {
+		for _, s := range sessions {
+			if ctx.Err() != nil {
+				res.Fail("cancelled: " + ctx.Err().Error())
+				break
+			}
+			read(s, s.LogonID)
+		}
+	} else {
+		// LSA answers an untrusted caller about its own session only, and
+		// only when asked for it as LUID 0.
+		own := logonSession{}
+		if id, err := ownLogonID(); err == nil {
+			own.LogonID = id
+			for _, s := range sessions {
+				if s.LogonID == id {
+					own = s
+				}
+			}
+		}
+		read(own, 0)
 	}
 	res.SetMeta("sessions", len(sessions))
 	res.SetMeta("sessions_unreadable", unreadable)
+	res.SetMeta("sessions_without_kerberos", noKerberos)
 	kerberosReport(res, out)
 	return res.Finish(), nil
+}
+
+// ownLogonID is the logon session the agent runs in (its token's
+// authentication ID).
+func ownLogonID() (uint64, error) {
+	p, err := syscall.GetCurrentProcess()
+	if err != nil {
+		return 0, err
+	}
+	var tok syscall.Token
+	if err := syscall.OpenProcessToken(p, syscall.TOKEN_QUERY, &tok); err != nil {
+		return 0, err
+	}
+	defer tok.Close()
+	var st tokenStatistics
+	var n uint32
+	if err := syscall.GetTokenInformation(tok, tokenStatisticsClass, (*byte)(unsafe.Pointer(&st)),
+		uint32(unsafe.Sizeof(st)), &n); err != nil {
+		return 0, err
+	}
+	return uint64(uint32(st.AuthenticationID.High))<<32 | uint64(st.AuthenticationID.Low), nil
 }
 
 // logonSessions lists the host's logon sessions with their accounts.
@@ -166,7 +232,8 @@ func logonSessions() ([]logonSession, error) {
 	return out, nil
 }
 
-// sessionTickets reads one session's ticket cache (metadata only).
+// sessionTickets reads one session's ticket cache (metadata only). LUID 0
+// asks for the caller's own session.
 func sessionTickets(lsa syscall.Handle, pkg uint32, logonID uint64) ([]kerbTicket, error) {
 	req := kerbQueryTktCacheRequest{MessageType: kerbQueryTicketCacheExMessage,
 		LogonID: lsaLUID{Low: uint32(logonID), High: int32(logonID >> 32)}}
@@ -177,6 +244,9 @@ func sessionTickets(lsa syscall.Handle, pkg uint32, logonID uint64) ([]kerbTicke
 		unsafe.Sizeof(req), uintptr(unsafe.Pointer(&ret)), uintptr(unsafe.Pointer(&retLen)), uintptr(unsafe.Pointer(&protocol)))
 	if ret != nil {
 		defer procLsaFreeReturnBuffer.Call(uintptr(ret))
+	}
+	if uint32(st) == statusNoSuchLogonSession || uint32(protocol) == statusNoSuchLogonSession {
+		return nil, errNoKerberosSession
 	}
 	if st != 0 {
 		return nil, ntStatus(st)

@@ -388,8 +388,10 @@ abused certificate meeting the SID the CA stamps in), certificate requests with
 a requester-supplied subject alternative name or application policies (ESC1,
 ESC6, ESC15 — as Certipy sends them), ESC1-shaped templates and templates
 changed into that shape (ESC4), and DNS records named for Kerberos and NTLM
-reflection (CVE-2025-33073). Directory-change and Certificate Services auditing
-aren't on by default; Kerberos and directory-access auditing are. Sysmon's
+reflection (CVE-2025-33073). Each needs its auditing on: directory changes
+(5136) and Certificate Services (the audit policy and the CA's own audit
+filter) are off by default, and directory access (4662) is logged only for
+the rights an object's audit entries (SACL) name. Sysmon's
 network (3), remote-thread (8), DNS (22) and process-tampering (25) events add
 DNS tunnels (many long, random-looking names under one domain, per program),
 DNS sent straight to a public resolver, QUIC from programs that aren't browsers,

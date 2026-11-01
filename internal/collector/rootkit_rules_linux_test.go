@@ -5,6 +5,7 @@ package collector
 import (
 	"context"
 	"net"
+	"os"
 	"strings"
 	"testing"
 )
@@ -139,6 +140,41 @@ func TestHiddenDiffs(t *testing.T) {
 	if len(got) != 1 || got[0].Inode != 222 {
 		t.Errorf("hidden sockets: %+v", got)
 	}
+}
+
+// TestPAMModulesMatchPackagesLive checks this host's PAM modules against
+// dpkg's checksums: on a clean Debian-family system every module a package
+// installed matches its package.
+func TestPAMModulesMatchPackagesLive(t *testing.T) {
+	sums := dpkgPAMSums()
+	if sums == nil {
+		t.Skip("no dpkg database here")
+	}
+	res := NewResult("autoruns")
+	persistRecorder{res: res, ctx: context.Background()}.scanPAM()
+	r := res.Finish()
+	n, _ := r.Meta["pam_modules_checked"].(int)
+	if n == 0 {
+		t.Skip("no PAM modules installed here")
+	}
+	matched := 0
+	for path := range sums {
+		if _, err := os.Stat(path); err == nil {
+			matched++
+		}
+	}
+	if matched == 0 {
+		t.Errorf("none of the %d PAM modules dpkg lists is on disk", len(sums))
+	}
+	for _, rec := range r.Records {
+		for _, f := range rec.Findings {
+			if f.Rule == "persistence.pam_module_modified" {
+				t.Errorf("a packaged PAM module doesn't match its package on a clean host: %s", f.Detail)
+			}
+			t.Logf("finding: %s %s", f.Rule, f.Detail)
+		}
+	}
+	t.Logf("%d PAM modules checked; dpkg lists %d, %d of them on disk", n, len(sums), matched)
 }
 
 // TestRootkitCollectorLive runs on this host: every PID is accounted for,

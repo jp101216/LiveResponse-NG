@@ -343,13 +343,13 @@ collectors and rules only).
   secret beside them isn't); the accessibility programs' version resources are
   read (Windows' own names for Magnify and Narrator came from there), AMSI's
   Defender provider must be found and judged ordinary, LSA must list the logon
-  sessions, and the AI-agent sweep must run.
+  sessions and answer for the agent's own, and the AI-agent sweep must run.
 - On Linux: PAM modules on a real Debian-family system match their packages'
   md5s, every PID is accounted for, and a listener opened by the test is in
   both netlink's and `/proc/net`'s socket tables.
 - The Windows smoke test requires `lateral` to list the host's pipes and
-  `defenses` to return its records, AMSI's among them, with no finding on the
-  clean runner.
+  `defenses` to return its records, AMSI's among them, with no AMSI or .NET
+  ETW finding on the clean runner.
 
 ### Third-party data
 - LOLDrivers (Apache License 2.0). Its license ships beside the data and in

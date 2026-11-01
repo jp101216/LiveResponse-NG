@@ -1115,6 +1115,18 @@ mod tests {
             "{}",
             fake.context
         );
+        // Only the copy is reported: the thread it was copied from started at
+        // a Windows API (kernel32's SleepEx, which lands in kernelbase's).
+        assert_eq!(
+            planted
+                .hits()
+                .iter()
+                .filter(|h| h.rule == "defense.stack_fake_thread_start")
+                .count(),
+            1,
+            "{:?}",
+            planted.hits()
+        );
         assert_eq!(
             find(&hidden, "defense.stack_return_nonexec", "critical").offset as usize,
             ret

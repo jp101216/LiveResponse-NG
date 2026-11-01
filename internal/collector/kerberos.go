@@ -99,6 +99,12 @@ func (t kerbTicket) rc4() bool {
 	return t.EncryptionType == 23 || t.EncryptionType == 24 || t.EncryptionType == -128
 }
 
+// machineIdentityDomains are the authorities of virtual and service accounts
+// (DWM-1, UMFD-0, NT SERVICE\..., IIS APPPOOL\..., NETWORK SERVICE), whose
+// logon sessions hold the computer account's tickets.
+var machineIdentityDomains = set("window manager", "font driver host", "nt service", "iis apppool", "nt virtual machine",
+	"nt authority")
+
 // accountPart is the account in "user", "user@REALM" or "DOMAIN\user", lower-cased.
 func accountPart(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
@@ -152,8 +158,10 @@ func judgeTicket(s logonSession, t kerbTicket, aesSeen bool) []Finding {
 		}
 		// Pass-the-ticket: another account's TGT in this session. A
 		// NewCredentials session (runas /netonly) holds the other
-		// credentials' tickets by design.
-		if s.LogonType != 9 && s.User != "" && t.Client != "" && accountPart(t.Client) != accountPart(s.User) {
+		// credentials' tickets by design, and virtual and service accounts
+		// reach the network as the computer and keep its tickets.
+		if s.LogonType != 9 && s.User != "" && t.Client != "" && accountPart(t.Client) != accountPart(s.User) &&
+			!(strings.HasSuffix(t.Client, "$") && machineIdentityDomains[strings.ToLower(s.Domain)]) {
 			out = append(out, Finding{Rule: "cred.pass_the_ticket", Severity: SevSuspect, Technique: "T1550.003", Confidence: 70,
 				Detail: fmt.Sprintf("%s, signed in as %s, holds a TGT for %s: a ticket imported into a session it wasn't issued to "+
 					"(pass-the-ticket: Mimikatz kerberos::ptt, Rubeus ptt)", where, sessionLabel(s), t.Client)})

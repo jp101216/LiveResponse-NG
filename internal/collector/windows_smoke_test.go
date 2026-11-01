@@ -116,15 +116,32 @@ func TestDefaultCollectorsOnWindows(t *testing.T) {
 		t.Logf("aiagents: homes %v, %v entries, %v MCP servers, %v instruction files", ai.Meta["homes"], ai.Meta["entries_visited"],
 			ai.Meta["mcp_servers"], ai.Meta["instruction_files"])
 	}
-	// Kerberos: LSA answered (the runner isn't SYSTEM, so its own session only).
+	// Kerberos: LSA answered. The runner isn't SYSTEM, so only its own
+	// session is asked about, and that must be answered (with its tickets,
+	// or with Kerberos holding nothing for a local account).
 	if k := byName["kerberos"]; k.Meta["sessions"] == nil {
 		t.Errorf("kerberos: no logon sessions listed (errors %q)", k.Errors)
 	} else {
-		t.Logf("kerberos: all sessions %v, %v sessions, %v unreadable, %v tickets", k.Meta["all_sessions"], k.Meta["sessions"],
+		t.Logf("kerberos: all sessions %v, %v sessions, %v read, %v without Kerberos, %v unreadable, %v tickets",
+			k.Meta["all_sessions"], k.Meta["sessions"], k.Meta["sessions_read"], k.Meta["sessions_without_kerberos"],
 			k.Meta["sessions_unreadable"], k.Meta["tickets"])
+		read, _ := k.Meta["sessions_read"].(int)
+		none, _ := k.Meta["sessions_without_kerberos"].(int)
+		if all, _ := k.Meta["all_sessions"].(bool); !all && (read+none != 1 || k.Meta["sessions_unreadable"] != 0) {
+			t.Errorf("kerberos: its own session wasn't answered: %v", k.Meta)
+		}
 	}
 	if n, _ := byName["processes"].Meta["environments_read"].(int); n < 10 {
 		t.Errorf("processes: read %d environments (%v unreadable)", n, byName["processes"].Meta["environments_unreadable"])
+	} else {
+		t.Logf("processes: %d environments read, %v unreadable", n, byName["processes"].Meta["environments_unreadable"])
+	}
+	for _, rec := range byName["processes"].Records {
+		for _, f := range rec.Findings {
+			if f.Rule == "defense.dotnet_etw_disabled" || f.Rule == "persistence.clr_profiler" {
+				t.Logf("processes: %s on the runner: %s", f.Rule, f.Detail)
+			}
+		}
 	}
 	// The event-log collector keeps only targeted events, so a clean host may
 	// keep none -- but it must have read the host's logs (there is always a

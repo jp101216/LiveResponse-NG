@@ -31,6 +31,15 @@ func TestJudgeTickets(t *testing.T) {
 	none(t, "runas /netonly", judgeTicket(netonly, tgt("Administrator", 10*time.Hour, 18), true))
 	system := logonSession{LogonID: 0x3e7, User: "WS01$", Domain: "CORP", LogonType: 0}
 	none(t, "computer account", judgeTicket(system, tgt("WS01$", 10*time.Hour, 18), true))
+	// Virtual accounts reach the network as the computer.
+	dwm := logonSession{LogonID: 0x1a2b3, User: "DWM-1", Domain: "Window Manager", LogonType: 2}
+	none(t, "virtual account", judgeTicket(dwm, tgt("WS01$", 10*time.Hour, 18), true))
+	pool := logonSession{LogonID: 0x1a2b4, User: "DefaultAppPool", Domain: "IIS APPPOOL", LogonType: 5}
+	none(t, "app pool", judgeTicket(pool, tgt("WS01$", 10*time.Hour, 18), true))
+	// A computer's TGT in a person's session is still another account's
+	// (a relayed DC certificate's ticket imported with Rubeus /ptt).
+	only(t, "machine TGT in a user session", judgeTicket(alice, tgt("DC01$", 10*time.Hour, 18), true), "cred.pass_the_ticket", SevSuspect)
+	only(t, "user TGT in a virtual account", judgeTicket(dwm, tgt("Administrator", 10*time.Hour, 18), true), "cred.pass_the_ticket", SevSuspect)
 	// A service ticket for another account (constrained delegation, S4U) is
 	// not judged as pass-the-ticket.
 	svc := kerbTicket{Client: "bob", Server: "cifs/fs01.corp.local", Start: now, End: now.Add(10 * time.Hour), EncryptionType: 18}

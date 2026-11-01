@@ -405,9 +405,15 @@ shells byte for byte and reads their language-neutral version resource
 runs as SYSTEM, `LsaConnectUntrusted` otherwise — lists the logon sessions
 (`LsaEnumerateLogonSessions`, `LsaGetLogonSessionData`) and asks the Kerberos
 package for each session's ticket cache (`KerbQueryTicketCacheExMessage`):
-metadata only, never a ticket or key. `judgeTicket` is portable: lifetime
-against the 10-hour default, RC4 against the AES tickets on the same host, the
-client against the session's account (NewCredentials sessions excepted).
+metadata only, never a ticket or key. An untrusted connection is answered only
+about the caller's own session, asked for as LUID 0 (the agent's token's
+authentication ID names it). A session Kerberos holds nothing for
+(`STATUS_NO_SUCH_LOGON_SESSION`: a local account, a service's session) is
+counted in `meta.sessions_without_kerberos`, not as unreadable.
+`judgeTicket` is portable: lifetime against the 10-hour default, RC4 against
+the AES tickets on the same host, the client against the session's account
+(except in NewCredentials sessions, and virtual and service accounts holding
+the computer's tickets).
 
 `aiagents` (Windows and Linux) reads each client's configuration from a list of
 paths per OS (`aiClientConfigs`, `aiSystemConfigs`), parses JSON (VS Code's and

@@ -116,6 +116,13 @@ func TestDefaultCollectorsOnWindows(t *testing.T) {
 		t.Logf("aiagents: homes %v, %v entries, %v MCP servers, %v instruction files", ai.Meta["homes"], ai.Meta["entries_visited"],
 			ai.Meta["mcp_servers"], ai.Meta["instruction_files"])
 	}
+	// Kerberos: LSA answered (the runner isn't SYSTEM, so its own session only).
+	if k := byName["kerberos"]; k.Meta["sessions"] == nil {
+		t.Errorf("kerberos: no logon sessions listed (errors %q)", k.Errors)
+	} else {
+		t.Logf("kerberos: all sessions %v, %v sessions, %v unreadable, %v tickets", k.Meta["all_sessions"], k.Meta["sessions"],
+			k.Meta["sessions_unreadable"], k.Meta["tickets"])
+	}
 	if n, _ := byName["processes"].Meta["environments_read"].(int); n < 10 {
 		t.Errorf("processes: read %d environments (%v unreadable)", n, byName["processes"].Meta["environments_unreadable"])
 	}

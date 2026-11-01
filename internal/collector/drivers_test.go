@@ -427,3 +427,33 @@ func TestSysmonDriverLoad(t *testing.T) {
 		t.Errorf("sysmonHashes %v", got)
 	}
 }
+
+func TestSysmonProcessAccessDirectSyscall(t *testing.T) {
+	ev := func(target, trace string) winEvent {
+		return winEvent{EventID: 10, Provider: "Microsoft-Windows-Sysmon", Channel: "Microsoft-Windows-Sysmon/Operational",
+			TimeCreated: time.Date(2026, 10, 2, 1, 2, 3, 0, time.UTC), UserData: map[string]string{},
+			Data: map[string]string{"SourceImage": `C:\Users\Public\x.exe`, "TargetImage": target, "GrantedAccess": "0x1FFFFF", "CallTrace": trace}}
+	}
+	ntdllFirst := `C:\Windows\SYSTEM32\ntdll.dll+9d4c4|C:\Windows\System32\KERNELBASE.dll+2c13e|UNKNOWN(000001F2A3B0C1D2)`
+	if fs := eventFindings(ev(`C:\Windows\system32\lsass.exe`, ntdllFirst)); len(fs) != 0 {
+		t.Errorf("an ordinary trace (even with injected frames further up): %+v", fs)
+	}
+	direct := `UNKNOWN(000001F2A3B0C1D2)|UNKNOWN(000001F2A3B0A000)`
+	_, fs, keep := classifyWinEvent(ev(`C:\Windows\system32\lsass.exe`, direct), nil)
+	if !keep || len(fs) != 1 || fs[0].Rule != "defense.direct_syscall" || fs[0].Severity != SevCritical ||
+		fs[0].Technique != "T1003.001" || !strings.Contains(fs[0].Detail, "2026-10-02T01:02:03Z") || !strings.Contains(fs[0].Detail, "NanoDump") {
+		t.Fatalf("direct syscall into LSASS: keep %v, %+v", keep, fs)
+	}
+	fs = eventFindings(ev(`C:\Windows\notepad.exe`, " unknown(00007FF6)|x"))
+	if len(fs) != 1 || fs[0].Severity != SevSuspect || !strings.Contains(fs[0].Detail, "Chromium") {
+		t.Errorf("direct syscall into another process: %+v", fs)
+	}
+	other := ev(`C:\Windows\system32\lsass.exe`, direct)
+	other.Provider, other.Channel = "Microsoft-Windows-Kernel-General", "System"
+	if fs := eventFindings(other); len(fs) != 0 {
+		t.Errorf("event 10 from another provider: %+v", fs)
+	}
+	if fs := eventFindings(ev(`C:\Windows\system32\lsass.exe`, "")); len(fs) != 0 {
+		t.Errorf("no call trace: %+v", fs)
+	}
+}

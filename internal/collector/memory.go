@@ -242,6 +242,9 @@ var memoryRecordKeys = []string{
 	// Hardware breakpoints and vectored exception handlers (Windows): threads
 	// read, breakpoints armed, handlers found and where they point.
 	"exception_hooks",
+	// System calls (Windows): threads in one, direct and indirect calls,
+	// stubs found in memory no image backs, extra copies of ntdll.
+	"syscalls",
 }
 
 // memoryRecords turns sidecar responses into one record per process (every

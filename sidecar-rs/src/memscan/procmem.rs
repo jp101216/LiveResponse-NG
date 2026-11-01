@@ -2,6 +2,7 @@
 
 use super::hooks;
 use super::integrity::Report;
+use super::syscalls;
 use std::time::Instant;
 
 /// One committed, readable memory region.
@@ -72,8 +73,10 @@ pub trait ProcessMemory {
         Report::unsupported()
     }
     /// Hardware breakpoints in the process's threads and its vectored
-    /// exception handlers (see hooks.rs), on platforms that have them.
-    fn exception_hooks(&self) -> Option<hooks::Report> {
+    /// exception handlers (hooks.rs), and its system calls (syscalls.rs), on
+    /// platforms that have them; the search of memory for system-call stubs
+    /// stops at `deadline`.
+    fn thread_checks(&self, _deadline: Instant) -> Option<(hooks::Report, syscalls::Report)> {
         None
     }
 }

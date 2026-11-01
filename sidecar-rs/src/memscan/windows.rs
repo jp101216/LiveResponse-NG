@@ -242,8 +242,11 @@ impl ProcessMemory for WinProcess {
         rep
     }
 
-    fn exception_hooks(&self) -> Option<super::hooks::Report> {
-        Some(super::windows_hooks::read(self))
+    fn thread_checks(
+        &self,
+        deadline: Instant,
+    ) -> Option<(super::hooks::Report, super::syscalls::Report)> {
+        Some(super::windows_hooks::read(self, deadline))
     }
 }
 
@@ -385,6 +388,11 @@ fn kind_name(t: u32) -> &'static str {
     }
 }
 
+/// The Windows self-tests plant things in their own process; one at a time,
+/// so none sees another's.
+#[cfg(test)]
+pub(crate) static SELFTEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +410,7 @@ mod tests {
     /// copy, and the check must find exactly that rewrite.
     #[test]
     fn integrity_finds_a_rewritten_image() {
+        let _serial = SELFTEST.lock();
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
         let dst = std::env::temp_dir().join(format!("lrng-integrity-{}.dll", std::process::id()));
         std::fs::copy(format!(r"{root}\System32\version.dll"), &dst).unwrap();

@@ -164,12 +164,13 @@ jobs:
           go build -o lrng.exe ./cmd/lrng
           cargo build --locked --release --manifest-path sidecar-rs/Cargo.toml
           Copy-Item sidecar-rs/target/release/lrng-sidecar.exe .
-      - name: image-integrity and exception-hook self-tests (the real Windows loader)
+      - name: image-integrity, exception-hook and system-call self-tests (the real Windows loader)
         shell: pwsh
         run: |
           # Every module the test process loads must compare clean with its file; then a
           # rewrite planted in its own copy of a DLL must be found at the right address.
-          # Likewise hardware breakpoints and vectored handlers planted in the test process.
+          # Likewise hardware breakpoints, vectored handlers, system-call stubs, threads
+          # posed in system calls and extra ntdll mappings planted in the test process.
           # The test's "lrng-selftest:" lines, and any panic with its message, are raised
           # as annotations so the outcome reads from the checks API, not only the log.
           $out = @(cargo test --locked --release --manifest-path sidecar-rs/Cargo.toml memscan::windows -- --nocapture 2>&1 | ForEach-Object { "$_" })
@@ -216,8 +217,15 @@ jobs:
           $eh = @($recs | ForEach-Object { $_.fields.exception_hooks } | Where-Object { $_ })
           Write-Output ("::notice::exception hooks (live PowerShell): " + ($eh | ConvertTo-Json -Compress -Depth 6))
           if ($eh.Count -lt 1 -or $eh[0].threads -lt 1 -or -not $eh[0].handlers_walked) { throw "exception hooks weren't read in a live process" }
+          # System calls: its threads waiting in the kernel all called through ntdll and
+          # return into its modules, and no stub sits in memory no image backs.
+          $sc = @($recs | ForEach-Object { $_.fields.syscalls } | Where-Object { $_ })
+          Write-Output ("::notice::system calls (live PowerShell): " + ($sc | ConvertTo-Json -Compress -Depth 6))
+          if ($sc.Count -lt 1 -or -not $sc[0].supported -or $sc[0].threads_in_syscall -lt 1 -or $sc[0].ntdll_stubs_known -lt 300) { throw "system calls weren't checked in a live process" }
           foreach ($rule in 'memory.image_code_modified', 'memory.image_header_mismatch', 'memory.image_exec_outside_code', 'defense.amsi_patched', 'defense.etw_patched',
-                            'defense.amsi_hwbp', 'defense.etw_hwbp', 'memory.hardware_breakpoint', 'memory.veh_unbacked') {
+                            'defense.amsi_hwbp', 'defense.etw_hwbp', 'memory.hardware_breakpoint', 'memory.veh_unbacked',
+                            'defense.direct_syscall', 'defense.indirect_syscall', 'defense.syscall_return_nonexec', 'defense.syscall_hwbp',
+                            'memory.syscall_stub', 'defense.ntdll_second_copy') {
             if ($r.summary.by_rule.$rule) { throw "false positive: $rule on a clean PowerShell process" }
           }
 

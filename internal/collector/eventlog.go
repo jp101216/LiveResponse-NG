@@ -521,8 +521,45 @@ func eventFindings(ev winEvent) []Finding {
 		if isSysmon(ev) {
 			out = append(out, driverLoadFindings(ev)...)
 		}
+	case 10: // Sysmon: a process was opened
+		if isSysmon(ev) {
+			out = append(out, processAccessFindings(ev)...)
+		}
 	}
 	return out
+}
+
+// processAccessFindings judges a Sysmon process-access event by its call
+// trace, the user-mode stack that opened the handle. Its first frame is the
+// code that made the system call: normally ntdll's NtOpenProcess stub. A
+// trace that starts in code no module backs ("UNKNOWN(...)") made the call
+// itself: a direct syscall from injected code, which is how NanoDump and
+// Dumpert open LSASS without passing EDR hooks.
+func processAccessFindings(ev winEvent) []Finding {
+	first, _, _ := strings.Cut(evData(ev, "CallTrace"), "|")
+	first = strings.TrimSpace(first)
+	if !strings.HasPrefix(strings.ToUpper(first), "UNKNOWN(") {
+		return nil
+	}
+	src := firstNonEmpty(evData(ev, "SourceImage"), "a process")
+	dst := firstNonEmpty(evData(ev, "TargetImage"), "another process")
+	when := ""
+	if !ev.TimeCreated.IsZero() {
+		when = " at " + ev.TimeCreated.UTC().Format(time.RFC3339)
+	}
+	f := Finding{
+		Rule: "defense.direct_syscall", Severity: SevSuspect, Technique: "T1106", Confidence: 60,
+		Detail: fmt.Sprintf("%s opened %s%s (access %s) with a system call made from code no module backs (the call trace starts at %s), "+
+			"not through ntdll: a direct syscall. Chromium-based apps (Teams, Discord, VS Code) and some games and security products do this too",
+			src, dst, when, firstNonEmpty(evData(ev, "GrantedAccess"), "unknown"), first),
+	}
+	if baseName(dst) == "lsass.exe" {
+		f.Severity, f.Technique, f.Confidence = SevCritical, "T1003.001", 80
+		f.Detail = fmt.Sprintf("%s opened LSASS%s (access %s) with a system call made from code no module backs (the call trace starts at %s), "+
+			"not through ntdll: a direct syscall, the way NanoDump and Dumpert reach LSASS to dump credentials past EDR hooks",
+			src, when, firstNonEmpty(evData(ev, "GrantedAccess"), "unknown"), first)
+	}
+	return []Finding{f}
 }
 
 // isSysmon reports whether an event comes from Sysmon, whose event ids

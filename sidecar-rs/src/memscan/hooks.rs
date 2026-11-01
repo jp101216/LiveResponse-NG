@@ -56,6 +56,8 @@ pub struct Breakpoint {
     pub module: String,
     /// "Export+0xoff" in that image, or "".
     pub symbol: String,
+    /// The address is in one of ntdll's system-call stubs.
+    pub syscall_stub: bool,
 }
 
 /// The breakpoints a thread has armed, from its Dr0-Dr3 and Dr7. A slot is
@@ -88,6 +90,7 @@ pub fn armed(tid: u32, dr: [usize; 4], dr7: usize) -> Vec<Breakpoint> {
             len,
             module: String::new(),
             symbol: String::new(),
+            syscall_stub: false,
         });
     }
     out
@@ -170,6 +173,12 @@ fn is_etw(b: &Breakpoint) -> bool {
         && offset_of(&b.symbol).is_some_and(|o| o < ETW_REACH)
         && symbol_names(&b.symbol)
             .any(|n| ETW_WRITERS.contains(&n) || n == "NtTraceControl" || n == "ZwTraceControl")
+}
+
+/// A breakpoint in a system-call stub (other than ETW's): TamperingSyscalls
+/// and LayeredSyscall break there so a handler can rewrite the call.
+fn is_syscall(b: &Breakpoint) -> bool {
+    b.module == "ntdll.dll" && b.watch == Watch::Execute && b.syscall_stub && !is_etw(b)
 }
 
 fn where_(b: &Breakpoint) -> String {
@@ -258,10 +267,11 @@ impl Report {
         };
         let amsi: Vec<&Breakpoint> = self.breakpoints.iter().filter(|b| is_amsi(b)).collect();
         let etw: Vec<&Breakpoint> = self.breakpoints.iter().filter(|b| is_etw(b)).collect();
+        let syscall: Vec<&Breakpoint> = self.breakpoints.iter().filter(|b| is_syscall(b)).collect();
         let other: Vec<&Breakpoint> = self
             .breakpoints
             .iter()
-            .filter(|b| !is_amsi(b) && !is_etw(b))
+            .filter(|b| !is_amsi(b) && !is_etw(b) && !is_syscall(b))
             .collect();
         if let Some(first) = amsi.first() {
             out.push(hit(
@@ -287,6 +297,20 @@ impl Report {
                 format!(
                     "hardware breakpoint on ntdll's ETW event writer: {}. An exception handler can return before the event is written, blinding event tracing without changing a byte of code: the patchless ETW bypass.{}{debugger}",
                     list(&etw),
+                    self.handler_note()
+                ),
+            ));
+        }
+        if let Some(first) = syscall.first() {
+            out.push(hit(
+                "defense.syscall_hwbp",
+                sev,
+                "T1106",
+                if debugged { 50 } else { 80 },
+                first.addr,
+                format!(
+                    "hardware breakpoint on ntdll's system-call stub: {}. An exception handler there can change the call's arguments or number on its way into the kernel, after hooks and logging have seen a harmless one: TamperingSyscalls and LayeredSyscall work this way.{}{debugger}",
+                    list(&syscall),
                     self.handler_note()
                 ),
             ));
@@ -374,6 +398,7 @@ mod tests {
             len: 1,
             module: module.into(),
             symbol: symbol.into(),
+            syscall_stub: false,
         }
     }
 
@@ -481,6 +506,36 @@ mod tests {
             .context
             .contains("vectored exception handler points to 0x5000, in RWX private memory"));
         assert_eq!(r.meta()["handlers_unbacked"], 1);
+    }
+
+    #[test]
+    fn a_breakpoint_on_a_system_call_stub() {
+        let mut sys = bp(
+            "ntdll.dll",
+            "NtAllocateVirtualMemory/ZwAllocateVirtualMemory+0x12",
+            0x10,
+        );
+        sys.syscall_stub = true;
+        // ETW's stub stays ETW; a non-stub ntdll export stays ordinary.
+        let mut etw = bp("ntdll.dll", "NtTraceEvent/ZwTraceEvent+0x0", 0x20);
+        etw.syscall_stub = true;
+        let r = Report {
+            supported: true,
+            breakpoints: vec![sys, etw, bp("ntdll.dll", "RtlAllocateHeap+0x0", 0x30)],
+            ..Default::default()
+        };
+        assert_eq!(
+            rules(&r),
+            [
+                ("defense.etw_hwbp", "critical"),
+                ("defense.syscall_hwbp", "critical"),
+                ("memory.hardware_breakpoint", "notable"),
+            ]
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+        );
+        assert!(r.hits()[1]
+            .context
+            .contains("ntdll.dll!NtAllocateVirtualMemory/ZwAllocateVirtualMemory+0x12"));
     }
 
     #[test]

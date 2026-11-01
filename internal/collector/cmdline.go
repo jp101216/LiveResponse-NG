@@ -107,7 +107,19 @@ var (
 	// atexec's scheduled task: "cmd.exe /C <command> > %windir%\Temp\<8
 	// letters>.tmp 2>&1".
 	reAtexec = regexp.MustCompile(`(?:^|[\s"\\/])cmd(?:\.exe)?"?\s+/c\s.*\s>\s*(?:%windir%|%systemroot%|[a-z]:\\windows)\\temp\\[a-z]{8}\.tmp\s+2>&1\s*$`)
+
+	// Windows PowerShell started as version 2 ("-Version 2" and every
+	// prefix of -Version). Only switches, each with at most one bare value,
+	// may come before it, so a "-v 2" inside the script itself doesn't count.
+	// (pwsh has no version 2: its -v prints the version.)
+	rePSDowngrade = regexp.MustCompile(`(?:^|[\s"'\\/])powershell(?:\.exe)?"?\s+(?:[-/\x{2013}\x{2014}\x{2015}]\S+\s+(?:[^-/\s"'\x{2013}\x{2014}\x{2015}]\S*\s+)?)*?[-/\x{2013}\x{2014}\x{2015}]v(?:e(?:r(?:s(?:i(?:o(?:n)?)?)?)?)?)?\s+["']?2(?:\.0)?(?:$|[\s"'])`)
+	// A Chromium browser's DevTools port or pipe.
+	reRemoteDebug = regexp.MustCompile(`--remote-debugging-(?:port|pipe)\b`)
 )
+
+// chromiumBrowsers are the browsers whose own profile remote debugging
+// exposes (each keeps it under "…\User Data").
+var chromiumBrowsers = set("chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe", "chromium.exe")
 
 // cmdRule is one analytic. match returns a short description of what was
 // seen ("" means no match).
@@ -328,6 +340,42 @@ var cmdRules = []cmdRule{
 	{"lateral.atexec", SevCritical, "T1053.005", 80, func(c *cmdInput) string {
 		if reAtexec.MatchString(c.lower) {
 			return "runs a command the way Impacket's atexec does, its output sent to an 8-letter .tmp file in the Windows Temp folder for reading back over SMB: remote execution through a scheduled task"
+		}
+		return ""
+	}},
+	{"defense.powershell_downgrade", SevSuspect, "T1562.010", 65, func(c *cmdInput) string {
+		if rePSDowngrade.MatchString(c.lower) {
+			return "starts PowerShell 2.0, which has no script-block logging, no AMSI and no Constrained Language enforcement (a downgrade attack)"
+		}
+		return ""
+	}},
+	{"cred.browser_remote_debugging", SevSuspect, "T1539", 70, func(c *cmdInput) string {
+		if !reRemoteDebug.MatchString(c.lower) || c.has("--type=") {
+			return "" // the browser's own child processes carry --type=
+		}
+		browser := chromiumBrowsers[c.image]
+		for name := range chromiumBrowsers {
+			browser = browser || (c.image == "" && c.has(name))
+		}
+		if !browser {
+			return ""
+		}
+		// A throwaway profile is test automation (Selenium, Puppeteer,
+		// Playwright); the user's own is "…\User Data" or no
+		// --user-data-dir at all.
+		if i := strings.Index(c.lower, "--user-data-dir"); i >= 0 && !strings.Contains(c.lower[i:], `\user data`) {
+			return ""
+		}
+		what := "starts the browser with remote debugging on the user's own profile"
+		if c.has("--headless") {
+			what += ", headless"
+		}
+		return what + ": any local program can then read every cookie and signed-in session through the DevTools protocol, " +
+			"which is how infostealers get past Chrome's app-bound cookie encryption"
+	}},
+	{"network.portproxy_rule", SevSuspect, "T1090.001", 55, func(c *cmdInput) string {
+		if c.tok("netsh") && c.has("portproxy") && any2(c, " add ", " set ") {
+			return "adds a netsh port-proxy rule: the host relays connections from a local port to another address, a pivot deeper into the network (often to RDP)"
 		}
 		return ""
 	}},

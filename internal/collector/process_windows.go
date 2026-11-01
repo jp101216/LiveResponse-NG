@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -168,12 +169,27 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 	}
 
 	tree := analyzeProcessTree(views, systemRoot())
-	hashed := 0
+	hashed, envRead, envUnread := 0, 0, 0
 	for i, r := range rows {
 		findings := tree[r.e.pid]
 		if !views[i].Self && r.d.commandLine != "" {
 			findings = mergeFindings(findings, analyzeCommandLine(
 				fmt.Sprintf("process %s (pid %d) command line", r.e.name, r.e.pid), r.d.imagePath, r.d.commandLine)...)
+		}
+		// The .NET runtime's environment variables (ETW off, profilers).
+		if r.e.pid > 4 && !views[i].Self && !strings.EqualFold(r.e.name, "lsass.exe") {
+			if env, err := processRuntimeEnv(r.e.pid); err != nil {
+				envUnread++
+			} else {
+				envRead++
+				if len(env) > 0 {
+					r.fields["runtime_env"] = env
+					sid := r.d.userSID
+					findings = mergeFindings(findings, runtimeEnvFindings(
+						fmt.Sprintf("process %s (pid %d)'s environment", r.e.name, r.e.pid), env,
+						func(clsid string) string { return clsidServer(sid, clsid) })...)
+				}
+			}
 		}
 		if r.d.imagePath != "" && ctx.Err() == nil {
 			opts.Hasher.Fields(ctx, r.fields, "image", r.d.imagePath)
@@ -189,6 +205,8 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 	}
 	res.SetMeta("system_root", systemRoot())
 	res.SetMeta("images_hashed", hashed)
+	res.SetMeta("environments_read", envRead)
+	res.SetMeta("environments_unreadable", envUnread)
 	res.SetMeta("hashing", opts.Hasher != nil)
 	res.SetMeta("signature_checks", opts.Signer != nil)
 	if opts.Hasher != nil && ctx.Err() != nil {

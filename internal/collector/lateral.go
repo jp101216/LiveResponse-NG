@@ -191,7 +191,7 @@ func printable(b []byte, max int) string {
 // lateralReport turns the host's pipes and leftover files into records:
 // one summary (every pipe's name), one per pipe a known tool uses, one per
 // leftover file.
-func lateralReport(res *Result, pipes []string, files []leftoverFile) {
+func lateralReport(res *Result, pipes []string, files []leftoverFile, proxies []portProxy) {
 	flagged := 0
 	for _, name := range pipes {
 		if r, ok := judgePipe(name); ok {
@@ -214,6 +214,9 @@ func lateralReport(res *Result, pipes []string, files []leftoverFile) {
 		res.Add(map[string]any{"kind": "file", "path": f.Path, "size": f.Size, "modified": f.Modified.UTC().Format(time.RFC3339),
 			"content": f.Content}, finding)
 	}
+	for _, p := range proxies {
+		res.Add(map[string]any{"kind": "portproxy", "proxy": p.Kind, "listen": p.Listen, "connect": p.Connect}, portProxyFinding(p))
+	}
 }
 
 // maxPipesListed caps the pipe names kept in the summary record.
@@ -225,4 +228,42 @@ type leftoverFile struct {
 	Size       int64
 	Modified   time.Time
 	Content    string // the start of it, printable
+}
+
+// portProxy is one netsh port-proxy rule (SYSTEM\CurrentControlSet\Services\
+// PortProxy\<kind>\tcp: the value name is "address/port" listened on, its
+// data "address/port" relayed to).
+type portProxy struct {
+	Kind    string // v4tov4, v4tov6, v6tov4, v6tov6
+	Listen  string
+	Connect string
+}
+
+// proxyEnd splits a port-proxy end ("10.0.0.5/3389") into address and port.
+func proxyEnd(s string) (addr, port string) {
+	s = strings.TrimSpace(s)
+	if i := strings.LastIndexByte(s, '/'); i >= 0 {
+		return s[:i], s[i+1:]
+	}
+	return s, ""
+}
+
+// pivotPorts are services a relay into the network is usually aimed at.
+var pivotPorts = set("22", "88", "135", "139", "389", "445", "636", "1433", "3389", "5985", "5986")
+
+// portProxyFinding judges a port-proxy rule: the IP Helper service listens
+// on one port and relays every connection to another address. Developers
+// forward ports into WSL or a local VM this way; intruders use it to pivot,
+// usually to RDP, SMB or WinRM on a host further in.
+func portProxyFinding(p portProxy) Finding {
+	laddr, lport := proxyEnd(p.Listen)
+	caddr, cport := proxyEnd(p.Connect)
+	f := Finding{Rule: "network.portproxy_rule", Severity: SevNotable, Technique: "T1090.001", Confidence: 45,
+		Detail: fmt.Sprintf("a port proxy (%s) relays connections to %s port %s on to %s port %s (netsh interface portproxy)",
+			p.Kind, firstNonEmpty(laddr, "*"), firstNonEmpty(lport, "?"), firstNonEmpty(caddr, "?"), firstNonEmpty(cport, "?"))}
+	if pivotPorts[cport] || publicIP(caddr) {
+		f.Severity, f.Confidence = SevSuspect, 65
+		f.Detail += ": a relay to a remote-access, directory or file-sharing service, the shape of a pivot into the network"
+	}
+	return f
 }

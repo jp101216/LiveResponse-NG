@@ -567,6 +567,16 @@ func eventFindings(ev winEvent) []Finding {
 		out = append(out, certRequestFindings(ev)...)
 	case 4898, 4899: // Certificate Services loaded / updated a certificate template
 		out = append(out, certTemplateFindings(ev)...)
+	case 400: // Windows PowerShell: an engine started (version 2 is a downgrade)
+		out = append(out, psEngineFindings(ev)...)
+	case 8: // Sysmon: a thread was created in another process
+		if isSysmon(ev) {
+			out = append(out, remoteThreadFindings(ev)...)
+		}
+	case 25: // Sysmon: process tampering (hollowing, herpaderping)
+		if isSysmon(ev) {
+			out = append(out, tamperingFindings(ev)...)
+		}
 	case 41: // KDC: a certificate's SID didn't match the account it maps to (Kernel-Power writes a 41 too)
 		if isKDC(ev) {
 			out = append(out, kdcCertificateFindings(ev)...)

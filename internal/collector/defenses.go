@@ -297,3 +297,57 @@ func defensesReport(res *Result, d defenderState, c credentialState) {
 	f, fs = credentialReport(c)
 	res.Add(f, fs...)
 }
+
+// amsiProvider is one antimalware provider registered with AMSI
+// (SOFTWARE\Microsoft\AMSI\Providers\{CLSID}) and the DLL its CLSID loads.
+type amsiProvider struct {
+	CLSID string
+	DLL   string
+}
+
+// amsiState is what AMSI's provider registration reads as.
+type amsiState struct {
+	Present   bool // the Providers key exists (Windows 10 and later)
+	Providers []amsiProvider
+}
+
+// amsiReport adds the AMSI record: each provider judged, and none at all
+// while Defender is installed (removing the provider's key blinds AMSI).
+func amsiReport(res *Result, a amsiState, defenderInstalled bool) {
+	if !a.Present {
+		return
+	}
+	var listed []string
+	var out []Finding
+	for _, p := range a.Providers {
+		listed = append(listed, "{"+strings.ToUpper(strings.Trim(p.CLSID, "{}"))+"} "+firstNonEmpty(p.DLL, "(no DLL registered)"))
+		if f, ok := judgeAMSIProvider(p.CLSID, p.DLL); ok {
+			out = append(out, f)
+		}
+	}
+	if len(a.Providers) == 0 && defenderInstalled {
+		out = append(out, Finding{Rule: "defense.amsi_provider_missing", Severity: SevSuspect, Technique: "T1562.001", Confidence: 60,
+			Detail: "no antimalware provider is registered with AMSI although Microsoft Defender is installed: scripts, macros and " +
+				"in-memory .NET assemblies go unscanned. Deleting the provider's key under SOFTWARE\\Microsoft\\AMSI\\Providers is an " +
+				"AMSI bypass that survives reboots"})
+	}
+	res.Add(map[string]any{"area": "amsi", "providers": listed}, out...)
+}
+
+// envSource is one place the .NET runtime variables were found set: the
+// system's environment, a user's, or a service's.
+type envSource struct {
+	Where string
+	Env   map[string]string
+	// Resolve maps a profiler CLSID to its DLL as COM would for this source.
+	Resolve func(clsid string) string `json:"-"`
+}
+
+// runtimeEnvReport adds a record for every registry environment that sets
+// one of the .NET runtime variables, judged.
+func runtimeEnvReport(res *Result, sources []envSource) {
+	for _, s := range sources {
+		res.Add(map[string]any{"area": "environment", "where": s.Where, "variables": s.Env},
+			runtimeEnvFindings(s.Where, s.Env, s.Resolve)...)
+	}
+}

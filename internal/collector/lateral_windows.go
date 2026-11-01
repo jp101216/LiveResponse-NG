@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/jp101216/liveresponse-ng/internal/winreg"
 )
 
 // outputRead is how much of a leftover output file is kept in its record.
@@ -20,8 +22,29 @@ func collectLateral(ctx context.Context) (Result, error) {
 	if err != nil {
 		res.Fail("named pipes: " + err.Error())
 	}
-	lateralReport(res, pipes, leftoverFiles(ctx))
+	lateralReport(res, pipes, leftoverFiles(ctx), readPortProxies())
 	return res.Finish(), nil
+}
+
+// portProxyKey holds netsh's port-proxy rules, which the IP Helper service
+// applies.
+const portProxyKey = `SYSTEM\CurrentControlSet\Services\PortProxy`
+
+// readPortProxies lists the TCP port-proxy rules of every address family pair.
+func readPortProxies() []portProxy {
+	var out []portProxy
+	for _, kind := range []string{"v4tov4", "v4tov6", "v6tov4", "v6tov6"} {
+		k, err := winreg.Open(winreg.LocalMachine, portProxyKey+`\`+kind+`\tcp`)
+		if err != nil {
+			continue
+		}
+		vals, _ := k.Values()
+		k.Close()
+		for _, v := range vals {
+			out = append(out, portProxy{Kind: kind, Listen: v.Name, Connect: v.String()})
+		}
+	}
+	return out
 }
 
 // listPipes lists every named pipe on the host (FindFirstFile over

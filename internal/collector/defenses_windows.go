@@ -5,6 +5,7 @@ package collector
 import (
 	"context"
 	"sort"
+	"strings"
 
 	"github.com/jp101216/liveresponse-ng/internal/winreg"
 )
@@ -24,8 +25,99 @@ var exclusionKeys = []struct{ kind, key string }{
 
 func collectDefenses(ctx context.Context) (Result, error) {
 	res := NewResult("defenses")
-	defensesReport(res, readDefender(), readCredentials())
+	d := readDefender()
+	defensesReport(res, d, readCredentials())
+	amsiReport(res, readAMSI(), !d.NotInstalled)
+	runtimeEnvReport(res, readRuntimeEnv())
 	return res.Finish(), nil
+}
+
+const (
+	amsiProvidersKey = `SOFTWARE\Microsoft\AMSI\Providers`
+	sessionEnvKey    = `SYSTEM\CurrentControlSet\Control\Session Manager\Environment`
+	servicesRegKey   = `SYSTEM\CurrentControlSet\Services`
+)
+
+// readAMSI lists the AMSI providers and the DLL each CLSID registers.
+func readAMSI() amsiState {
+	k, err := winreg.Open(winreg.LocalMachine, amsiProvidersKey)
+	if err != nil {
+		return amsiState{}
+	}
+	subs, _ := k.SubKeys()
+	k.Close()
+	a := amsiState{Present: true}
+	for _, clsid := range subs {
+		a.Providers = append(a.Providers, amsiProvider{CLSID: clsid, DLL: clsidServer("", clsid)})
+	}
+	return a
+}
+
+// clsidServer returns the DLL a COM class registers (its InprocServer32),
+// looking in a user's own classes first when sid is given, as COM does for
+// that user's processes, then in the machine's.
+func clsidServer(sid, clsid string) string {
+	c := "{" + strings.Trim(strings.TrimSpace(clsid), "{}") + "}"
+	if sid != "" {
+		if v, err := winreg.ReadValue(winreg.Users, sid+`_Classes\CLSID\`+c+`\InprocServer32`, ""); err == nil {
+			if s, _ := regString(v, ""); s != "" {
+				return s
+			}
+		}
+	}
+	if v, err := winreg.ReadValue(winreg.LocalMachine, `SOFTWARE\Classes\CLSID\`+c+`\InprocServer32`, ""); err == nil {
+		s, _ := regString(v, "")
+		return s
+	}
+	return ""
+}
+
+// readRuntimeEnv finds the .NET runtime variables set in the system's
+// environment, each loaded user's, and each service's (a service's
+// Environment value is a list of NAME=value strings its processes start with).
+func readRuntimeEnv() []envSource {
+	var out []envSource
+	fromKey := func(root winreg.Root, path, where, sid string) {
+		k, err := winreg.Open(root, path)
+		if err != nil {
+			return
+		}
+		vals, err := k.Values()
+		k.Close()
+		if err != nil {
+			return
+		}
+		env := map[string]string{}
+		for _, v := range vals {
+			if runtimeEnvVar(v.Name) {
+				s, _ := regString(v, "")
+				env[strings.ToUpper(v.Name)] = s
+			}
+		}
+		if len(env) > 0 {
+			out = append(out, envSource{Where: where, Env: env, Resolve: func(c string) string { return clsidServer(sid, c) }})
+		}
+	}
+	fromKey(winreg.LocalMachine, sessionEnvKey, `the system environment (HKLM\`+sessionEnvKey+`)`, "")
+	hives, _ := loadedUserHives()
+	for _, sid := range hives {
+		fromKey(winreg.Users, sid+`\Environment`, `user `+sid+`'s environment (HKU\`+sid+`\Environment)`, sid)
+	}
+	if k, err := winreg.Open(winreg.LocalMachine, servicesRegKey); err == nil {
+		svcs, _ := k.SubKeys()
+		k.Close()
+		for _, svc := range svcs {
+			v, err := winreg.ReadValue(winreg.LocalMachine, servicesRegKey+`\`+svc, "Environment")
+			if err != nil {
+				continue
+			}
+			if env := parseEnvBlock(v.Strings()); len(env) > 0 {
+				out = append(out, envSource{Where: `service ` + svc + `'s environment (HKLM\` + servicesRegKey + `\` + svc + `\Environment)`,
+					Env: env, Resolve: func(c string) string { return clsidServer("", c) }})
+			}
+		}
+	}
+	return out
 }
 
 func readDefender() defenderState {

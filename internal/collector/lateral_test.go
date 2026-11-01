@@ -77,10 +77,18 @@ func TestLateralReport(t *testing.T) {
 	res := NewResult("lateral")
 	mod := time.Date(2026, 10, 30, 1, 2, 3, 0, time.UTC)
 	lateralReport(res, []string{"spoolss", "msagent_7c", "PSEXESVC", "lsass"},
-		[]leftoverFile{{Path: `C:\Windows\__1698765432.123`, Name: "__1698765432.123", Size: 19, Modified: mod, Content: "nt authority\\system"}})
+		[]leftoverFile{{Path: `C:\Windows\__1698765432.123`, Name: "__1698765432.123", Size: 19, Modified: mod, Content: "nt authority\\system"}},
+		[]portProxy{{Kind: "v4tov4", Listen: "0.0.0.0/4444", Connect: "10.0.0.5/3389"}, {Kind: "v4tov4", Listen: "127.0.0.1/8080", Connect: "172.20.1.2/8080"}})
 	got := res.Finish()
-	if len(got.Records) != 4 {
-		t.Fatalf("want 2 pipes, a summary and a file: %+v", got.Records)
+	if len(got.Records) != 6 {
+		t.Fatalf("want 2 pipes, a summary, a file and 2 port proxies: %+v", got.Records)
+	}
+	if p := got.Records[4]; p.Fields["kind"] != "portproxy" || p.Findings[0].Rule != "network.portproxy_rule" || p.Findings[0].Severity != SevSuspect ||
+		!strings.Contains(p.Findings[0].Detail, "0.0.0.0 port 4444 on to 10.0.0.5 port 3389") {
+		t.Errorf("RDP pivot: %+v", p)
+	}
+	if p := got.Records[5]; p.Findings[0].Severity != SevNotable {
+		t.Errorf("WSL forward: %+v", p)
 	}
 	sum := got.Records[2].Fields
 	if sum["kind"] != "summary" || sum["pipes"] != 4 || sum["pipes_flagged"] != 2 || len(sum["pipe_names"].([]string)) != 4 {

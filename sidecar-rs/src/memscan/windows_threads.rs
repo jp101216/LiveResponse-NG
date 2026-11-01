@@ -150,7 +150,15 @@ pub(super) fn read(
     let jit = jit_ranges(p);
     rep.jit_ranges = jit.as_ref().map(Vec::len);
     if cfg!(target_arch = "x86_64") {
-        walk_all(p, regs, jit.as_deref(), &mut mods, deadline, &mut rep);
+        walk_all(
+            p,
+            regs,
+            starts,
+            jit.as_deref(),
+            &mut mods,
+            deadline,
+            &mut rep,
+        );
     }
     (rep, jit)
 }
@@ -288,6 +296,7 @@ impl<'a> Stack<'a> {
 fn walk_all(
     p: &WinProcess,
     regs: &[Regs],
+    starts: &[(u32, usize)],
     jit: Option<&[(usize, usize)]>,
     mods: &mut Modules,
     deadline: Instant,
@@ -324,7 +333,18 @@ fn walk_all(
         let (walked, frames) = walk(p, r, base, &m, jit, mods);
         rep.frames += frames.len();
         match walked {
-            Walked::Complete => rep.complete += 1,
+            Walked::Complete => {
+                rep.complete += 1;
+                let start = starts.iter().find(|(t, _)| *t == r.tid).map(|&(_, a)| a);
+                if let Some(f) = judge_ends(p, r, &frames, start, mods) {
+                    // Still blocked where it was: the frames are the ones it waits with.
+                    if still_in_call(p, r, None) {
+                        rep.stacks.push(f);
+                    } else {
+                        rep.moved += 1;
+                    }
+                }
+            }
             Walked::Jit => rep.jit_frames += 1,
             Walked::Stopped(why) => *rep.stopped.entry(why.into()).or_default() += 1,
             Walked::Finding(f, slot) => {
@@ -402,6 +422,10 @@ pub(super) fn walk(
         match (m.base, m.exec) {
             (Some(base), true) => {
                 let module = module_at(p, mods, base);
+                if let Some(insn) = jump_gadget(p, pc) {
+                    let symbol = module.name(base, pc, true);
+                    return (finding(Frame::Gadget { symbol, insn }, chain), frames);
+                }
                 if let Some(false) = preceded_by_call(p, pc) {
                     let symbol = module.name(base, pc, true);
                     return (finding(Frame::NoCall { symbol }, chain), frames);
@@ -461,6 +485,122 @@ pub(super) fn walk(
         }
     }
     (Walked::Stopped("deeper than 64 frames"), frames)
+}
+
+/// The indirect jump through a register calls preserve that `pc` points at,
+/// if it does: what desynchronising stack spoofers return through.
+fn jump_gadget(p: &WinProcess, pc: usize) -> Option<&'static str> {
+    let mut b = [0u8; 2];
+    if p.read(pc, &mut b) != 2 || b[0] != 0xff {
+        return None;
+    }
+    Some(match b[1] {
+        0x23 => "jmp qword ptr [rbx]",
+        0xe3 => "jmp rbx",
+        0x26 => "jmp qword ptr [rsi]",
+        0xe6 => "jmp rsi",
+        0x27 => "jmp qword ptr [rdi]",
+        0xe7 => "jmp rdi",
+        _ => return None,
+    })
+}
+
+/// Modules a stack may legitimately end in: ntdll (RtlUserThreadStart,
+/// LdrInitializeThunk, fiber starts), the WoW64 layer, and kernel32's and
+/// kernelbase's fiber starts.
+fn ends_where_threads_begin(module: &str, symbol: &str) -> bool {
+    module == "ntdll.dll"
+        || module.starts_with("wow64")
+        || (matches!(module, "kernel32.dll" | "kernelbase.dll") && symbol.contains("FiberStart"))
+}
+
+/// Judge where a complete walk ended: early, at a frame that isn't where
+/// threads begin (the stack truncated); or through BaseThreadInitThunk
+/// calling a Windows API in a module the thread didn't start in (thread-start
+/// frames forged beneath the real caller).
+fn judge_ends(
+    p: &WinProcess,
+    r: &Regs,
+    frames: &[usize],
+    start: Option<usize>,
+    mods: &mut Modules,
+) -> Option<StackFinding> {
+    let named = |mods: &mut Modules, pc: usize| -> Option<(usize, Arc<Module>, String)> {
+        let base = locate(p, pc)?.base?;
+        let m = module_at(p, mods, base);
+        let name = m.name(base, pc, true);
+        Some((base, m, name))
+    };
+    let chain = |mods: &mut Modules, upto: usize| -> Vec<String> {
+        frames[..=upto]
+            .iter()
+            .enumerate()
+            .map(
+                |(i, &pc)| match named(mods, if i == 0 { pc - 2 } else { pc }) {
+                    Some((_, _, n)) => n,
+                    None => format!("0x{pc:x}"),
+                },
+            )
+            .collect()
+    };
+    let last = frames.len().checked_sub(1)?;
+    if last >= 1 {
+        let (_, m, symbol) = named(mods, frames[last])?;
+        if !ends_where_threads_begin(&m.name, &symbol) {
+            let mut c = chain(mods, last - 1);
+            c.push(
+                Frame::Truncated {
+                    symbol: symbol.clone(),
+                }
+                .describe(frames[last]),
+            );
+            return Some(StackFinding {
+                tid: r.tid,
+                addr: frames[last],
+                depth: last,
+                frame: Frame::Truncated { symbol },
+                chain: c,
+            });
+        }
+    }
+    // The frame BaseThreadInitThunk called.
+    let k = (1..frames.len()).find(|&i| {
+        named(mods, frames[i]).is_some_and(|(_, m, n)| {
+            m.name == "kernel32.dll" && n.contains("!BaseThreadInitThunk+")
+        })
+    })?;
+    let start = start?;
+    let (base1, m1, symbol) = named(mods, frames[k - 1])?;
+    let start_base = locate(p, start)?.base?;
+    let start_module = module_at(p, mods, start_base);
+    let system = m1.path.to_ascii_lowercase().contains(r"\system32\");
+    if !system
+        || start_base == base1
+        || matches!(
+            start_module.name.as_str(),
+            "kernel32.dll" | "kernelbase.dll"
+        )
+    {
+        return None;
+    }
+    let start_name = start_module.name(start_base, start, true);
+    let frame = Frame::FakeThreadStart {
+        symbol,
+        start: start_name,
+    };
+    let mut c = if k >= 2 {
+        chain(mods, k - 2)
+    } else {
+        Vec::new()
+    };
+    c.push(frame.describe(frames[k - 1]));
+    Some(StackFinding {
+        tid: r.tid,
+        addr: frames[k - 1],
+        depth: k - 1,
+        frame,
+        chain: c,
+    })
 }
 
 /// Whether the code just before `pc` ends with a call instruction; None when
@@ -593,6 +733,49 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!("the thread never blocked in the stub at 0x{stub:x}");
+    }
+
+    /// Read memory of this process the way the scan does (bytes read).
+    fn p_read(addr: usize, buf: &mut [u8]) -> usize {
+        let p = WinProcess {
+            h: unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() },
+        };
+        let n = p.read(addr, buf);
+        core::mem::forget(p); // the pseudo-handle isn't closed
+        n
+    }
+
+    /// A suspended thread (start routine `idle`) shown as blocked in a system
+    /// call: Rip just past a stub's `syscall`, Rsp at a stack we laid out.
+    /// Its own context goes back before it runs.
+    struct Posed(HANDLE, AlignedContext);
+
+    impl Posed {
+        fn new(rip: usize, rsp: usize) -> Posed {
+            // SAFETY: a suspended thread of our own, never run while posed.
+            unsafe {
+                let h = CreateThread(null(), 0, Some(idle), null(), CREATE_SUSPENDED, null_mut());
+                assert!(!h.is_null());
+                let mut s: AlignedContext = core::mem::zeroed();
+                s.0.ContextFlags = CONTEXT_CONTROL_AMD64;
+                assert_ne!(GetThreadContext(h, &mut s.0), 0);
+                let mut c = AlignedContext(s.0);
+                c.0.Rip = rip as u64;
+                c.0.Rsp = rsp as u64;
+                assert_ne!(SetThreadContext(h, &c.0), 0);
+                Posed(h, s)
+            }
+        }
+
+        fn release(self) {
+            // SAFETY: the thread's own context back, then it runs `idle`.
+            unsafe {
+                SetThreadContext(self.0, &self.1 .0);
+                ResumeThread(self.0);
+                WaitForSingleObject(self.0, INFINITE);
+                CloseHandle(self.0);
+            }
+        }
     }
 
     /// A thread created suspended at `start`, never run from there: its start
@@ -777,6 +960,52 @@ mod tests {
             s
         };
 
+        // Call-stack spoofing, posed the same way. A return address on a
+        // "jmp [rbx]" gadget in kernelbase's code:
+        let kb = export("kernelbase.dll", c"SleepEx");
+        let gadget = (kb..kb + 0x40000)
+            .find(|&a| {
+                let mut b = [0u8; 2];
+                p_read(a, &mut b) == 2 && b == [0xFF, 0x23]
+            })
+            .expect("a jmp [rbx] gadget in kernelbase");
+        unsafe { *((data + 0xC00) as *mut u64) = gadget as u64 };
+        // A stack that ends after WaitForSingleObjectEx (its caller's return
+        // address zeroed), from the real waiter's first frame:
+        unsafe { *((data + 0xA00) as *mut u64) = theirs[1] as u64 };
+        let gadget_pose = Posed::new(wait + sc + 2, data + 0xC00);
+        let truncated_pose = Posed::new(wait + sc + 2, data + 0xA00);
+        // A thread really started at SleepEx (a Windows API: not judged),
+        // and a copy of its stack under a thread that started elsewhere
+        // (here, in this test's own code): BaseThreadInitThunk then appears
+        // to have called SleepEx itself.
+        let delay = export("ntdll.dll", c"NtDelayExecution");
+        let dsc = (0..0x20)
+            .find(|&k| unsafe { *((delay + k) as *const [u8; 2]) } == [0x0F, 0x05])
+            .expect("syscall");
+        // SAFETY: a thread of our own that sleeps until terminated below.
+        let sleepy = unsafe {
+            let start = core::mem::transmute::<usize, unsafe extern "system" fn(*mut c_void) -> u32>(
+                export("kernel32.dll", c"SleepEx"),
+            );
+            CreateThread(
+                null(),
+                0,
+                Some(start),
+                INFINITE as usize as *const c_void,
+                0,
+                null_mut(),
+            )
+        };
+        assert!(!sleepy.is_null());
+        let sc_ctx = until_blocked(sleepy, delay);
+        let mut copy = vec![0u8; 0x400];
+        let n = p_read(sc_ctx.0.Rsp as usize, &mut copy);
+        assert!(n >= 0x100, "read {n} bytes of the sleeping thread's stack");
+        let forged = data + 0x400 + (sc_ctx.0.Rsp as usize & 0xF);
+        unsafe { core::ptr::copy_nonoverlapping(copy.as_ptr(), forged as *mut u8, n.min(0x5F0)) };
+        let forged_pose = Posed::new(delay + dsc + 2, forged);
+
         let planted = me.thread_checks(soon()).unwrap().threads;
         // While it waits, the waiting code is made non-executable.
         let mut old = 0u32;
@@ -797,7 +1026,13 @@ mod tests {
         assert!(unsafe { RtlDeleteFunctionTable(rf.as_ptr()) });
 
         // Undo it all: the waiting thread returns, the others run `idle`.
+        for posed in [gadget_pose, truncated_pose, forged_pose] {
+            posed.release();
+        }
         unsafe {
+            windows_sys::Win32::System::Threading::TerminateThread(sleepy, 0);
+            WaitForSingleObject(sleepy, INFINITE);
+            CloseHandle(sleepy);
             SetEvent(event);
             assert_eq!(WaitForSingleObject(sleeper, 10_000), WAIT_OBJECT_0);
             CloseHandle(sleeper);
@@ -859,6 +1094,21 @@ mod tests {
         assert_eq!(
             find(&planted, "defense.stack_frame_no_call", "suspect").offset as usize,
             no_call
+        );
+        assert_eq!(
+            find(&planted, "defense.stack_jmp_gadget", "suspect").offset as usize,
+            gadget
+        );
+        assert_eq!(
+            find(&planted, "defense.stack_truncated", "suspect").offset as usize,
+            theirs[1]
+        );
+        let fake = find(&planted, "defense.stack_fake_thread_start", "suspect");
+        assert!(
+            fake.context.contains("kernelbase.dll!SleepEx")
+                && fake.context.contains("BaseThreadInitThunk"),
+            "{}",
+            fake.context
         );
         assert_eq!(
             find(&hidden, "defense.stack_return_nonexec", "critical").offset as usize,

@@ -243,7 +243,8 @@ jobs:
                             'memory.syscall_stub', 'defense.ntdll_second_copy',
                             'memory.thread_start_unbacked', 'memory.thread_start_loadlibrary', 'memory.thread_start_spoofed',
                             'memory.stack_unbacked', 'defense.stack_return_nonexec', 'defense.stack_frame_no_call',
-                            'memory.cobalt_strike_config', 'memory.havoc_config') {
+                            'memory.cobalt_strike_config', 'memory.havoc_config',
+                            'defense.stack_jmp_gadget', 'defense.stack_truncated', 'defense.stack_fake_thread_start') {
             if ($r.summary.by_rule.$rule) { throw "false positive: $rule on a clean PowerShell process" }
           }
           # The same on a 32-bit PowerShell: under WoW64 its threads' 64-bit side runs
@@ -262,7 +263,8 @@ jobs:
           foreach ($rule in 'defense.direct_syscall', 'defense.indirect_syscall', 'defense.syscall_return_nonexec', 'memory.syscall_stub',
                             'memory.thread_start_unbacked', 'memory.thread_start_loadlibrary', 'memory.thread_start_spoofed',
                             'memory.stack_unbacked', 'defense.stack_return_nonexec', 'defense.stack_frame_no_call',
-                            'memory.cobalt_strike_config', 'memory.havoc_config') {
+                            'memory.cobalt_strike_config', 'memory.havoc_config',
+                            'defense.stack_jmp_gadget', 'defense.stack_truncated', 'defense.stack_fake_thread_start') {
             if ($r32.summary.by_rule.$rule) { throw "false positive: $rule on a clean 32-bit PowerShell process" }
           }
 

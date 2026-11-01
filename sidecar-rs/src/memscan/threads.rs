@@ -58,6 +58,16 @@ pub enum Frame {
     NotExecutable { kind: String, protect: String },
     /// A module's code, but not just after a call instruction.
     NoCall { symbol: String },
+    /// A module's code at an indirect jump through a register that survives
+    /// calls ("jmp qword ptr [rbx]"): the gadget a desynchronising stack
+    /// spoofer returns through.
+    Gadget { symbol: String, insn: &'static str },
+    /// The last frame before the stack ends (a zero return address), when it
+    /// isn't where threads begin.
+    Truncated { symbol: String },
+    /// The frame BaseThreadInitThunk called, when it is a Windows API in a
+    /// module the thread didn't start in.
+    FakeThreadStart { symbol: String, start: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,6 +200,21 @@ impl StackFinding {
                  "a return address that doesn't follow a call instruction wasn't put on the stack by a call: a frame forged so the stack looks ordinary (call-stack spoofing)"),
                 line,
             ),
+            Frame::Gadget { .. } => (
+                ("defense.stack_jmp_gadget", "suspect", "T1036", 70,
+                 "a return address that lands on an indirect jump through a register calls preserve is a gadget, not a caller: desynchronising call-stack spoofers (SilentMoonwalk and its kin) return through one to hide where the code waiting really is"),
+                line,
+            ),
+            Frame::Truncated { .. } => (
+                ("defense.stack_truncated", "suspect", "T1036", 60,
+                 "the stack ends early, at a frame that isn't where threads begin: its return address was zeroed so a walk stops before reaching the code that called (ThreadStackSpoofer-style call-stack truncation)"),
+                line,
+            ),
+            Frame::FakeThreadStart { .. } => (
+                ("defense.stack_fake_thread_start", "suspect", "T1036", 70,
+                 "BaseThreadInitThunk appears to have called a Windows API itself, in a module the thread didn't start in: thread-start frames forged beneath the real caller so the stack looks like a fresh thread waiting (synthetic call-stack spoofing)"),
+                line,
+            ),
         }
     }
 }
@@ -207,6 +232,15 @@ impl Frame {
             Frame::NoCall { symbol } => {
                 format!("{symbol} (0x{addr:x}), which doesn't follow a call")
             }
+            Frame::Gadget { symbol, insn } => {
+                format!("{symbol} (0x{addr:x}), which is the gadget \"{insn}\"")
+            }
+            Frame::Truncated { symbol } => {
+                format!("{symbol} (0x{addr:x}), after which the stack ends")
+            }
+            Frame::FakeThreadStart { symbol, start } => format!(
+                "{symbol} (0x{addr:x}), called straight from BaseThreadInitThunk though the thread started at {start}"
+            ),
         }
     }
 }
@@ -443,5 +477,68 @@ mod tests {
             f.describe(0x20),
             "0x20 (RW private memory, which isn't executable)"
         );
+    }
+
+    #[test]
+    fn judges_spoofed_stacks() {
+        let wait = |last: String| {
+            vec![
+                "ntdll.dll!NtDelayExecution".to_string(),
+                "kernelbase.dll!SleepEx+0x9d".to_string(),
+                last,
+            ]
+        };
+        let frames = [
+            (
+                Frame::Gadget {
+                    symbol: "kernelbase.dll!SetDefaultDllDirectories+0x4f".into(),
+                    insn: "jmp qword ptr [rbx]",
+                },
+                "defense.stack_jmp_gadget",
+                "gadget \"jmp qword ptr [rbx]\"",
+            ),
+            (
+                Frame::Truncated {
+                    symbol: "kernelbase.dll!WaitForSingleObjectEx+0x9e".into(),
+                },
+                "defense.stack_truncated",
+                "after which the stack ends",
+            ),
+            (
+                Frame::FakeThreadStart {
+                    symbol: "kernelbase.dll!SleepEx+0x9d".into(),
+                    start: "app.exe+0x1a20".into(),
+                },
+                "defense.stack_fake_thread_start",
+                "called straight from BaseThreadInitThunk though the thread started at app.exe+0x1a20",
+            ),
+        ];
+        for (i, (frame, rule, text)) in frames.into_iter().enumerate() {
+            let addr = 0x7ffb_0000 + i;
+            let r = Report {
+                supported: true,
+                stacks: vec![StackFinding {
+                    tid: 40 + i as u32,
+                    addr,
+                    depth: 2,
+                    chain: wait(frame.describe(addr)),
+                    frame,
+                }],
+                ..Default::default()
+            };
+            let hits = r.hits();
+            assert_eq!(hits.len(), 1, "{hits:?}");
+            assert_eq!(hits[0].rule, rule);
+            assert_eq!(hits[0].severity, "suspect");
+            assert_eq!(hits[0].technique, "T1036");
+            assert!(hits[0].context.contains(text), "{}", hits[0].context);
+            assert!(
+                hits[0]
+                    .context
+                    .contains("waiting in ntdll.dll!NtDelayExecution"),
+                "{}",
+                hits[0].context
+            );
+        }
     }
 }

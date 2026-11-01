@@ -90,8 +90,10 @@ impl Cursor<'_> {
         let raw = self.b.get(self.pos..self.pos + len)?;
         self.pos += len;
         let units: Vec<u16> = raw
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .collect();
         let (last, text) = units.split_last()?;
         if *last != 0 || text.iter().any(|&u| !(0x20..0x7f).contains(&u)) {

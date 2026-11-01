@@ -159,18 +159,19 @@ jobs:
           go build -o lrng.exe ./cmd/lrng
           cargo build --locked --release --manifest-path sidecar-rs/Cargo.toml
           Copy-Item sidecar-rs/target/release/lrng-sidecar.exe .
-      - name: image-integrity self-test (the real Windows loader)
+      - name: image-integrity and exception-hook self-tests (the real Windows loader)
         shell: pwsh
         run: |
           # Every module the test process loads must compare clean with its file; then a
           # rewrite planted in its own copy of a DLL must be found at the right address.
+          # Likewise hardware breakpoints and vectored handlers planted in the test process.
           # The test's "lrng-selftest:" lines, and any panic with its message, are raised
           # as annotations so the outcome reads from the checks API, not only the log.
           $out = @(cargo test --locked --release --manifest-path sidecar-rs/Cargo.toml memscan::windows -- --nocapture 2>&1 | ForEach-Object { "$_" })
           $code = $LASTEXITCODE
           $out | Write-Output
           function Esc($s) { $s -replace '%','%25' -replace "`r",'%0D' -replace "`n",'%0A' }
-          $out | Where-Object { $_ -match 'lrng-selftest:' } | Select-Object -First 9 | ForEach-Object { Write-Output ("::notice::" + (Esc $_)) }
+          $out | Where-Object { $_ -match 'lrng-selftest:' } | Select-Object -First 10 | ForEach-Object { Write-Output ("::notice::" + (Esc $_)) }
           if ($code -ne 0) {
             $p = -1
             for ($i = 0; $i -lt $out.Count; $i++) { if ($out[$i] -match 'panicked at') { $p = $i; break } }
@@ -201,10 +202,17 @@ jobs:
           $recs = @($r.results | Where-Object { $_.collector -eq 'memory' } | ForEach-Object { $_.records })
           $ii = @($recs | ForEach-Object { $_.fields.image_integrity } | Where-Object { $_ })
           Write-Output ("::notice::image integrity (live PowerShell): " + ($ii | ConvertTo-Json -Compress -Depth 6))
-          $recs | ForEach-Object { $_.findings } | Where-Object { $_ -and ($_.rule -like 'memory.image_*' -or $_.rule -like 'defense.*') } |
+          $recs | ForEach-Object { $_.findings } | Where-Object { $_ -and ($_.rule -like 'memory.*' -or $_.rule -like 'defense.*') } |
             Select-Object -First 8 | ForEach-Object { Write-Output ("::notice::" + $_.rule + " [" + $_.severity + "]: " + ($_.detail -replace '%','%25')) }
           if ($ii.Count -lt 1 -or $ii[0].images -lt 1 -or $ii[0].bytes_compared -lt 1) { throw "image integrity compared nothing in a live process" }
-          foreach ($rule in 'memory.image_code_modified', 'memory.image_header_mismatch', 'memory.image_exec_outside_code', 'defense.amsi_patched', 'defense.etw_patched') {
+          # Hardware breakpoints and vectored handlers: every thread's debug registers
+          # read and both handler lists walked in the live PowerShell (.NET registers
+          # handlers of its own, all in its images), with nothing to report.
+          $eh = @($recs | ForEach-Object { $_.fields.exception_hooks } | Where-Object { $_ })
+          Write-Output ("::notice::exception hooks (live PowerShell): " + ($eh | ConvertTo-Json -Compress -Depth 6))
+          if ($eh.Count -lt 1 -or $eh[0].threads -lt 1 -or -not $eh[0].handlers_walked) { throw "exception hooks weren't read in a live process" }
+          foreach ($rule in 'memory.image_code_modified', 'memory.image_header_mismatch', 'memory.image_exec_outside_code', 'defense.amsi_patched', 'defense.etw_patched',
+                            'defense.amsi_hwbp', 'defense.etw_hwbp', 'memory.hardware_breakpoint', 'memory.veh_unbacked') {
             if ($r.summary.by_rule.$rule) { throw "false positive: $rule on a clean PowerShell process" }
           }
 

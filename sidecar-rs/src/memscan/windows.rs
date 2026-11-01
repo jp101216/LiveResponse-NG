@@ -2,7 +2,9 @@
 //!
 //! Opens the target with PROCESS_QUERY_INFORMATION | PROCESS_VM_READ (falling
 //! back to PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ) and never asks
-//! for any write, thread or handle-duplication rights.
+//! for any write or handle-duplication rights. The one thread right it asks
+//! for is THREAD_GET_CONTEXT (with THREAD_QUERY_LIMITED_INFORMATION), to read
+//! each thread's debug registers (windows_hooks.rs).
 //!
 //! Compiled on Windows, and on Linux under `--cfg lrng_typecheck_windows` so
 //! it can be type-checked without a Windows toolchain (`make check-windows-rs`).
@@ -41,7 +43,7 @@ const HEADER_READ: usize = 0x10000;
 const MAX_IMAGE_FILE: u64 = 512 << 20;
 
 pub struct WinProcess {
-    h: HANDLE,
+    pub(super) h: HANDLE,
 }
 
 impl Drop for WinProcess {
@@ -239,6 +241,10 @@ impl ProcessMemory for WinProcess {
         rep.settle_loader_pages();
         rep
     }
+
+    fn exception_hooks(&self) -> Option<super::hooks::Report> {
+        Some(super::windows_hooks::read(self))
+    }
 }
 
 impl WinProcess {
@@ -278,7 +284,7 @@ impl WinProcess {
 
 /// Read an image file back from disk. A path GetMappedFileName couldn't turn
 /// into a drive-letter path (\Device\...) is opened through GLOBALROOT.
-fn read_image_file(path: &str) -> std::io::Result<Vec<u8>> {
+pub(super) fn read_image_file(path: &str) -> std::io::Result<Vec<u8>> {
     let open = if path.starts_with(r"\Device\") {
         format!(r"\\?\GLOBALROOT{path}")
     } else {
@@ -357,7 +363,7 @@ fn executable(protect: u32) -> bool {
         )
 }
 
-fn protect_name(protect: u32) -> &'static str {
+pub(super) fn protect_name(protect: u32) -> &'static str {
     match protect & 0xff {
         PAGE_READONLY => "R",
         PAGE_READWRITE => "RW",

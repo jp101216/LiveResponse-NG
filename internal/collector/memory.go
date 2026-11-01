@@ -239,6 +239,9 @@ var memoryRecordKeys = []string{
 	// The image-integrity pass: images and code compared, rewrites, patches,
 	// header mismatches, unreadable backing files, and why anything was skipped.
 	"image_integrity",
+	// Hardware breakpoints and vectored exception handlers (Windows): threads
+	// read, breakpoints armed, handlers found and where they point.
+	"exception_hooks",
 }
 
 // memoryRecords turns sidecar responses into one record per process (every

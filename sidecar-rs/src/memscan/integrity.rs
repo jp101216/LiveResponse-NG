@@ -231,7 +231,7 @@ pub struct Report {
 
 /// ntdll entry points that write ETW events. A patch at one of them blinds
 /// event tracing for the process.
-const ETW_WRITERS: &[&str] = &[
+pub(super) const ETW_WRITERS: &[&str] = &[
     "EtwEventWrite",
     "EtwEventWriteEx",
     "EtwEventWriteFull",
@@ -291,7 +291,7 @@ fn is_core(name: &str) -> bool {
 
 /// The export names in a `near` string: "NtTraceEvent/ZwTraceEvent+0x0" ->
 /// NtTraceEvent, ZwTraceEvent.
-fn symbol_names(s: &str) -> impl Iterator<Item = &str> {
+pub(super) fn symbol_names(s: &str) -> impl Iterator<Item = &str> {
     s.rsplit_once('+').map_or(s, |(names, _)| names).split('/')
 }
 

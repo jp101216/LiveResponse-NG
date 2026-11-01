@@ -1,5 +1,6 @@
 //! Platform-neutral view of another process's memory.
 
+use super::hooks;
 use super::integrity::Report;
 use std::time::Instant;
 
@@ -69,6 +70,11 @@ pub trait ProcessMemory {
     /// integrity.rs), stopping at `deadline` or after `max_bytes` compared.
     fn image_integrity(&self, _deadline: Instant, _max_bytes: u64) -> Report {
         Report::unsupported()
+    }
+    /// Hardware breakpoints in the process's threads and its vectored
+    /// exception handlers (see hooks.rs), on platforms that have them.
+    fn exception_hooks(&self) -> Option<hooks::Report> {
+        None
     }
 }
 

@@ -22,6 +22,7 @@
 //! (only rule, pattern identifiers and addresses). Prompt-scan contexts are the
 //! same sanitised, secret-redacted snippets used for files.
 
+pub mod hooks;
 pub mod integrity;
 mod pe;
 pub mod procmem;
@@ -30,6 +31,8 @@ pub mod procmem;
 mod linux;
 #[cfg(any(windows, lrng_typecheck_windows))]
 mod windows;
+#[cfg(any(windows, lrng_typecheck_windows))]
+mod windows_hooks;
 
 #[cfg(feature = "yara")]
 mod yara;
@@ -376,6 +379,8 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
         started + opts.budget / 3,
         opts.max_bytes.min(INTEGRITY_MAX_BYTES),
     );
+    // Hardware breakpoints and vectored handlers: a few small reads.
+    let hooks = mem.exception_hooks();
 
     let mut session = rules.map(yara::Session::new);
     let mut prompt_hits: BTreeMap<(&'static str, &'static str), PromptAgg> = BTreeMap::new();
@@ -544,7 +549,12 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
     let (prompt_rules, prompt_score, prompt_verdict) = prompts::tally(&prompt_list);
     hits.append(&mut prompt_list);
     let heuristic_count = heuristic_hits.len();
-    for mut h in heuristic_hits.into_iter().chain(integrity.hits()) {
+    let hook_hits = hooks.as_ref().map(|h| h.hits()).unwrap_or_default();
+    for mut h in heuristic_hits
+        .into_iter()
+        .chain(integrity.hits())
+        .chain(hook_hits)
+    {
         h.region = region_info(&regions, h.offset as usize, mem.as_ref());
         hits.push(h);
     }
@@ -600,6 +610,7 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
             "memory_heuristic_hits": heuristic_count,
             "memory_heuristics_truncated": heuristics_truncated,
             "image_integrity": integrity.meta(),
+            "exception_hooks": hooks.as_ref().map(|h| h.meta()),
         })),
         ..Default::default()
     }

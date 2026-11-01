@@ -46,6 +46,7 @@ func TestMemoryRecordsCoverEveryProcess(t *testing.T) {
 		20: {OK: true, Meta: map[string]any{"pid": 20.0, "status": "scanned", "bytes_scanned": 1000.0,
 			"unbacked_exec_regions": 2.0, "prompt_verdict": "low",
 			"image_integrity": map[string]any{"supported": true, "images": 40.0, "rewritten": 1.0},
+			"exception_hooks": map[string]any{"supported": true, "threads": 9.0, "handlers_unbacked": 1.0},
 			"yara":            map[string]any{"rules_loaded": 12.0, "matched_rules": 1.0}},
 			Hits: []sidecar.Hit{{Rule: "yara:x", Severity: "critical", Offset: 0x7ff60000, Confidence: 90,
 				Region: &sidecar.HitRegion{Base: 0x7ff60000, Size: 65536, Protect: "RWX", Kind: "private"}},
@@ -71,6 +72,9 @@ func TestMemoryRecordsCoverEveryProcess(t *testing.T) {
 	}
 	if ii, _ := recs[1].Fields["image_integrity"].(map[string]any); ii["rewritten"] != 1.0 {
 		t.Fatalf("image_integrity not carried into the record: %+v", recs[1].Fields["image_integrity"])
+	}
+	if eh, _ := recs[1].Fields["exception_hooks"].(map[string]any); eh["handlers_unbacked"] != 1.0 {
+		t.Fatalf("exception_hooks not carried into the record: %+v", recs[1].Fields["exception_hooks"])
 	}
 	if f := recs[1].Findings[1]; f.Rule != "memory.image_code_modified" || f.Severity != SevSuspect ||
 		f.Technique != "T1055" || !strings.Contains(f.Detail, `image RX region`) || !strings.Contains(f.Detail, "version.dll") {

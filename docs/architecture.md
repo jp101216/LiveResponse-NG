@@ -43,12 +43,16 @@ sidecar-rs/            Rust sidecar
                        change sites, verdicts and their findings
     hooks.rs           exception hooks: hardware breakpoints and vectored
                        handlers, and their findings (portable judging)
+    syscalls.rs        system calls made around ntdll: ntdll's stub table,
+                       the stub scanner and the judging (portable)
     pe.rs              bounds-checked PE reader (sections, relocations,
                        exports) and the per-module comparison
     windows.rs         VirtualQueryEx / ReadProcessMemory (read-only)
     windows_hooks.rs   debug registers (GetThreadContext) and ntdll's
                        vectored handler lists, decoded with the
                        pointer cookie ntdll keeps
+    windows_syscalls.rs threads in system calls, stubs in memory no image
+                       backs, second mappings of ntdll
     linux.rs           /proc/<pid>/maps + /proc/<pid>/mem
     yara.rs            rule loading (file/dir, namespaces) and block scanning
 .github/workflows/     CI: Linux checks, real-Windows sweep, integration
@@ -284,6 +288,24 @@ checking that decoding with it undoes `EncodePointer`. A decoded address
 that isn't executable is counted as invalid, never judged. A 32-bit process
 under the 64-bit sidecar has its handlers in its own ntdll, so only its debug
 registers are read.
+
+The same `GetThreadContext` call returns, on x64, each thread's instruction
+and stack pointers, from which `windows_syscalls.rs` judges **system calls**
+(`syscalls.rs`): a thread whose two bytes before its instruction pointer are
+`syscall` (or `int 2Eh`) is in, or just back from, a system call. Where that
+instruction lies (ntdll at its usual base, win32u in System32, another image,
+a second ntdll, or memory no image backs) and where the address at the stack
+pointer leads are looked up with `VirtualQueryEx`. A `syscall` in memory no
+image backs is compared with ntdll's own stubs, read once from its file on
+disk, so a byte-for-byte copy (Chromium's sandbox thunks) is told from a stub
+of the attacker's own. Executable memory no image backs is then read (up to
+256 MiB, within half the per-process budget) and searched for stubs: `mov r10,
+rcx`, the service number (an immediate, a load, or nothing), ntdll's
+SharedUserData check when copied, then `syscall`, a register jump, or a jump
+whose target can be worked out; a jump to a `syscall` instruction is an
+indirect stub, one anywhere else is a hook trampoline. Images whose export
+directory names them ntdll.dll at another address, and executable views of
+ntdll's file, are second copies.
 
 ### Drivers
 

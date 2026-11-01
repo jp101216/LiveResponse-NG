@@ -45,8 +45,11 @@ lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 > (embedded-prompt-artifact scanner), and opt-in live process-memory scanning
 > with YARA, memory-structure heuristics, an image-integrity check that finds
 > code overwritten in memory (module stomping, hollowing, AMSI/ETW patching),
-> and a check of every thread's hardware breakpoints and the process's vectored
-> exception handlers, which catches the AMSI/ETW bypasses that patch nothing.
+> a check of every thread's hardware breakpoints and the process's vectored
+> exception handlers, which catches the AMSI/ETW bypasses that patch nothing,
+> and a check of the system calls threads are in, which catches direct and
+> indirect syscalls (the Hell's Gate family, SysWhispers, RecycledGate, ...),
+> the stubs that make them and fresh copies of ntdll mapped around EDR hooks.
 > Reports open in a [report viewer](#report-viewer): one offline HTML page, or
 > `-format html` for the report and viewer in one file. See
 > [Roadmap](#roadmap).
@@ -374,7 +377,7 @@ against both malicious and ordinary examples.
 | **Execution evidence & modules** | `execution.shimcache_unusual_path`, `execution.prefetch_unusual_path`, `execution.amcache_unusual_path`, `modules.unusual_path` |
 | **Signature integrity** | `integrity.unsigned_system_binary` (a process image in System32/SysWOW64 that is unsigned or carries an untrusted signature; the finding quotes who that signature claims to be from) |
 | **Kernel drivers (BYOVD)** | `persistence.malicious_driver` (*critical*: a driver LOLDrivers lists as malicious, loaded or installed, T1014), `privesc.vulnerable_driver_loaded` (a known vulnerable driver in the kernel, T1068), `privesc.vulnerable_driver_installed` (*notable*: registered, not loaded), `privesc.driver_unusual_path` (a driver loaded from a temp, download or world-writable directory), `defense.loaded_driver_file_missing` (*notable*: loaded, then its file deleted, T1070.004); the loading policy: `defense.driver_blocklist_disabled` (Microsoft's vulnerable driver blocklist switched off, T1562.001), `defense.code_integrity_weakened` (kernel code integrity off, test signing or kernel debugging on, T1553.006) |
-| **Event logs** | `defense.clear_event_logs` (Security 1102 / System 104), `eventlog.service_installed` (7045), `persistence.account_created` (4720), `persistence.admin_group_add` (4728/4732/4756 to a privileged group), `eventlog.powershell_suspicious_block` (4104), `eventlog.defender_detection` (Defender 1116/1117), Sysmon driver loads (event 6) matched against the vulnerable-driver list (the driver rules above) and `defense.unsigned_driver_loaded` (T1553.006) — plus the command-line rules above applied to 4688 command lines, 4104 script blocks and 7045 service ImagePaths |
+| **Event logs** | `defense.clear_event_logs` (Security 1102 / System 104), `eventlog.service_installed` (7045), `persistence.account_created` (4720), `persistence.admin_group_add` (4728/4732/4756 to a privileged group), `eventlog.powershell_suspicious_block` (4104), `eventlog.defender_detection` (Defender 1116/1117), Sysmon driver loads (event 6) matched against the vulnerable-driver list (the driver rules above) and `defense.unsigned_driver_loaded` (T1553.006), Sysmon process access (event 10) whose call trace starts in code no module backs: `defense.direct_syscall` (*critical* into LSASS, T1003.001) — plus the command-line rules above applied to 4688 command lines, 4104 script blocks and 7045 service ImagePaths |
 | **Logon sessions** (event log) | `logon.remote_interactive` (4624 type 10 / RDP — suspect from a public source address, T1021.001), `logon.network_external` (4624 type 3 from an external address, T1021), `logon.failed_external` (4625 from an external address, T1110) |
 | **Correlation** (event log × live state) | `correlate.service_installed_absent` (a 7045 service install with no matching live service — installed then removed, T1070.009), `correlate.task_registered_absent` (a 4698/106 task registration with no matching live task — deleted or hidden, T1070.009); and the `defense.clear_event_logs` finding is annotated with the surviving record-id/time range left by the clear. Independent of the event log: `correlate.task_comhandler_hijacked` (a scheduled task whose `IComHandlerAction` CLSID matches a COM registration `comhijack` flagged — schedule meets hijacked object, T1546.015) |
 | **Sigma** (`-sigma`) | `sigma.<rule>` for each matching Sigma rule, carrying the rule's level (→ severity) and first `attack.t*` tag (→ technique) — the analyst's own detections, run beside the built-in ones |
@@ -383,7 +386,7 @@ against both malicious and ordinary examples.
 | **Linux command lines, persistence & accounts** | `exec.download_pipe_shell` (`curl … \| sh`), `exec.reverse_shell` (`/dev/tcp`, `nc -e`, socat `EXEC`, interpreter one-liners), `exec.base64_decode`, `exec.chmod_suspicious`, `persistence.ssh_authorized_keys`, `persistence.cron_install`, `persistence.shell_profile`, `persistence.boot_or_preload`; `persistence.ld_preload`, `persistence.unusual_path` (cron, systemd units and drop-ins, rc.local, XDG autostart); `accounts.uid0_nonroot`, `accounts.empty_password`, `accounts.system_account_login_shell`, `accounts.duplicate_uid`, `accounts.root_equiv_group`; anti-forensics: `defense.clear_linux_logs` (wiping `/var/log`, `journalctl --vacuum-*`, T1070.002), `defense.clear_shell_history` (T1070.003) |
 | **Linux kernel modules & eBPF** | `persistence.kmod_hidden` (*critical*: loaded per `/sys/module` but missing from `/proc/modules`, T1014), `persistence.kmod_forced`, `persistence.kmod_unsigned` (*suspect* when it also loads at boot), `persistence.kmod_out_of_tree`, `persistence.kmod_boot_unknown` (set to load at boot but not in the running kernel's module tree), `persistence.modprobe_hook` (an `install`/`remove` command, T1547.006), `kernel.tainted`; `persistence.ebpf_write_user` (`bpf_probe_write_user`, T1014), `persistence.ebpf_override_return`, `persistence.ebpf_send_signal` |
 | **Linux journal** (`journald`) | `logon.ssh_bruteforce` (T1110.001), `logon.ssh_bruteforce_success` (*critical*: a logon after ten or more failures from the same address, T1110), `logon.ssh_external` (*suspect* for a root password logon, T1021.004), `privesc.sudo_denied`, `privesc.sudo_auth_failure`, `privesc.su_failed` (T1548), `persistence.account_created` (*critical* for a new UID 0, T1136.001), `persistence.admin_group_add` (to `sudo`, `wheel`, `docker`, … T1098), `persistence.password_changed` (root), `persistence.kmod_unsigned_loaded` and `persistence.ebpf_write_user` from the kernel's own warnings — plus the command-line rules on sudo and cron commands |
-| **Memory** (opt-in) | `yara:<rule>`, `memory.pe_in_private` (reflective/manual-mapped PE), `memory.elf_in_anonymous`, `memory.memfd_exec`, `memory.deleted_file_exec`, `memory.replaced_file_exec` (*info*: a system library replaced by an upgrade); image integrity: `memory.image_code_modified` (code overwritten after mapping — module stomping, T1055; *critical* from 16 KiB), `memory.image_header_mismatch` (the mapped image was replaced — hollowing and its relatives, T1055.012), `memory.image_exec_outside_code` (executable pages outside a module's code sections — stomping into a data section; *critical* when a payload was written there), `memory.image_file_unavailable`, `memory.image_inline_patch` (short patches: hooks), `defense.amsi_patched` (T1562.001), `defense.etw_patched` (T1562.006); exception hooks (Windows): `defense.amsi_hwbp` and `defense.etw_hwbp` (*critical*: a hardware breakpoint on AMSI or ntdll's ETW event writers, the patchless bypass), `memory.hardware_breakpoint` (*notable*: any other armed breakpoint), `memory.veh_unbacked` (*critical*: a vectored exception or continue handler in memory no image file backs, T1055); and module B's `prompt.*`, `api.*`, `model.*` and `secret.*` (below) |
+| **Memory** (opt-in) | `yara:<rule>`, `memory.pe_in_private` (reflective/manual-mapped PE), `memory.elf_in_anonymous`, `memory.memfd_exec`, `memory.deleted_file_exec`, `memory.replaced_file_exec` (*info*: a system library replaced by an upgrade); image integrity: `memory.image_code_modified` (code overwritten after mapping — module stomping, T1055; *critical* from 16 KiB), `memory.image_header_mismatch` (the mapped image was replaced — hollowing and its relatives, T1055.012), `memory.image_exec_outside_code` (executable pages outside a module's code sections — stomping into a data section; *critical* when a payload was written there), `memory.image_file_unavailable`, `memory.image_inline_patch` (short patches: hooks), `defense.amsi_patched` (T1562.001), `defense.etw_patched` (T1562.006); exception hooks (Windows): `defense.amsi_hwbp` and `defense.etw_hwbp` (*critical*: a hardware breakpoint on AMSI or ntdll's ETW event writers, the patchless bypass), `memory.hardware_breakpoint` (*notable*: any other armed breakpoint), `memory.veh_unbacked` (*critical*: a vectored exception or continue handler in memory no image file backs, T1055); system calls (Windows x64): `defense.direct_syscall` (a thread in a system call made outside ntdll and win32u, T1106: *critical* from injected memory or a second ntdll), `defense.indirect_syscall` (a call through ntdll that returns into injected code), `defense.syscall_return_nonexec` (*critical*: one that returns into non-executable memory, as sleep obfuscation leaves it), `memory.syscall_stub` (direct, indirect and jumper stubs in memory no image backs), `defense.ntdll_second_copy` (ntdll mapped again to call around hooks, T1562.001), `defense.syscall_hwbp` (a hardware breakpoint on a system-call stub); and module B's `prompt.*`, `api.*`, `model.*` and `secret.*` (below) |
 | **Endpoint intelligence** (`-intel`) | `intel.tor_endpoint` (a remote address that is Tor infrastructure, T1090.003), `intel.anonymizer_endpoint` (a known anonymising VPN/proxy, T1090.002) — from the offline ASN/country/category attribution of the run's public remote addresses |
 
 **False-positive discipline.** Path heuristics grade locations: temporary,
@@ -565,6 +568,57 @@ the 64-bit sidecar (its debug registers still are). CI plants a handler on
 both lists and breakpoints on `AmsiScanBuffer`, `EtwEventWrite` and `Sleep` in
 a test process and requires each to be found, and requires a clean live
 PowerShell to show none.
+
+**System calls (no rules needed, Windows x64).** Only ntdll.dll and win32u.dll
+contain the instruction that enters the kernel, one small stub per system
+service, and EDR products hook those stubs. Malware goes around them in a few
+ways, and each leaves something a point-in-time look can see. A thread blocked
+in a system call has its instruction pointer just past the `syscall` it ran
+and its stack pointer at the address the stub returns to (read with the same
+`GetThreadContext` call as the debug registers). The sidecar reports:
+
+- a thread whose `syscall` is outside ntdll and win32u: `defense.direct_syscall`
+  (*critical* from memory no image backs or from a second ntdll; *suspect* from
+  another module; *notable* from a byte-for-byte copy of ntdll's stub, which
+  Chromium's sandbox keeps for the calls it intercepts);
+- one whose `syscall` is ntdll's but whose stub returns into executable memory
+  no image backs: `defense.indirect_syscall`;
+- one that returns into memory that isn't executable, or where nothing is
+  mapped: `defense.syscall_return_nonexec` (an implant hidden while it sleeps,
+  or a forged stack);
+- the stubs themselves, in executable memory no image backs, whether a thread is
+  in one or not: `memory.syscall_stub` (direct ones, ones that jump to a
+  `syscall` instruction in ntdll, and register "jumpers"). Hook trampolines,
+  which jump back into the middle of ntdll's stub rather than to its `syscall`,
+  and copies of ntdll's stubs are counted in the record's `syscalls` metadata,
+  not reported;
+- ntdll mapped a second time, as an image (found by its export directory's
+  name, so a renamed copy counts) or as an executable view of its file:
+  `defense.ntdll_second_copy`;
+- a hardware breakpoint on one of ntdll's system-call stubs:
+  `defense.syscall_hwbp`.
+
+ntdll's own stubs are read from its file on disk, where no hook reaches them,
+to name each call and to recognise copies. The event log adds the history:
+a Sysmon process-access event (10) whose call trace starts in code no module
+backs opened its target with a direct syscall (*critical* when the target is
+LSASS). How the named techniques show up:
+
+| Technique | What reports it |
+|---|---|
+| Direct syscalls: SysWhispers 1 and 2, SysWhispers3 (direct mode), Hell's Gate, Halo's Gate, Tartarus' Gate, FreshyCalls | `defense.direct_syscall` while a thread is in one; `memory.syscall_stub` for the stub in memory; Sysmon 10 for process access |
+| Indirect syscalls: SysWhispers3's jumper, RecycledGate, HellsHall, C2 frameworks' indirect modes | `defense.indirect_syscall`; `memory.syscall_stub` (indirect and jumper stubs) |
+| Hardware-breakpoint syscalls: TamperingSyscalls, LayeredSyscall | `defense.syscall_hwbp`, and `memory.veh_unbacked` for their exception handler |
+| Heaven's Gate (64-bit calls from 32-bit code) | `defense.direct_syscall`, from the thread's 64-bit context; `memory.syscall_stub` |
+| Unhooking with a fresh ntdll (from disk or KnownDlls) | `defense.ntdll_second_copy`; calls made from it are `defense.direct_syscall` |
+| Sleep obfuscation (Ekko, Foliage, Zilean), waiting in a system call from hidden code | `defense.syscall_return_nonexec` |
+
+The gates differ in how they find a service number when ntdll is hooked; that
+lookup leaves nothing behind, so they are caught by the call they make. Spoofed
+call stacks (SilentMoonwalk and the like) aren't unwound yet. CI plants inert
+stubs of each shape (never run), poses suspended threads as stopped in direct,
+copied and indirect calls, maps ntdll twice, and requires each to be reported
+at the right address and a clean live PowerShell to show none.
 
 **Rules.** Pass `-yara` a `.yar`/`.yara` file or a directory (searched
 recursively). Each file gets its own namespace, so rule names from different
@@ -997,7 +1051,8 @@ leaves behind, so you can account for it in your notes:
   (and blocks, for protected processes) and tell the SOC before a sweep. Its
   image-integrity check also reads each loaded module's file from disk. On
   Windows it opens each of their threads with `THREAD_GET_CONTEXT` to read the
-  debug registers (a brief interruption of the thread, which isn't suspended),
+  debug registers and the instruction and stack pointers (a brief interruption
+  of the thread, which isn't suspended),
   and the sidecar registers a no-op vectored handler of each kind in **its own**
   process for a moment to find ntdll's handler lists; nothing is written to the
   processes it scans.

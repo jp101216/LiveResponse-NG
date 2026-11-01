@@ -2,10 +2,12 @@
 
 ## 0.13.0
 
-Adds detection of bring-your-own-vulnerable-driver (BYOVD) and of the
+Adds detection of bring-your-own-vulnerable-driver (BYOVD), of the
 "patchless" AMSI and ETW bypasses, which use a hardware breakpoint and a
-vectored exception handler instead of changing any code. No new dependencies;
-the report schema is unchanged at 1.2 (new fields and rules only).
+vectored exception handler instead of changing any code, and of system calls
+made around ntdll's hooks: direct and indirect syscalls, the stubs that make
+them, and fresh copies of ntdll. No new dependencies; the report schema is
+unchanged at 1.2 (new fields and rules only).
 
 ### Added
 - **`drivers` collector (Windows, on by default).** Every module the kernel
@@ -42,6 +44,34 @@ the report schema is unchanged at 1.2 (new fields and rules only).
   continue handler in executable memory no image file backs). Each process's
   record gains `exception_hooks`: threads read, breakpoints, handlers walked,
   and the modules that registered handlers.
+- **System calls in the memory scan (Windows x64).** A thread blocked in a
+  system call shows where its `syscall` instruction is and where its stub
+  returns:
+  - `defense.direct_syscall`: the `syscall` is outside ntdll and win32u
+    (SysWhispers, Hell's, Halo's and Tartarus' Gate, FreshyCalls, Heaven's
+    Gate). *Critical* from memory no image backs or from a second ntdll,
+    *suspect* from another module, *notable* from a byte-for-byte copy of
+    ntdll's stub (Chromium's sandbox keeps those for the calls it intercepts).
+  - `defense.indirect_syscall`: through ntdll, returning into executable
+    memory no image backs (SysWhispers3's jumper, RecycledGate, HellsHall).
+  - `defense.syscall_return_nonexec` (*critical*): returning into memory that
+    isn't executable, as sleep obfuscation leaves an implant, or where nothing
+    is mapped (a forged stack).
+  - `memory.syscall_stub`: direct, indirect and register-jumper stubs in
+    executable memory no image backs, used or not. Hook trampolines (which
+    jump back into ntdll's stub, not to its `syscall`) and copies of ntdll's
+    stubs are counted, not reported.
+  - `defense.ntdll_second_copy`: ntdll mapped again, as an image (found by its
+    export name, so a renamed copy counts) or as an executable file view.
+  - `defense.syscall_hwbp`: a hardware breakpoint on a system-call stub
+    (TamperingSyscalls, LayeredSyscall).
+
+  Each process's record gains `syscalls`: threads in a system call, the calls
+  of each kind, stubs, copies and trampolines counted, bytes searched. ntdll's
+  stubs are read from its file on disk.
+- **Sysmon process access (event 10)** whose call trace starts in code no
+  module backs is `defense.direct_syscall` too: the target was opened with a
+  direct syscall. *Critical* when the target is LSASS (NanoDump, Dumpert).
 - **`internal/pehash`**, the Authenticode digest (SHA-256 and SHA-1 in one
   streamed pass), and **`cmd/drivergen`**, which builds the dataset from
   LOLDrivers' `drivers.json` (`make driver-data`), sorted so a refresh diffs
@@ -50,7 +80,7 @@ the report schema is unchanged at 1.2 (new fields and rules only).
 ### Security
 - **The sidecar asks for one new right**: `THREAD_GET_CONTEXT` (with
   `THREAD_QUERY_LIMITED_INFORMATION`) on the threads of a process it scans, to
-  read their debug registers. Threads aren't suspended and nothing is set. To
+  read their debug registers and instruction and stack pointers. Threads aren't suspended and nothing is set. To
   find ntdll's handler lists it registers a no-op handler of each kind in its
   own process for a moment and removes it; a target's lists are read twice and
   checked link by link, and a decoded handler that points at nothing
@@ -73,8 +103,13 @@ the report schema is unchanged at 1.2 (new fields and rules only).
 - The sidecar's Windows self-test plants a handler on both lists and hardware
   breakpoints on `AmsiScanBuffer`, `EtwEventWrite` and `Sleep`, and requires
   each to be found at its address, after a clean pass that must find the test
-  binary's own handler and report nothing. The live PowerShell scan gates all
-  four new memory rules against false positives.
+  binary's own handler and report nothing.
+- A second self-test plants system-call stubs of each shape (never run), poses
+  suspended threads as stopped in a direct call, a call from a copied stub,
+  and calls through ntdll returning into injected and into non-executable
+  memory, and maps ntdll twice; each must be reported at its address. Nothing
+  planted is executed. The live PowerShell scan gates all ten new memory rules
+  against false positives.
 
 ### Third-party data
 - LOLDrivers (Apache License 2.0). Its license ships beside the data and in

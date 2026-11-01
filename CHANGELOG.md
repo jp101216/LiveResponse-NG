@@ -58,6 +58,12 @@ collector and rules only).
   `bcdedit /enum` and `Confirm-SecureBootUEFI` on their own aren't judged:
   2026's Secure Boot certificate updates run them on many hosts.
 
+### Fixed
+- **`defense.direct_syscall` on WoW64's wow64win.dll.** In a 32-bit process,
+  wow64win.dll makes the win32k system calls (for the 32-bit user32 and
+  gdi32) itself, as wow64cpu.dll makes the others. The 32-bit PowerShell gate
+  caught a thread waiting in one; it is now Windows' own, like wow64cpu.
+
 ### Changed
 - **File times are converted without overflow.** A `FILETIME` before 1678
   (which a stomped time can be) overflowed the conversion the file records

@@ -2,7 +2,9 @@
 //! that make them, and ntdll mapped a second time.
 //!
 //! On 64-bit Windows only ntdll.dll and win32u.dll hold the instruction that
-//! enters the kernel (`syscall`), one small stub per system service:
+//! enters the kernel (`syscall`), one small stub per system service (and, in
+//! a 32-bit process, WoW64's wow64cpu.dll, which makes the calls it
+//! dispatches itself):
 //! `mov r10, rcx; mov eax, <service number>; ...; syscall; ret`. EDRs hook
 //! those stubs in user mode, so malware goes around them:
 //!
@@ -305,7 +307,8 @@ fn shape(
 /// Where an address lies.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Place {
-    /// ntdll.dll (the process's own) or win32u.dll: where system calls belong.
+    /// ntdll.dll (the process's own), win32u.dll, or WoW64's wow64cpu.dll:
+    /// where system calls belong.
     System(String),
     /// A second copy of ntdll.
     NtdllCopy,
@@ -517,7 +520,7 @@ impl Report {
             let (rule, why) = match v {
                 Verdict::Direct => (
                     "defense.direct_syscall",
-                    "only ntdll and win32u make system calls: a direct syscall goes around the user-mode hooks EDR products place there (SysWhispers, Hell's, Halo's and Tartarus' Gate, FreshyCalls, Heaven's Gate)",
+                    "only ntdll and win32u (and WoW64's wow64cpu, in a 32-bit process) make system calls: a direct syscall goes around the user-mode hooks EDR products place there (SysWhispers, Hell's, Halo's and Tartarus' Gate, FreshyCalls, Heaven's Gate)",
                 ),
                 Verdict::Indirect => (
                     "defense.indirect_syscall",

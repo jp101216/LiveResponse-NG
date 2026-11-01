@@ -239,6 +239,7 @@ impl ProcessMemory for WinProcess {
             rep.exec_outside.extend(c.exec_outside);
         }
         rep.settle_loader_pages();
+        rep.settle_known_sections();
         rep
     }
 

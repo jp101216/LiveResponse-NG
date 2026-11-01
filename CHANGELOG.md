@@ -54,7 +54,8 @@ rules only).
 - **System calls in the memory scan (Windows x64).** A thread blocked in a
   system call shows where its `syscall` instruction is and where its stub
   returns:
-  - `defense.direct_syscall`: the `syscall` is outside ntdll and win32u
+  - `defense.direct_syscall`: the `syscall` is outside ntdll, win32u and (in a
+    32-bit process) WoW64's wow64cpu
     (SysWhispers, Hell's, Halo's and Tartarus' Gate, FreshyCalls, Heaven's
     Gate). *Critical* from memory no image backs or from a second ntdll,
     *suspect* from another module, *notable* from a byte-for-byte copy of
@@ -159,6 +160,13 @@ rules only).
   time (`threads_moved` counts the rest), and the sidecar's own thread is
   never judged. A call through ntdll that returns into JIT code a runtime
   registered is counted (`jit_returns`), not reported as an indirect syscall.
+- **32-bit processes no longer read as tampered with.** The 32-bit .NET
+  runtime patches its GC write-barrier helpers, which sit side by side, so its
+  patches merge into one stretch of a few hundred bytes. Like the 64-bit
+  runtime's smaller patches, that is now `memory.image_inline_patch` at *info*,
+  not `memory.image_code_modified`. WoW64's wow64cpu.dll, whose `W64SVC` section
+  Windows makes executable though its file marks it as data, is skipped when
+  that section holds the file's own bytes.
 - **`internal/pehash`**, the Authenticode digest (SHA-256 and SHA-1 in one
   streamed pass), and **`cmd/drivergen`**, which builds the dataset from
   LOLDrivers' `drivers.json` (`make driver-data`), sorted so a refresh diffs

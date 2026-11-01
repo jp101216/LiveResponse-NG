@@ -606,7 +606,8 @@ PowerShell to show none.
 
 **System calls (no rules needed, Windows x64).** Only ntdll.dll and win32u.dll
 contain the instruction that enters the kernel, one small stub per system
-service, and EDR products hook those stubs. Malware goes around them in a few
+service (and, in a 32-bit process, WoW64's wow64cpu.dll, which makes the calls
+it dispatches itself), and EDR products hook those stubs. Malware goes around them in a few
 ways, and each leaves something a point-in-time look can see. A thread blocked
 in a system call has its instruction pointer just past the `syscall` it ran
 and its stack pointer at the address the stub returns to (read with the same

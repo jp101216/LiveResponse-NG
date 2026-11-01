@@ -284,6 +284,18 @@ const CORE_ELF: &[&str] = &[
 /// their GC write-barrier helpers in place as the heap's bounds change, so
 /// every process running .NET shows patches in them.
 const SELF_PATCHING: &[&str] = &["clr.dll", "coreclr.dll", "mscorwks.dll"];
+/// The longest change in a self-patching runtime taken as its own: the
+/// 32-bit runtime's barrier helpers sit side by side, so their patches merge
+/// into one stretch of a few hundred bytes.
+const SELF_PATCH_MAX: usize = 1024;
+
+/// Sections Windows makes executable itself though the file marks them as
+/// data: (file name, section). WoW64's wow64cpu.dll keeps the code that
+/// dispatches a 32-bit process's system calls in W64SVC.
+const EXEC_DATA_SECTIONS: &[(&str, &str)] = &[("wow64cpu.dll", "W64SVC")];
+#[cfg_attr(not(any(windows, lrng_typecheck_windows)), allow(dead_code))] // Windows only
+pub const SKIP_KNOWN_EXEC_SECTION: &str =
+    "section Windows makes executable itself (wow64cpu.dll's W64SVC), same bytes as the file";
 
 fn is_core(name: &str) -> bool {
     CORE_PE.contains(&name) || CORE_ELF.iter().any(|p| name.starts_with(p))
@@ -316,6 +328,20 @@ fn hit(
 }
 
 impl Change {
+    /// The verdict, with a self-patching runtime's rewrite of its own code
+    /// (up to SELF_PATCH_MAX bytes) taken as the patch it is.
+    fn judged(&self) -> Verdict {
+        match self.stats.verdict() {
+            Verdict::Rewritten
+                if self.stats.largest <= SELF_PATCH_MAX
+                    && SELF_PATCHING.contains(&file_name_lower(&self.path).as_str()) =>
+            {
+                Verdict::Patched
+            }
+            v => v,
+        }
+    }
+
     fn first_site(&self) -> usize {
         self.start + self.stats.site_offsets.first().copied().unwrap_or(0)
     }
@@ -369,12 +395,34 @@ impl Report {
         }
     }
 
+    /// Drop the sections Windows makes executable itself (EXEC_DATA_SECTIONS)
+    /// when they hold exactly the file's bytes, from System32.
+    #[cfg_attr(not(any(windows, lrng_typecheck_windows)), allow(dead_code))] // Windows only
+    pub fn settle_known_sections(&mut self) {
+        for e in std::mem::take(&mut self.exec_outside) {
+            let name = file_name_lower(&e.path);
+            let known = e.stats.differing == 0
+                && e.path
+                    .to_ascii_lowercase()
+                    .replace('/', "\\")
+                    .contains(r"\system32\")
+                && EXEC_DATA_SECTIONS
+                    .iter()
+                    .any(|(f, sec)| name == *f && e.what == format!("section {sec}"));
+            if known {
+                self.skip(SKIP_KNOWN_EXEC_SECTION);
+            } else {
+                self.exec_outside.push(e);
+            }
+        }
+    }
+
     /// The findings, as sidecar hits (regions are filled in by the caller).
     pub fn hits(&self) -> Vec<Hit> {
         let mut out = Vec::new();
         let mut patched: Vec<&Change> = Vec::new();
         for c in &self.changes {
-            match c.stats.verdict() {
+            match c.judged() {
                 Verdict::Clean => {}
                 Verdict::Rewritten => out.push(rewrite_hit(c)),
                 Verdict::Patched => match tamper_hit(c) {
@@ -429,12 +477,7 @@ impl Report {
         if !self.supported {
             return json!({ "supported": false });
         }
-        let count = |v: Verdict| {
-            self.changes
-                .iter()
-                .filter(|c| c.stats.verdict() == v)
-                .count()
-        };
+        let count = |v: Verdict| self.changes.iter().filter(|c| c.judged() == v).count();
         json!({
             "supported": true,
             "images": self.images,
@@ -839,6 +882,64 @@ mod tests {
             "{}",
             h.context
         );
+    }
+
+    #[test]
+    fn the_32_bit_runtime_rewrites_its_barriers_in_one_stretch() {
+        // 274 contiguous bytes in the 32-bit clr.dll: its patched barrier
+        // helpers, side by side. The same stretch in another module, or a
+        // longer one in clr.dll, is still rewritten code.
+        let barrier: Vec<(usize, u8)> = (0..274).map(|i| (i, 0x5A)).collect();
+        let clr32 = r"C:\Windows\Microsoft.NET\Framework\v4.0.30319\clr.dll";
+        let mut r = Report {
+            supported: true,
+            changes: vec![change(clr32, &barrier, 512, &[])],
+            ..Default::default()
+        };
+        let h = r.hits();
+        assert_eq!(
+            (h[0].rule.as_str(), h[0].severity.as_str()),
+            ("memory.image_inline_patch", "info")
+        );
+        assert_eq!(
+            (r.meta()["rewritten"].as_u64(), r.meta()["patched"].as_u64()),
+            (Some(0), Some(1))
+        );
+        r.changes = vec![change(r"C:\app\plugin.dll", &barrier, 512, &[])];
+        assert_eq!(r.hits()[0].rule, "memory.image_code_modified");
+        let long: Vec<(usize, u8)> = (0..2048).map(|i| (i, 0x5A)).collect();
+        r.changes = vec![change(clr32, &long, 4096, &[])];
+        assert_eq!(r.hits()[0].rule, "memory.image_code_modified");
+    }
+
+    #[test]
+    fn wow64cpu_service_section_is_windows_own() {
+        let sec = |path: &str, what: &str, differing: u64| ExecOutside {
+            path: path.into(),
+            start: 0x773b_7000,
+            len: 0x1000,
+            what: what.into(),
+            protect: "RX".into(),
+            stats: DiffStats {
+                differing,
+                ..Default::default()
+            },
+            loader_page: None,
+        };
+        let mut r = Report {
+            supported: true,
+            ..Default::default()
+        };
+        r.exec_outside = vec![
+            sec(r"C:\Windows\System32\wow64cpu.dll", "section W64SVC", 0),
+            sec(r"C:\Windows\System32\wow64cpu.dll", "section W64SVC", 12), // written to
+            sec(r"C:\Users\Public\wow64cpu.dll", "section W64SVC", 0),      // not Windows' copy
+            sec(r"C:\Windows\System32\other.dll", "section W64SVC", 0),
+            sec(r"C:\Windows\System32\wow64cpu.dll", "section .data", 0),
+        ];
+        r.settle_known_sections();
+        assert_eq!(r.exec_outside.len(), 4);
+        assert_eq!(r.skipped[SKIP_KNOWN_EXEC_SECTION], 1);
     }
 
     #[test]

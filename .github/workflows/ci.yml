@@ -170,17 +170,23 @@ jobs:
           # Every module the test process loads must compare clean with its file; then a
           # rewrite planted in its own copy of a DLL must be found at the right address.
           # Likewise hardware breakpoints, vectored handlers, system-call stubs, threads
-          # posed in system calls and extra ntdll mappings planted in the test process.
+          # posed in system calls and extra ntdll mappings planted in the test process,
+          # and threads started or waiting in planted code, whose stacks are walked (and
+          # must match Windows' own unwinder on a real waiting thread).
           # The test's "lrng-selftest:" lines, and any panic with its message, are raised
           # as annotations so the outcome reads from the checks API, not only the log.
           $out = @(cargo test --locked --release --manifest-path sidecar-rs/Cargo.toml memscan::windows -- --nocapture 2>&1 | ForEach-Object { "$_" })
           $code = $LASTEXITCODE
           $out | Write-Output
           function Esc($s) { $s -replace '%','%25' -replace "`r",'%0D' -replace "`n",'%0A' }
-          # GitHub keeps 10 notices per step: the system-call lines first.
-          $lines = @($out | Where-Object { $_ -match 'lrng-selftest:' })
-          @($lines | Where-Object { $_ -match 'lrng-selftest: system calls' }) + @($lines | Where-Object { $_ -notmatch 'lrng-selftest: system calls' }) |
-            Select-Object -First 10 | ForEach-Object { Write-Output ("::notice::" + (Esc $_)) }
+          # GitHub keeps 10 notices per step: one per self-test, its lines together.
+          $rest = @($out | Where-Object { $_ -match 'lrng-selftest:' })
+          foreach ($group in 'lrng-selftest: (threads|stack walk)', 'lrng-selftest: system calls', 'lrng-selftest: (exception hooks|handlers)') {
+            $sel = @($rest | Where-Object { $_ -match $group })
+            $rest = @($rest | Where-Object { $_ -notmatch $group })
+            if ($sel.Count) { Write-Output ("::notice::" + (Esc ($sel -join "`n"))) }
+          }
+          if ($rest.Count) { Write-Output ("::notice::" + (Esc ($rest -join "`n"))) }
           if ($code -ne 0) {
             $p = -1
             for ($i = 0; $i -lt $out.Count; $i++) { if ($out[$i] -match 'panicked at') { $p = $i; break } }
@@ -225,11 +231,37 @@ jobs:
           $sc = @($recs | ForEach-Object { $_.fields.syscalls } | Where-Object { $_ })
           Write-Output ("::notice::system calls (live PowerShell): " + ($sc | ConvertTo-Json -Compress -Depth 6))
           if ($sc.Count -lt 1 -or -not $sc[0].supported -or $sc[0].threads_in_syscall -lt 1 -or $sc[0].ntdll_stubs_known -lt 300) { throw "system calls weren't checked in a live process" }
+          # Threads: every start address read, the waiting threads' stacks walked
+          # through system DLLs, .NET's native images and into its JIT code (which
+          # .NET registers with ntdll), with nothing to report.
+          $th = @($recs | ForEach-Object { $_.fields.threads } | Where-Object { $_ })
+          Write-Output ("::notice::threads (live PowerShell): " + ($th | ConvertTo-Json -Compress -Depth 6))
+          if ($th.Count -lt 1 -or -not $th[0].supported -or $th[0].starts_read -lt 1 -or $th[0].stacks_walked -lt 1 -or $th[0].jit_ranges -lt 1) { throw "threads weren't checked in a live process" }
           foreach ($rule in 'memory.image_code_modified', 'memory.image_header_mismatch', 'memory.image_exec_outside_code', 'defense.amsi_patched', 'defense.etw_patched',
                             'defense.amsi_hwbp', 'defense.etw_hwbp', 'memory.hardware_breakpoint', 'memory.veh_unbacked',
                             'defense.direct_syscall', 'defense.indirect_syscall', 'defense.syscall_return_nonexec', 'defense.syscall_hwbp',
-                            'memory.syscall_stub', 'defense.ntdll_second_copy') {
+                            'memory.syscall_stub', 'defense.ntdll_second_copy',
+                            'memory.thread_start_unbacked', 'memory.thread_start_loadlibrary', 'memory.thread_start_spoofed',
+                            'memory.stack_unbacked', 'defense.stack_return_nonexec', 'defense.stack_frame_no_call') {
             if ($r.summary.by_rule.$rule) { throw "false positive: $rule on a clean PowerShell process" }
+          }
+          # The same on a 32-bit PowerShell: under WoW64 its threads' 64-bit side runs
+          # through wow64*.dll, whose frames and start addresses must read as ordinary.
+          $p32 = Start-Process -PassThru -WindowStyle Hidden "$env:windir\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList '-NoProfile','-Command','Start-Sleep 300'
+          Start-Sleep 3
+          ./lrng.exe -collectors memory -mem-pids $p32.Id -out mem32.json
+          $r32 = Get-Content mem32.json | ConvertFrom-Json
+          Stop-Process -Id $p32.Id
+          $recs32 = @($r32.results | Where-Object { $_.collector -eq 'memory' } | ForEach-Object { $_.records })
+          $th32 = @($recs32 | ForEach-Object { $_.fields.threads } | Where-Object { $_ })
+          Write-Output ("::notice::threads (live 32-bit PowerShell): " + ($th32 | ConvertTo-Json -Compress -Depth 6))
+          $recs32 | ForEach-Object { $_.findings } | Where-Object { $_ -and ($_.rule -like 'memory.*' -or $_.rule -like 'defense.*') } |
+            Select-Object -First 8 | ForEach-Object { Write-Output ("::notice::32-bit: " + $_.rule + " [" + $_.severity + "]: " + ($_.detail -replace '%','%25')) }
+          if ($th32.Count -lt 1 -or $th32[0].starts_read -lt 1 -or $th32[0].stacks_walked -lt 1) { throw "threads weren't checked in a live 32-bit process" }
+          foreach ($rule in 'defense.direct_syscall', 'defense.indirect_syscall', 'defense.syscall_return_nonexec', 'memory.syscall_stub',
+                            'memory.thread_start_unbacked', 'memory.thread_start_loadlibrary', 'memory.thread_start_spoofed',
+                            'memory.stack_unbacked', 'defense.stack_return_nonexec', 'defense.stack_frame_no_call') {
+            if ($r32.summary.by_rule.$rule) { throw "false positive: $rule on a clean 32-bit PowerShell process" }
           }
 
   linux-release:

@@ -1,9 +1,12 @@
 //! Reading a Windows process's exception hooks (judged in hooks.rs).
 //!
 //! Hardware breakpoints: every thread of the process is opened with
-//! THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION and only its debug
-//! registers are read (GetThreadContext with CONTEXT_DEBUG_REGISTERS; the
-//! thread isn't suspended, and nothing is set).
+//! THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION and its registers
+//! are read (GetThreadContext: the debug registers, and on x64 the control and
+//! integer registers the system-call and stack checks use; the thread isn't
+//! suspended, and nothing is set). Its start address is read on the same
+//! handle (NtQueryInformationThread), or on one opened with
+//! THREAD_QUERY_INFORMATION where Windows asks for that.
 //!
 //! Vectored handlers: ntdll keeps them on two lists, exception handlers and
 //! continue handlers, whose heads sit in ntdll's data section. ntdll is mapped
@@ -32,10 +35,12 @@
 
 use super::hooks::{self, Handler, HandlerList, Report};
 use super::pe;
-use super::procmem::{file_name_lower, ProcessMemory};
+use super::procmem::{file_name_lower, ProcessMemory, ThreadChecks};
 use super::syscalls;
+use super::threads;
 use super::windows::{protect_name, read_image_file, WinProcess};
 use super::windows_syscalls::{self, Regs};
+use super::windows_threads;
 use core::ffi::c_void;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -58,7 +63,7 @@ use windows_sys::Win32::System::Memory::{
 use windows_sys::Win32::System::ProcessStatus::{K32GetModuleInformation, MODULEINFO};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetProcessId, IsWow64Process, OpenThread, THREAD_GET_CONTEXT,
-    THREAD_QUERY_LIMITED_INFORMATION,
+    THREAD_QUERY_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION,
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -67,10 +72,12 @@ const CONTEXT_DEBUG: u32 =
 #[cfg(target_arch = "x86")]
 const CONTEXT_DEBUG: u32 =
     windows_sys::Win32::System::Diagnostics::Debug::CONTEXT_DEBUG_REGISTERS_X86;
-/// Debug registers, and (x64) the instruction and stack pointers.
+/// Debug registers, and (x64) the instruction and stack pointers and the
+/// integer registers a stack walk starts from.
 #[cfg(target_arch = "x86_64")]
-const CONTEXT_READ: u32 =
-    CONTEXT_DEBUG | windows_sys::Win32::System::Diagnostics::Debug::CONTEXT_CONTROL_AMD64;
+const CONTEXT_READ: u32 = CONTEXT_DEBUG
+    | windows_sys::Win32::System::Diagnostics::Debug::CONTEXT_CONTROL_AMD64
+    | windows_sys::Win32::System::Diagnostics::Debug::CONTEXT_INTEGER_AMD64;
 #[cfg(target_arch = "x86")]
 const CONTEXT_READ: u32 = CONTEXT_DEBUG;
 
@@ -87,20 +94,27 @@ pub(super) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
-/// Read the exception hooks and system calls of the process `p` has open;
-/// the search of its memory for stubs stops at `deadline`.
-pub(super) fn read(p: &WinProcess, deadline: Instant) -> (Report, syscalls::Report) {
+fn unsupported(why: &str) -> ThreadChecks {
+    ThreadChecks {
+        hooks: Report::unsupported(why),
+        calls: syscalls::Report::unsupported(why),
+        threads: threads::Report::unsupported(why),
+    }
+}
+
+/// Read the exception hooks, system calls, thread starts and stacks of the
+/// process `p` has open; the stack walks and the search of its memory for
+/// stubs stop at `deadline`.
+pub(super) fn read(p: &WinProcess, deadline: Instant) -> ThreadChecks {
     if !cfg!(any(target_arch = "x86_64", target_arch = "x86")) {
-        let why = "debug registers are read on x86 and x64 only";
-        return (Report::unsupported(why), syscalls::Report::unsupported(why));
+        return unsupported("thread registers are read on x86 and x64 only");
     }
     // SAFETY: plain Win32 queries on valid handles.
     let pid = unsafe { GetProcessId(p.h) };
     let me = unsafe { GetCurrentProcess() };
     let (self_wow, target_wow) = (wow64(me), wow64(p.h));
     if cfg!(target_pointer_width = "32") && self_wow == Some(true) && target_wow == Some(false) {
-        let why = "a 64-bit process can't be read from the 32-bit sidecar";
-        return (Report::unsupported(why), syscalls::Report::unsupported(why));
+        return unsupported("a 64-bit process can't be read from the 32-bit sidecar");
     }
     let mut rep = Report {
         supported: true,
@@ -111,8 +125,8 @@ pub(super) fn read(p: &WinProcess, deadline: Instant) -> (Report, syscalls::Repo
     if unsafe { CheckRemoteDebuggerPresent(p.h, &mut present) } != 0 {
         rep.debugged = Some(present != 0);
     }
-    let mut regs = Vec::new();
-    read_threads(pid, &mut rep, &mut regs);
+    let (mut regs, mut starts) = (Vec::new(), Vec::new());
+    let starts_unreadable = read_threads(pid, &mut rep, &mut regs, &mut starts);
 
     if self_wow.is_none() || self_wow != target_wow {
         rep.handlers_skipped = Some(
@@ -178,8 +192,15 @@ pub(super) fn read(p: &WinProcess, deadline: Instant) -> (Report, syscalls::Repo
                 .is_ok_and(|nt| nt.in_stub(&b.symbol));
         }
     }
-    let calls = windows_syscalls::read(p, &regs, deadline);
-    (rep, calls)
+    // The stack walks first: a few reads per waiting thread. The search of
+    // memory for stubs then has what is left of the time.
+    let (threads, jit) = windows_threads::read(p, &regs, &starts, starts_unreadable, deadline);
+    let calls = windows_syscalls::read(p, &regs, jit.as_deref(), deadline);
+    ThreadChecks {
+        hooks: rep,
+        calls,
+        threads,
+    }
 }
 
 fn wow64(h: HANDLE) -> Option<bool> {
@@ -213,12 +234,61 @@ fn threads_of(pid: u32) -> Vec<u32> {
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-fn read_threads(_: u32, _: &mut Report, _: &mut Vec<Regs>) {}
+fn read_threads(_: u32, _: &mut Report, _: &mut Vec<Regs>, _: &mut Vec<(u32, usize)>) -> usize {
+    0
+}
 
-/// Every thread's debug registers (into `rep`) and, on x64, its instruction
-/// and stack pointers (into `regs`).
+/// ThreadQuerySetWin32StartAddress: the routine a thread was created to run.
+const THREAD_START_ADDRESS: u32 = 9;
+const STATUS_ACCESS_DENIED: i32 = 0xC000_0022_u32 as i32;
+
+type NtQueryInformationThread =
+    unsafe extern "system" fn(HANDLE, u32, *mut c_void, u32, *mut u32) -> i32;
+
+/// The routine a thread was created to run, or the NTSTATUS saying why not.
+fn start_address(th: HANDLE) -> Result<usize, i32> {
+    static QUERY: OnceLock<Option<NtQueryInformationThread>> = OnceLock::new();
+    // SAFETY: an ntdll export with this signature.
+    let query = QUERY.get_or_init(|| unsafe {
+        let ntdll = GetModuleHandleW(wide("ntdll.dll").as_ptr());
+        GetProcAddress(ntdll, c"NtQueryInformationThread".as_ptr().cast()).map(|f| {
+            core::mem::transmute::<unsafe extern "system" fn() -> isize, NtQueryInformationThread>(
+                f,
+            )
+        })
+    });
+    let Some(query) = query else {
+        return Err(-1);
+    };
+    let mut start = 0usize;
+    // SAFETY: start receives one pointer-sized value.
+    let st = unsafe {
+        query(
+            th,
+            THREAD_START_ADDRESS,
+            &mut start as *mut usize as *mut c_void,
+            PTR as u32,
+            core::ptr::null_mut(),
+        )
+    };
+    if st == 0 {
+        Ok(start)
+    } else {
+        Err(st)
+    }
+}
+
+/// Every thread's debug registers (into `rep`), its start address (into
+/// `starts`) and, on x64, its instruction and stack pointers and integer
+/// registers (into `regs`). Returns how many start addresses couldn't be read.
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-fn read_threads(pid: u32, rep: &mut Report, regs: &mut Vec<Regs>) {
+fn read_threads(
+    pid: u32,
+    rep: &mut Report,
+    regs: &mut Vec<Regs>,
+    starts: &mut Vec<(u32, usize)>,
+) -> usize {
+    let mut starts_unreadable = 0;
     // The calling thread, when its own process is read: its context is its
     // own GetThreadContext call, and its stack has moved on by the time the
     // syscall checks look, so it has no call to judge.
@@ -239,7 +309,23 @@ fn read_threads(pid: u32, rep: &mut Report, regs: &mut Vec<Regs>) {
             );
             if th.is_null() {
                 rep.threads_unreadable += 1;
+                starts_unreadable += 1;
                 continue;
+            }
+            match start_address(th) {
+                Ok(a) => starts.push((tid, a)),
+                // Some Windows versions want THREAD_QUERY_INFORMATION for it.
+                Err(STATUS_ACCESS_DENIED) => {
+                    let q = OpenThread(THREAD_QUERY_INFORMATION, 0, tid);
+                    match (!q.is_null()).then(|| start_address(q)) {
+                        Some(Ok(a)) => starts.push((tid, a)),
+                        _ => starts_unreadable += 1,
+                    }
+                    if !q.is_null() {
+                        CloseHandle(q);
+                    }
+                }
+                Err(_) => starts_unreadable += 1,
             }
             let mut c: AlignedContext = core::mem::zeroed();
             c.0.ContextFlags = CONTEXT_READ;
@@ -247,10 +333,15 @@ fn read_threads(pid: u32, rep: &mut Report, regs: &mut Vec<Regs>) {
                 rep.threads += 1;
                 #[cfg(target_arch = "x86_64")]
                 if own != Some(tid) {
+                    let x = &c.0;
                     regs.push(Regs {
                         tid,
-                        rip: c.0.Rip as usize,
-                        rsp: c.0.Rsp as usize,
+                        rip: x.Rip as usize,
+                        rsp: x.Rsp as usize,
+                        int: [
+                            x.Rax, x.Rcx, x.Rdx, x.Rbx, x.Rsp, x.Rbp, x.Rsi, x.Rdi, x.R8, x.R9,
+                            x.R10, x.R11, x.R12, x.R13, x.R14, x.R15,
+                        ],
                     });
                 }
                 let dr = [
@@ -267,6 +358,7 @@ fn read_threads(pid: u32, rep: &mut Report, regs: &mut Vec<Regs>) {
             CloseHandle(th);
         }
     }
+    starts_unreadable
 }
 
 /// The memory an address points into.
@@ -667,7 +759,10 @@ mod tests {
         let _serial = crate::memscan::windows::SELFTEST.lock();
         let me = open(std::process::id()).unwrap();
         let soon = || std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let clean = me.thread_checks(soon()).expect("supported on Windows").0;
+        let clean = me
+            .thread_checks(soon())
+            .expect("supported on Windows")
+            .hooks;
         eprintln!("lrng-selftest: exception hooks, clean: {}", clean.meta());
         assert!(clean.supported && clean.handlers_walked, "{}", clean.meta());
         assert!(clean.threads >= 1, "{}", clean.meta());
@@ -736,7 +831,7 @@ mod tests {
         assert!(!th.is_null());
         set_breakpoints(th, [amsi, etw, sleep]);
 
-        let after = me.thread_checks(soon()).unwrap().0;
+        let after = me.thread_checks(soon()).unwrap().hooks;
 
         set_breakpoints(th, [0, 0, 0]);
         tx.send(()).unwrap();

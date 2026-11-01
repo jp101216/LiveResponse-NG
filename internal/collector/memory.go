@@ -245,6 +245,9 @@ var memoryRecordKeys = []string{
 	// System calls (Windows): threads in one, direct and indirect calls,
 	// stubs found in memory no image backs, extra copies of ntdll.
 	"syscalls",
+	// Threads (Windows): start addresses read, stacks walked and how the
+	// walks ended, JIT code ranges, and what was found.
+	"threads",
 }
 
 // memoryRecords turns sidecar responses into one record per process (every

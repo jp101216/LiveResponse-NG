@@ -451,6 +451,9 @@ pub struct Report {
     /// Threads that looked out of the ordinary but had moved when read again
     /// (back from a short call, their stack slot reused): not reported.
     pub moved: usize,
+    /// Calls through ntdll returning into code a runtime registered as JIT
+    /// code: not judged.
+    pub jit: usize,
     pub stub_regions: Vec<StubRegion>,
     pub stub_copies: usize,
     pub trampolines: usize,
@@ -597,6 +600,7 @@ impl Report {
             "supported": true,
             "threads_in_syscall": self.in_syscall,
             "threads_moved": self.moved,
+            "jit_returns": self.jit,
             "direct": count(Verdict::Direct),
             "indirect": count(Verdict::Indirect),
             "return_not_executable": count(Verdict::ReturnNotExecutable),

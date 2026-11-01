@@ -44,6 +44,9 @@ pub(super) struct Regs {
     pub(super) tid: u32,
     pub(super) rip: usize,
     pub(super) rsp: usize,
+    /// The integer registers in unwind-code order (RAX, RCX, RDX, RBX, RSP,
+    /// RBP, RSI, RDI, R8-R15), where a stack walk starts from.
+    pub(super) int: [u64; 16],
 }
 
 /// Unbacked executable memory searched per process, at most.
@@ -119,8 +122,14 @@ impl Ntdll {
 }
 
 /// Read the system calls of the process `p` has open, given its threads'
-/// registers. `same_bitness` is false for a 32-bit process.
-pub(super) fn read(p: &WinProcess, regs: &[Regs], deadline: Instant) -> Report {
+/// registers and the code ranges it registered as JIT code (None when they
+/// couldn't be read; see windows_threads.rs).
+pub(super) fn read(
+    p: &WinProcess,
+    regs: &[Regs],
+    jit: Option<&[(usize, usize)]>,
+    deadline: Instant,
+) -> Report {
     if !cfg!(target_arch = "x86_64") {
         return Report::unsupported(
             "system calls are judged in 64-bit processes, by the 64-bit sidecar",
@@ -163,7 +172,16 @@ pub(super) fn read(p: &WinProcess, regs: &[Regs], deadline: Instant) -> Report {
                     call.stub = nt.function(r.rip - 2);
                 }
                 if let Some(ret) = read_usize(p.h, r.rsp) {
-                    call.ret = Some((ret, place(p, ret, nt, &mut is_copy)));
+                    let at = place(p, ret, nt, &mut is_copy);
+                    // A runtime's JIT code calling ntdll (a P/Invoke straight
+                    // into an Nt function) is where managed code waits.
+                    if matches!(at, Place::Unbacked { .. })
+                        && jit.is_some_and(|j| j.iter().any(|&(lo, hi)| ret >= lo && ret < hi))
+                    {
+                        rep.jit += 1;
+                        continue;
+                    }
+                    call.ret = Some((ret, at));
                 }
             }
             Place::Unbacked { .. } => call.copy_of = copied_stub(p, r.rip, &nt.stubs),
@@ -207,7 +225,7 @@ pub(super) fn read(p: &WinProcess, regs: &[Regs], deadline: Instant) -> Report {
 /// Whether a thread is still at the instruction and stack pointers it was
 /// read with, and (when given) the address at its stack pointer is still
 /// `ret`. A thread blocked in a system call stays put.
-fn still_in_call(p: &WinProcess, r: &Regs, ret: Option<usize>) -> bool {
+pub(super) fn still_in_call(p: &WinProcess, r: &Regs, ret: Option<usize>) -> bool {
     registers_now(r.tid) == Some((r.rip, r.rsp))
         && ret.is_none_or(|v| read_usize(p.h, r.rsp) == Some(v))
 }
@@ -557,7 +575,7 @@ mod tests {
         let me = open(std::process::id()).unwrap();
         let soon = || Instant::now() + Duration::from_secs(60);
         let nt = ntdll().as_ref().expect("ntdll");
-        let clean = me.thread_checks(soon()).unwrap().1;
+        let clean = me.thread_checks(soon()).unwrap().calls;
         eprintln!("lrng-selftest: system calls, clean: {}", clean.meta());
         assert!(nt.stubs.len() > 300, "{} ntdll stubs known", nt.stubs.len());
         assert!(clean.supported && clean.in_syscall >= 1, "{}", clean.meta());
@@ -623,7 +641,7 @@ mod tests {
         let (image, f1, m1) = map_ntdll(false);
         let (view, f2, m2) = map_ntdll(true);
 
-        let after = me.thread_checks(soon()).unwrap().1;
+        let after = me.thread_checks(soon()).unwrap().calls;
 
         for p in posed {
             p.release();

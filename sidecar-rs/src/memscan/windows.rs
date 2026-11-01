@@ -242,10 +242,7 @@ impl ProcessMemory for WinProcess {
         rep
     }
 
-    fn thread_checks(
-        &self,
-        deadline: Instant,
-    ) -> Option<(super::hooks::Report, super::syscalls::Report)> {
+    fn thread_checks(&self, deadline: Instant) -> Option<super::procmem::ThreadChecks> {
         Some(super::windows_hooks::read(self, deadline))
     }
 }

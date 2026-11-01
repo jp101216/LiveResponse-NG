@@ -398,8 +398,8 @@ fn find_in_ntdll(me: HANDLE, ntdll: (usize, usize), value: u32) -> Vec<usize> {
                 )
             };
             if ok != 0 {
-                for (i, w) in buf[..got].chunks_exact(4).enumerate() {
-                    if u32::from_ne_bytes([w[0], w[1], w[2], w[3]]) == value {
+                for (i, w) in buf[..got].as_chunks::<4>().0.iter().enumerate() {
+                    if u32::from_ne_bytes(*w) == value {
                         out.push(base + 4 * i);
                     }
                 }

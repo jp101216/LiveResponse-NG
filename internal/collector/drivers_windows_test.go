@@ -116,7 +116,14 @@ func TestDriversOnWindows(t *testing.T) {
 	if compared < 50 {
 		t.Errorf("only %d Authenticode digests compared with Windows'", compared)
 	}
-	t.Logf("%d loaded drivers; %d Authenticode digests identical to Windows' own", loaded, compared)
+	findings := map[string]int{}
+	for _, r := range res.Records {
+		for _, f := range r.Findings {
+			findings[f.Rule]++
+		}
+	}
+	t.Logf("lrng-selftest: drivers: %d loaded, %d registered only; %d Authenticode digests identical to Windows' own; findings %v; policy %v",
+		loaded, len(res.Records)-1-loaded, compared, findings, ci)
 }
 
 // Plant entries in the vulnerable-driver list for drivers this host really
@@ -204,4 +211,5 @@ S	-	-	%s	-	-
 	if res.Meta["known_vulnerable_or_malicious"].(int) < 2 {
 		t.Errorf("meta %v", res.Meta)
 	}
+	t.Logf("lrng-selftest: planted drivers found: %v (registered copy checked: %v)", found, installed)
 }

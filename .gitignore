@@ -4,6 +4,9 @@
 /lrng-x86.exe
 /intelgen
 /intelgen.exe
+/drivergen
+/drivergen.exe
+/drivers.json
 *.test
 
 # Rust build output

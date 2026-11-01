@@ -30,6 +30,10 @@ func (*driversCollector) Platforms() []string { return []string{"windows"} }
 
 func (c *driversCollector) Configure(o RunOptions) { c.opts = o }
 
+// Timeout allows for hashing every driver file twice on a slow disk (a GPU
+// driver alone can be 100 MiB); a typical host takes seconds.
+func (*driversCollector) Timeout() time.Duration { return 2 * time.Minute }
+
 func (c *driversCollector) Collect(ctx context.Context) (Result, error) {
 	return collectDrivers(ctx, c.opts)
 }

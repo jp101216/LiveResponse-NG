@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.13.0
+
+Adds detection of bring-your-own-vulnerable-driver (BYOVD) and of the
+"patchless" AMSI and ETW bypasses, which use a hardware breakpoint and a
+vectored exception handler instead of changing any code. No new dependencies;
+the report schema is unchanged at 1.2 (new fields and rules only).
+
+### Added
+- **`drivers` collector (Windows, on by default).** Every module the kernel
+  has loaded (from its own module list) and every driver registered as a
+  service, one record per file, each hashed (SHA-256) and fingerprinted by its
+  **Authenticode digest**, which stays the same when a driver is re-signed.
+  Both are looked up in the bundled **LOLDrivers** list of known vulnerable
+  and malicious drivers (712 drivers, 2,393 samples), offline. Only exact
+  hashes match; LOLDrivers' file names are leads, not detections.
+  - `persistence.malicious_driver` (*critical*), `privesc.vulnerable_driver_loaded`
+    (*suspect*), `privesc.vulnerable_driver_installed` (*notable*; lower when
+    HVCI is on and blocks that build). Each names the LOLDrivers entry, its
+    CVEs and which hash matched, and links to its page.
+  - For drivers no list names: `privesc.driver_unusual_path` (loaded from a
+    temp, download or world-writable directory) and
+    `defense.loaded_driver_file_missing` (loaded, then its file deleted: how
+    BYOVD loaders, and some tools, clean up). Crash-dump copies of storage
+    drivers are hashed as the file they came from, never reported missing.
+  - The host's driver-loading policy as a record: kernel code integrity, test
+    signing, kernel debugging, memory integrity (HVCI), and Microsoft's
+    vulnerable driver blocklist, with `defense.driver_blocklist_disabled` and
+    `defense.code_integrity_weakened`.
+- **Sysmon driver loads in the event log.** Sysmon's event 6 is matched
+  against the same list by its SHA-256 or SHA-1, so a vulnerable driver that
+  was loaded and removed before lrng ran is still found; an unsigned driver
+  load is `defense.unsigned_driver_loaded`. Works in offline `-evtx` triage on
+  any OS.
+- **Exception hooks in the memory scan (Windows).** Every thread's debug
+  registers and both of ntdll's vectored handler lists are read:
+  `defense.amsi_hwbp` and `defense.etw_hwbp` (*critical*: a hardware
+  breakpoint on `amsi.dll` code or an ETW event writer; *suspect* when a
+  debugger is attached), `memory.hardware_breakpoint` (any other armed
+  breakpoint), and `memory.veh_unbacked` (*critical*: a vectored exception or
+  continue handler in executable memory no image file backs). Each process's
+  record gains `exception_hooks`: threads read, breakpoints, handlers walked,
+  and the modules that registered handlers.
+- **`internal/pehash`**, the Authenticode digest (SHA-256 and SHA-1 in one
+  streamed pass), and **`cmd/drivergen`**, which builds the dataset from
+  LOLDrivers' `drivers.json` (`make driver-data`), sorted so a refresh diffs
+  cleanly.
+
+### Security
+- **The sidecar asks for one new right**: `THREAD_GET_CONTEXT` (with
+  `THREAD_QUERY_LIMITED_INFORMATION`) on the threads of a process it scans, to
+  read their debug registers. Threads aren't suspended and nothing is set. To
+  find ntdll's handler lists it registers a no-op handler of each kind in its
+  own process for a moment and removes it; a target's lists are read twice and
+  checked link by link, and a decoded handler that points at nothing
+  executable is counted, not reported, so a list changing underneath can't
+  produce a finding.
+- Driver files and `drivers.json` are hostile input: the Authenticode reader
+  bounds-checks every offset (fuzzed), and the dataset parser rejects any
+  malformed line.
+
+### Tested
+- The Authenticode digest matches LIEF's on 207 Windows binaries (34 signed)
+  and LOLDrivers' recorded digest of a real vulnerable driver; on the Windows
+  runner it matches Windows' own (`CryptCATAdminCalcHashFromFileHandle2`) for
+  every loaded driver.
+- On the Windows runner, entries planted in the list for drivers really loaded
+  there (one by file hash, one by the digest Windows computed) and for a
+  registered, never-started copy are reported loaded, malicious and installed.
+- The sidecar's Windows self-test plants a handler on both lists and hardware
+  breakpoints on `AmsiScanBuffer`, `EtwEventWrite` and `Sleep`, and requires
+  each to be found at its address, after a clean pass that must find the test
+  binary's own handler and report nothing. The live PowerShell scan gates all
+  four new memory rules against false positives.
+
+### Third-party data
+- LOLDrivers (Apache License 2.0). Its license ships beside the data and in
+  every release archive, with `THIRD_PARTY_NOTICES.md`.
+
 ## 0.12.0
 
 Adds the report viewer: one offline HTML page that reads lrng's reports, so an

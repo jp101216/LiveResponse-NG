@@ -5,6 +5,7 @@
 ```
 cmd/lrng/              CLI entry point (flags, validation, exit codes)
 cmd/intelgen/          Offline dataset generator for internal/intel (dev tool)
+cmd/drivergen/         LOLDrivers -> internal/vulndrivers dataset generator (dev tool)
 internal/
   collector/           Collector interface, registry, parallel dispatcher,
                        the Windows and Linux collectors and the portable
@@ -16,6 +17,11 @@ internal/
   aidetect/            AI module A — LLM-callout detection (OS-agnostic)
   intel/               Offline endpoint-intelligence engine (IP -> ASN /
                        country / category), with its go:embed'd dataset
+  vulndrivers/         Known vulnerable and malicious Windows drivers
+                       (LOLDrivers, go:embed'd), looked up by file and
+                       Authenticode hash
+  pehash/              Authenticode digest of a PE file (streamed,
+                       bounds-checked)
   winreg/              Read-only registry reader (advapi32), value decoding,
                        and an offline hive-file (regf) parser (hive.go) for
                        hives the live API doesn't expose, such as Amcache.hve
@@ -35,9 +41,13 @@ sidecar-rs/            Rust sidecar
                        memory heuristics, budgets
     integrity.rs       image integrity: diffing mapped code against its file,
                        change sites, verdicts and their findings
+    hooks.rs           exception hooks: hardware breakpoints and vectored
+                       handlers, and their findings (portable judging)
     pe.rs              bounds-checked PE reader (sections, relocations,
                        exports) and the per-module comparison
     windows.rs         VirtualQueryEx / ReadProcessMemory (read-only)
+    windows_hooks.rs   debug registers (GetThreadContext) and ntdll's
+                       vectored handler lists (DecodeRemotePointer)
     linux.rs           /proc/<pid>/maps + /proc/<pid>/mem
     yara.rs            rule loading (file/dir, namespaces) and block scanning
 .github/workflows/     CI: Linux checks, real-Windows sweep, integration
@@ -255,6 +265,36 @@ site is named by the nearest export. The check stops at its deadline or byte
 cap and says so (`stopped`); Linux streams each mapping in chunks rather than
 holding it whole. With no YARA rules and no prompt scan, the region walk after
 it reads only each region's first chunk, which is all the heuristics need.
+
+On Windows the sidecar then reads the process's **exception hooks**
+(`windows_hooks.rs`, judged in `hooks.rs`): each thread's debug registers,
+with `THREAD_GET_CONTEXT` and without suspending it, and ntdll's two vectored
+handler lists. The lists' heads are in ntdll's data, at the same address in
+every process of one architecture, so they are found once, in the sidecar:
+it registers a no-op handler of each kind, reads its own entry to see where
+the encoded handler sits and follows the entry to the head inside ntdll, and
+removes the handler. A target's list is walked with each entry's back link
+checked and the walk repeated until two passes agree; each handler is decoded
+with `DecodeRemotePointer` and placed with `VirtualQueryEx`. A decoded address
+that isn't executable is counted as invalid, never judged. A 32-bit process
+under the 64-bit sidecar has its handlers in its own ntdll, so only its debug
+registers are read.
+
+### Drivers
+
+`drivers` (Windows) reads the kernel's module list
+(`NtQuerySystemInformation(SystemModuleInformation)`, parsed portably in
+`drivers.go` for either pointer size) and the driver-type services, turns each
+kernel path (`\SystemRoot\…`, `\??\C:\…`, `System32\…`, `\Device\…`) into a
+Win32 path, and merges them into one record per file, loaded first in load
+order. Each file is hashed through the run's shared `FileHasher` and
+fingerprinted with `internal/pehash`; the file SHA-256, then the Authenticode
+SHA-256 and SHA-1, are looked up in `internal/vulndrivers`. Judging
+(`judgeDriver`, `codeIntegrity.findings`) and the record shape are portable and
+tested on any OS with real files and a planted dataset (`driverDataset` is a
+variable for that); the Windows tests plant entries for drivers the runner has
+loaded and check the digests against Windows' own. The same dataset serves the
+event-log collector's Sysmon event 6 check.
 
 ### Event logs
 
@@ -511,7 +551,7 @@ static FFI library, is a later change that leaves these types untouched.
   "run": {
     "started_at": "2026-10-14T18:00:00Z", "finished_at": "2026-10-14T18:00:09Z",
     "pid": 5120, "elevated": true, "args": ["-out", "E:\\case42\\WS01.json"],
-    "collectors": ["amcache", "autoruns", "comhijack", "eventlog", "localaccounts", "modules",
+    "collectors": ["amcache", "autoruns", "comhijack", "drivers", "eventlog", "localaccounts", "modules",
                    "network", "prefetch", "processes", "scheduledtasks", "services", "sessions",
                    "shimcache", "udp", "wmi"],
     "workers": 6, "timeout": "1m0s", "dns_lookups": true, "dns_correlation": false,

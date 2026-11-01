@@ -551,7 +551,10 @@ address in every process of one architecture, because ntdll is mapped once
 per boot, and the sidecar finds them by registering a no-op handler of each
 kind in itself, following it to its list's head and removing it again. Each
 list is read twice and checked link by link, so one changing underneath isn't
-misread, and every handler is decoded with `DecodeRemotePointer`. A handler that
+misread, and every handler is decoded with the process's pointer cookie. Windows
+gives out another process's cookie (`DecodeRemotePointer`) only to a handle
+with more than read access, which lrng never asks for, so the cookie is read
+from the copy ntdll keeps in its own data, found the same way. A handler that
 points into executable memory no image file backs is `memory.veh_unbacked`:
 injected code handling its own exceptions, as patchless hooks and sleep
 obfuscation do. Handlers in images (the .NET runtime registers some, and so

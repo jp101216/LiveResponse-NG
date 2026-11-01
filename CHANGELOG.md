@@ -55,7 +55,9 @@ the report schema is unchanged at 1.2 (new fields and rules only).
   own process for a moment and removes it; a target's lists are read twice and
   checked link by link, and a decoded handler that points at nothing
   executable is counted, not reported, so a list changing underneath can't
-  produce a finding.
+  produce a finding. Handlers are decoded with the target's pointer cookie,
+  read from ntdll's own copy of it: `DecodeRemotePointer` would need more than
+  read access to the process.
 - Driver files and `drivers.json` are hostile input: the Authenticode reader
   bounds-checks every offset (fuzzed), and the dataset parser rejects any
   malformed line.

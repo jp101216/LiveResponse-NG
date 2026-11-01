@@ -47,7 +47,8 @@ sidecar-rs/            Rust sidecar
                        exports) and the per-module comparison
     windows.rs         VirtualQueryEx / ReadProcessMemory (read-only)
     windows_hooks.rs   debug registers (GetThreadContext) and ntdll's
-                       vectored handler lists (DecodeRemotePointer)
+                       vectored handler lists, decoded with the
+                       pointer cookie ntdll keeps
     linux.rs           /proc/<pid>/maps + /proc/<pid>/mem
     yara.rs            rule loading (file/dir, namespaces) and block scanning
 .github/workflows/     CI: Linux checks, real-Windows sweep, integration
@@ -275,7 +276,11 @@ it registers a no-op handler of each kind, reads its own entry to see where
 the encoded handler sits and follows the entry to the head inside ntdll, and
 removes the handler. A target's list is walked with each entry's back link
 checked and the walk repeated until two passes agree; each handler is decoded
-with `DecodeRemotePointer` and placed with `VirtualQueryEx`. A decoded address
+with the target's pointer cookie and placed with `VirtualQueryEx`. Windows
+gives out another process's cookie (`DecodeRemotePointer`) only to a handle
+with more than read access, so the cookie is read from ntdll's own copy instead: its address is
+found once by looking for the sidecar's cookie in the sidecar's ntdll, after
+checking that decoding with it undoes `EncodePointer`. A decoded address
 that isn't executable is counted as invalid, never judged. A 32-bit process
 under the 64-bit sidecar has its handlers in its own ntdll, so only its debug
 registers are read.

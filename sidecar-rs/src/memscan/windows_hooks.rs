@@ -13,12 +13,21 @@
 //! own process, following that entry to its list's head, noting where in the
 //! entry the (pointer-encoded) handler is stored, and removing the handler
 //! again. A target's lists are then read with ReadProcessMemory, each entry
-//! checked against its neighbours, the whole list read twice so one changing
-//! underneath isn't misread, and each handler decoded with DecodeRemotePointer
-//! (which reads the target's pointer cookie). Nothing is written to the
-//! target. A 32-bit process scanned by the 64-bit sidecar keeps its handlers
-//! in its own 32-bit ntdll, which this doesn't read; its debug registers are
-//! still checked.
+//! checked against its neighbours, and the whole list read twice so one
+//! changing underneath isn't misread.
+//!
+//! Handlers are stored encoded with the process's pointer cookie
+//! (EncodePointer). DecodeRemotePointer would decode them, but Windows only
+//! hands out another process's cookie to a handle with more than read access
+//! (it refuses PROCESS_QUERY_INFORMATION | PROCESS_VM_READ), which the
+//! sidecar never asks for. ntdll keeps its own copy of the cookie, though,
+//! in its data, at the same address in every process: the sidecar finds it by
+//! looking for its own cookie in its own ntdll, after checking that decoding
+//! with that cookie undoes EncodePointer here, and reads the target's copy with
+//! ReadProcessMemory. A decoded handler that points at nothing executable is
+//! counted, not judged. Nothing is written to the target. A 32-bit process
+//! scanned by the 64-bit sidecar keeps its handlers in its own 32-bit ntdll,
+//! which this doesn't read; its debug registers are still checked.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use super::hooks::{self, Handler, HandlerList, Report};
@@ -26,13 +35,13 @@ use super::pe;
 use super::procmem::{file_name_lower, ProcessMemory};
 use super::windows::{protect_name, read_image_file, WinProcess};
 use core::ffi::c_void;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredContinueHandler, AddVectoredExceptionHandler, CheckRemoteDebuggerPresent,
-    DecodePointer, GetThreadContext, ReadProcessMemory, RemoveVectoredContinueHandler,
-    RemoveVectoredExceptionHandler, CONTEXT, EXCEPTION_POINTERS,
+    DecodePointer, EncodePointer, GetThreadContext, ReadProcessMemory,
+    RemoveVectoredContinueHandler, RemoveVectoredExceptionHandler, CONTEXT, EXCEPTION_POINTERS,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
@@ -41,6 +50,7 @@ use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress
 use windows_sys::Win32::System::Memory::{
     VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, PAGE_EXECUTE,
     PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS,
+    PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
 };
 use windows_sys::Win32::System::ProcessStatus::{K32GetModuleInformation, MODULEINFO};
 use windows_sys::Win32::System::Threading::{
@@ -103,6 +113,7 @@ pub(super) fn read(p: &WinProcess) -> Report {
                 Err(e) => rep.handlers_skipped = Some(e),
                 Ok(hs) => {
                     rep.handlers_walked = true;
+                    let decoded = hs.len();
                     for (list, addr) in hs {
                         match locate(p, addr) {
                             Some(m) if m.exec => rep.handlers.push(Handler {
@@ -117,6 +128,13 @@ pub(super) fn read(p: &WinProcess) -> Report {
                             }),
                             _ => rep.handlers_invalid += 1,
                         }
+                    }
+                    if decoded > 0 && rep.handlers.is_empty() {
+                        // Not one handler decoded to code: the cookie didn't fit.
+                        rep.handlers_walked = false;
+                        rep.handlers_skipped = Some(format!(
+                            "none of the {decoded} handler(s) decoded to executable memory"
+                        ));
                     }
                 }
             },
@@ -270,11 +288,129 @@ fn read_usize(h: HANDLE, addr: usize) -> Option<usize> {
     (ok != 0 && got == PTR).then(|| usize::from_ne_bytes(v))
 }
 
-/// Where the handler lists are, and where a handler sits in an entry.
-#[derive(Clone, Copy, Debug)]
+fn read_u32(h: HANDLE, addr: usize) -> Option<u32> {
+    let mut v = [0u8; 4];
+    let mut got = 0usize;
+    // SAFETY: v holds 4 bytes; got receives the count.
+    let ok = unsafe {
+        ReadProcessMemory(
+            h,
+            addr as *const c_void,
+            v.as_mut_ptr() as *mut c_void,
+            4,
+            &mut got,
+        )
+    };
+    (ok != 0 && got == 4).then(|| u32::from_ne_bytes(v))
+}
+
+/// Where the handler lists are, where a handler sits in an entry, and where
+/// ntdll keeps its copy of the process's pointer cookie.
+#[derive(Clone, Debug)]
 pub(super) struct Layout {
     pub(super) heads: [(HandlerList, usize); 2],
     pub(super) handler_off: usize,
+    pub(super) cookie_at: Vec<usize>,
+}
+
+/// Undo EncodePointer with a process's cookie: the pointer was XORed with
+/// the cookie and rotated right by its low bits.
+pub(super) fn decode_with(enc: usize, cookie: u32) -> usize {
+    #[cfg(target_pointer_width = "64")]
+    let plain = (enc as u64).rotate_left(cookie & 0x3f) as usize;
+    #[cfg(target_pointer_width = "32")]
+    let plain = (enc as u32).rotate_left(cookie & 0x1f) as usize;
+    plain ^ cookie as usize
+}
+
+const PROCESS_COOKIE: u32 = 36; // PROCESSINFOCLASS ProcessCookie
+
+type NtQueryInformationProcess =
+    unsafe extern "system" fn(HANDLE, u32, *mut c_void, u32, *mut u32) -> i32;
+
+/// The sidecar's own pointer cookie (a process may always ask for its own).
+fn own_cookie() -> Result<u32, String> {
+    // SAFETY: a lookup in ntdll, then a query of this process into a u32.
+    unsafe {
+        let ntdll = GetModuleHandleW(wide("ntdll.dll").as_ptr());
+        let f = GetProcAddress(ntdll, c"NtQueryInformationProcess".as_ptr().cast())
+            .ok_or("NtQueryInformationProcess is missing")?;
+        let query = core::mem::transmute::<
+            unsafe extern "system" fn() -> isize,
+            NtQueryInformationProcess,
+        >(f);
+        let mut cookie = 0u32;
+        let st = query(
+            GetCurrentProcess(),
+            PROCESS_COOKIE,
+            &mut cookie as *mut u32 as *mut c_void,
+            4,
+            core::ptr::null_mut(),
+        );
+        if st != 0 {
+            return Err(format!(
+                "the sidecar's own pointer cookie can't be read (NTSTATUS 0x{:08X})",
+                st as u32
+            ));
+        }
+        Ok(cookie)
+    }
+}
+
+/// Every 4-byte-aligned place in ntdll's readable, non-executable pages (in
+/// this process) that holds `value`.
+fn find_in_ntdll(me: HANDLE, ntdll: (usize, usize), value: u32) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut addr = ntdll.0;
+    while addr < ntdll.0 + ntdll.1 {
+        // SAFETY: mbi is a plain-data struct VirtualQueryEx fills in.
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+        let n = unsafe {
+            VirtualQueryEx(
+                me,
+                addr as *const c_void,
+                &mut mbi,
+                core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if n == 0 || mbi.RegionSize == 0 {
+            break;
+        }
+        let base = mbi.BaseAddress as usize;
+        let end = base.saturating_add(mbi.RegionSize).min(ntdll.0 + ntdll.1);
+        let data = mbi.State == MEM_COMMIT
+            && mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS) == 0
+            && matches!(
+                mbi.Protect & 0xff,
+                PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY
+            );
+        if data && end > base {
+            let mut buf = vec![0u8; end - base];
+            let mut got = 0usize;
+            // SAFETY: buf holds buf.len() bytes; got receives the count.
+            let ok = unsafe {
+                ReadProcessMemory(
+                    me,
+                    base as *const c_void,
+                    buf.as_mut_ptr() as *mut c_void,
+                    buf.len(),
+                    &mut got,
+                )
+            };
+            if ok != 0 {
+                for (i, w) in buf[..got].chunks_exact(4).enumerate() {
+                    if u32::from_ne_bytes([w[0], w[1], w[2], w[3]]) == value {
+                        out.push(base + 4 * i);
+                    }
+                }
+            }
+        }
+        if end <= addr {
+            break;
+        }
+        addr = end;
+    }
+    out
 }
 
 /// The no-op handler registered to find the lists. Returns
@@ -334,9 +470,22 @@ fn discover() -> Result<Layout, String> {
                 _ => offset = Some(off),
             }
         }
+        // The cookie the handlers are encoded with, and where ntdll keeps it.
+        let cookie = own_cookie()?;
+        let want = probe as unsafe extern "system" fn(*mut EXCEPTION_POINTERS) -> i32 as usize;
+        for test in [0, 0x1234_5670, want, usize::MAX - 0xfff] {
+            if decode_with(EncodePointer(test as *const c_void) as usize, cookie) != test {
+                return Err("pointers are encoded in a way the sidecar doesn't know".into());
+            }
+        }
+        let cookie_at = find_in_ntdll(me, range, cookie);
+        if cookie_at.is_empty() {
+            return Err("ntdll's copy of the pointer cookie wasn't found".into());
+        }
         Ok(Layout {
             heads,
             handler_off: offset.unwrap_or(0),
+            cookie_at,
         })
     }
 }
@@ -366,28 +515,6 @@ fn find_head(me: HANDLE, entry: usize, ntdll: (usize, usize)) -> Result<(usize, 
     Err("the handler list's head wasn't found in ntdll".into())
 }
 
-type DecodeRemote = unsafe extern "system" fn(HANDLE, *const c_void, *mut *mut c_void) -> i32;
-
-/// DecodeRemotePointer (Windows 10 and later), found at run time so the
-/// sidecar still starts where it is missing.
-fn decode_remote() -> Option<DecodeRemote> {
-    static F: OnceLock<Option<usize>> = OnceLock::new();
-    let f = F.get_or_init(|| {
-        ["kernelbase.dll", "kernel32.dll"].iter().find_map(|dll| {
-            // SAFETY: plain lookups; the module stays loaded for the process's life.
-            unsafe {
-                let m = GetModuleHandleW(wide(dll).as_ptr());
-                if m.is_null() {
-                    return None;
-                }
-                GetProcAddress(m, c"DecodeRemotePointer".as_ptr().cast()).map(|f| f as usize)
-            }
-        })
-    });
-    // SAFETY: the export has this signature.
-    f.map(|a| unsafe { core::mem::transmute::<usize, DecodeRemote>(a) })
-}
-
 /// One pass over a list: (entry, encoded handler) in order, or why the list
 /// can't be trusted.
 fn walk(h: HANDLE, head: usize, off: usize) -> Result<Vec<(usize, usize)>, String> {
@@ -413,9 +540,7 @@ fn walk(h: HANDLE, head: usize, off: usize) -> Result<Vec<(usize, usize)>, Strin
 /// Both lists' handlers, decoded. A list is read twice, and read again if the
 /// two passes differ, so a list changing underneath isn't misread.
 fn read_handlers(p: &WinProcess, l: &Layout) -> Result<Vec<(HandlerList, usize)>, String> {
-    let decode =
-        decode_remote().ok_or("DecodeRemotePointer is unavailable (Windows 10 or later)")?;
-    let mut out = Vec::new();
+    let mut encoded = Vec::new();
     for (list, head) in l.heads {
         let mut entries = None;
         for _ in 0..3 {
@@ -426,20 +551,28 @@ fn read_handlers(p: &WinProcess, l: &Layout) -> Result<Vec<(HandlerList, usize)>
             }
         }
         let entries = entries.ok_or("a handler list kept changing while it was read")?;
-        for (_, enc) in entries {
-            let mut dec: *mut c_void = core::ptr::null_mut();
-            // SAFETY: dec receives the decoded pointer.
-            let hr = unsafe { decode(p.h, enc as *const c_void, &mut dec) };
-            if hr != 0 {
-                return Err(format!(
-                    "the process's pointer cookie can't be read (HRESULT 0x{:08X}): its handlers can't be decoded",
-                    hr as u32
-                ));
-            }
-            out.push((list, dec as usize));
-        }
+        encoded.extend(entries.into_iter().map(|(_, enc)| (list, enc)));
     }
-    Ok(out)
+    if encoded.is_empty() {
+        return Ok(encoded);
+    }
+    // The target's own cookie, from ntdll's copy of it.
+    let cookies: BTreeSet<u32> = l
+        .cookie_at
+        .iter()
+        .filter_map(|&a| read_u32(p.h, a))
+        .filter(|&c| c != 0)
+        .collect();
+    let [cookie] = cookies.iter().copied().collect::<Vec<_>>()[..] else {
+        return Err(format!(
+            "the process's pointer cookie can't be read ({} candidate value(s))",
+            cookies.len()
+        ));
+    };
+    Ok(encoded
+        .into_iter()
+        .map(|(list, enc)| (list, decode_with(enc, cookie)))
+        .collect())
 }
 
 #[cfg(test)]

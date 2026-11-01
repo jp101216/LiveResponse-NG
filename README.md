@@ -16,7 +16,7 @@ modules, eBPF and the systemd journal behind the same interface.
 *The [report viewer](#report-viewer) on a lab VM seeded with harmless
 lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 
-> **Status:** v0.13. On **Linux**, a default run covers processes, network
+> **Status:** v0.14. On **Linux**, a default run covers processes, network
 > (TCP + UDP, with per-socket process attribution via `/proc`), loaded modules,
 > local accounts, persistence (cron, systemd, ld.so.preload, rc.local, XDG
 > autostart, PAM, sudo rules, udev), kernel modules (with a cross-view that
@@ -29,8 +29,11 @@ lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 > (LLM-callout detection) running too; see [Platform support](#platform-support).
 >
 > On **Windows**, a default run covers processes (with a process-tree,
-> command-line analysis and offline Authenticode verification that names the
-> signer), network (TCP + UDP, IPv4 + IPv6), services, ~20 autostart locations,
+> command-line analysis, offline Authenticode verification that names the
+> signer, and the tricks implants play: marking themselves critical so killing
+> them crashes Windows, running on a hidden desktop, back-dating their files),
+> network (TCP + UDP, IPv4 + IPv6), services, ~20 autostart locations (and the
+> registry keys UAC bypasses plant),
 > scheduled tasks (cross-checked against the Task Scheduler's registry cache),
 > WMI event subscriptions (including timer triggers), COM CLSID and TypeLib
 > hijacking, ShimCache, AmCache, prefetch
@@ -45,8 +48,9 @@ lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 > controller's and a certificate authority's (DCSync, Kerberoasting, AS-REP
 > roasting, shadow credentials, delegation and ACL backdoors, AD CS abuse), DNS
 > tunnels and other covert channels — which can also be triaged offline from
-> saved `.evtx` files on any OS. A correlation pass lines the logs up against the
-> live state. That's about 230 named detections, each mapped to MITRE ATT&CK, plus
+> saved `.evtx` files on any OS — and known implants by their own strings and
+> the files they stage (NIK C2). A correlation pass lines the logs up against
+> the live state. That's about 240 named detections, each mapped to MITRE ATT&CK, plus
 > your own Sigma rules (or the bundled pack), an optional super-timeline,
 > indicator (IOC) export and offline endpoint-intelligence attribution
 > (ASN / country / cloud / CDN / hosting / Tor, air-gapped), AI
@@ -109,7 +113,8 @@ attacker-controlled input. They speak newline-delimited JSON over a pipe.
                  │          comhijack · wmi                 │
                  │          drivers ─ LOLDrivers (BYOVD)    │
                  │          lateral · defenses · kerberos   │
-                 │          aiagents · rootkit (Linux)      │
+                 │          implants · aiagents             │
+                 │          rootkit (Linux)                 │
                  │          network                         │
                  │            └─ AI module A (LLM callouts) │
                  │          eventlog (live, or -evtx)       │
@@ -180,7 +185,14 @@ part of a tree (see [Detections](#detections)). On Windows, each process's
 environment is read for the .NET runtime's own variables — ETW switched off
 (`COMPlus_ETWEnabled=0`), a profiler DLL set to load (`COR_PROFILER`,
 `CORECLR_PROFILER`) — and only those are recorded (`runtime_env`): an
-environment also holds secrets, so nothing else in it is kept.
+environment also holds secrets, so nothing else in it is kept. The same read
+gives the desktop each process started on: a program on a desktop of its own,
+rather than the user's, is how a hidden VNC (HVNC) works out of sight. Each
+process's critical flag is read too (`critical`): Windows marks only its own
+core processes critical, so that their exit stops the system, and malware marks
+itself to be unkillable — a finding then warns that ending it will crash the
+host. Every image file's times are checked for back-dating (on Linux, through
+`/proc/<pid>/exe`).
 
 **`network`** — every IPv4 and IPv6 TCP connection and listener with state,
 local/remote endpoints and owning PID/process, plus module A's findings and
@@ -192,7 +204,8 @@ carries the hostnames the DNS cache holds for its remote address.
 **`services`** — every service from the registry: image path (raw and
 expanded), the normalised program and its SHA-256, `ServiceDll`, start type,
 service type, account, recovery `FailureCommand`, and the key's last-write
-time (≈ when it was installed or changed).
+time (≈ when it was installed or changed). Each service's program and DLL are
+checked for back-dated file times.
 
 **`drivers`** — every kernel driver on the host: each module the kernel has
 loaded (from its own module list, so nothing is missed for lack of a service
@@ -270,7 +283,13 @@ before anyone signs in (`sethc`, `utilman`, `osk`, `magnify`, `narrator`,
 `displayswitch`, `atbroker`) are compared byte for byte with `cmd.exe`,
 `powershell.exe`, `explorer.exe` and `taskmgr.exe` and judged by the original
 file name in their version resource: one replaced by a shell is a SYSTEM
-backdoor at the logon screen.
+backdoor at the logon screen. Each user's hive is checked for the keys UAC
+bypasses plant: a command under `ms-settings` (fodhelper, computerdefaults),
+`mscfile` (eventvwr), `exefile\shell\runas` (sdclt), `Folder` with an empty
+`DelegateExecute` (sdclt), wsreset's AppX key, `App Paths\control.exe`, or a
+per-user `%windir%` (the SilentCleanup task) — each makes an auto-elevating
+Windows program run that command elevated, without a prompt. Autostart programs'
+file times are checked for back-dating.
 
 **`scheduledtasks`** — the Task Scheduler store parsed from task XML
 (principal, run level, logon type, triggers, each action), the task file's
@@ -396,8 +415,20 @@ network (3), remote-thread (8), DNS (22) and process-tampering (25) events add
 DNS tunnels (many long, random-looking names under one domain, per program),
 DNS sent straight to a public resolver, QUIC from programs that aren't browsers,
 signed proxy-execution binaries reaching the internet, injected threads and
-process hollowing; Windows PowerShell's event 400 shows a PowerShell 2.0
-downgrade.
+process hollowing; its registry events (12, 13) show UAC-bypass keys even when
+they were deleted seconds later (as NIK C2 does); Windows PowerShell's event 400
+shows a PowerShell 2.0 downgrade.
+
+**`implants`** — specific implant families, found by what they are rather than
+how they behave. The programs running from outside the Windows and Program Files
+folders, and the programs sitting where NIK C2 copies itself (each user's
+`AppData\Roaming\Microsoft\Network` and temporary folder), are searched for a
+family's own strings (only Go programs, for NIK C2, up to 64 MB each and 1 GB
+in all); the users' and Windows' temporary folders are checked for the files it
+stages (its bootkit placeholder, its lock screen's page and batch file, a copy of
+the master boot record). The first family is **NIK C2**, the AI-enabled Go RAT
+Cisco Talos described in October 2026. The marker strings are kept encoded in
+lrng's own source, so lrng is never mistaken for the implant.
 
 **`kerberos`** — the Kerberos tickets cached in each logon session, from LSA
 (the list `klist` shows: client, server, times, encryption type and flags; no
@@ -500,9 +531,9 @@ against both malicious and ordinary examples.
 
 | Area | Rule ids |
 |---|---|
-| **Command lines** (processes, services, autoruns, task actions) | `exec.powershell_encoded` (decodes the payload into the finding), `exec.download_execute`, `exec.download_cradle`, `exec.powershell_reflective_load`, `exec.mshta_script`, `exec.rundll32_script`, `exec.regsvr32_scriptlet`, `exec.certutil_decode`, `exec.lolbin_proxy`, `exec.wmic_process_create`, `lateral.wmiexec`, `lateral.smbexec` and `lateral.atexec` (*critical*: the shells Impacket's and NetExec's wmiexec, dcomexec, mmcexec, smbexec and atexec run, in the shapes their source builds, T1047, T1569.002, T1053.005), `cred.lsass_dump` (comsvcs MiniDump, procdump), `cred.hive_or_ntds_dump`, `impact.inhibit_recovery` (vssadmin/wbadmin/bcdedit), `defense.clear_event_logs`, `defense.disable_defender`, `defense.firewall_disabled`, `persistence.account_created`, `persistence.admin_group_add`, `defense.powershell_downgrade` (`powershell -version 2`: no script-block logging, no AMSI, T1562.010), `cred.browser_remote_debugging` (a Chromium browser started with `--remote-debugging-port` on the user's own profile, how infostealers read cookies past app-bound encryption, T1539), `network.portproxy_rule` (`netsh interface portproxy add`, T1090.001); context at *notable*: `exec.powershell_hidden`, `exec.frombase64`, `exec.obfuscated_blob`, `exec.scheduled_task_create`, `exec.service_create` |
-| **Process tree** | `process.masquerade_path` (a system binary name outside its Windows directory), `process.unexpected_parent` (e.g. `lsass.exe` not started by `wininit.exe`), `process.document_app_child` (Office → shell), `process.server_app_child` (w3wp → shell: web shell), `process.wmi_child`, `process.service_shell`, `process.name_typosquat` (`scvhost`, `Isass`), `process.unusual_path` |
-| **Autostarts** | `persistence.autorun_unusual_path`, `persistence.startup_folder_program`, `persistence.policies_run`, `persistence.windows_load`, `persistence.winlogon_hijack`, `persistence.winlogon_extra`, `persistence.ifeo_debugger`, `persistence.silent_process_exit`, `persistence.appinit_dlls`, `persistence.appcert_dlls`, `persistence.lsa_authentication_package`, `persistence.lsa_security_package`, `persistence.password_filter`, `persistence.boot_execute`, `persistence.cmd_autorun`, `persistence.print_monitor`, `persistence.netsh_helper`, `persistence.screensaver`, `persistence.accessibility_backdoor` (*critical*: an accessibility program the logon screen runs that is a copy of a shell, or names another program in its version resource, T1546.008) |
+| **Command lines** (processes, services, autoruns, task actions) | `exec.powershell_encoded` (decodes the payload into the finding), `exec.download_execute`, `exec.download_cradle`, `exec.powershell_reflective_load`, `exec.mshta_script`, `exec.rundll32_script`, `exec.regsvr32_scriptlet`, `exec.certutil_decode`, `exec.lolbin_proxy`, `exec.wmic_process_create`, `lateral.wmiexec`, `lateral.smbexec` and `lateral.atexec` (*critical*: the shells Impacket's and NetExec's wmiexec, dcomexec, mmcexec, smbexec and atexec run, in the shapes their source builds, T1047, T1569.002, T1053.005), `cred.lsass_dump` (comsvcs MiniDump, procdump), `cred.hive_or_ntds_dump`, `impact.inhibit_recovery` (vssadmin/wbadmin/bcdedit), `defense.clear_event_logs`, `defense.disable_defender`, `defense.firewall_disabled`, `persistence.account_created`, `persistence.admin_group_add`, `defense.powershell_downgrade` (`powershell -version 2`: no script-block logging, no AMSI, T1562.010), `cred.browser_remote_debugging` (a Chromium browser started with `--remote-debugging-port` on the user's own profile, how infostealers read cookies past app-bound encryption, T1539), `network.portproxy_rule` (`netsh interface portproxy add`, T1090.001), `cred.wifi_keys` (`netsh wlan show profile … key=clear`: saved Wi-Fi passwords in clear text, T1555), `defense.raw_disk_access` (a script opening `\\.\PhysicalDrive`: the master boot record read or rewritten past every file permission, T1006), `exec.mshta_local_file` (mshta running an HTML application from a temporary or download folder: HTA droppers, NIK C2's lock screen, T1218.005); context at *notable*: `exec.powershell_hidden`, `exec.frombase64`, `exec.obfuscated_blob`, `exec.scheduled_task_create`, `exec.service_create`, `discovery.av_product` (asking Security Center which antivirus is installed, T1518.001), `exec.c2_shell_recon` (`chcp 65001` and reconnaissance in one line: the wrapper Go and Python implants put around each shell command, T1059.003) |
+| **Process tree** | `process.masquerade_path` (a system binary name outside its Windows directory), `process.unexpected_parent` (e.g. `lsass.exe` not started by `wininit.exe`), `process.document_app_child` (Office → shell), `process.server_app_child` (w3wp → shell: web shell), `process.wmi_child`, `process.service_shell`, `process.name_typosquat` (`scvhost`, `Isass`), `process.unusual_path`; and from each process: `defense.critical_process` (*critical*: a process outside Windows' own core set marked critical, so ending it crashes the host — the finding says not to; *notable* for a Windows program Windows doesn't mark, T1562), `defense.hidden_desktop` (a process started on a desktop of its own: *critical* for explorer, *suspect* for browsers and shells, the hidden VNC that works in the user's session out of sight; browser sandboxes' and Windows Search's desktops excepted, T1564.003), `defense.timestomp` (*suspect*: an image dated before 1980, which no file system or archive a program arrives through records; *notable* in the future, T1070.006 — also on autostart and service programs, and on Linux) |
+| **Autostarts** | `persistence.autorun_unusual_path`, `persistence.startup_folder_program`, `persistence.policies_run`, `persistence.windows_load`, `persistence.winlogon_hijack`, `persistence.winlogon_extra`, `persistence.ifeo_debugger`, `persistence.silent_process_exit`, `persistence.appinit_dlls`, `persistence.appcert_dlls`, `persistence.lsa_authentication_package`, `persistence.lsa_security_package`, `persistence.password_filter`, `persistence.boot_execute`, `persistence.cmd_autorun`, `persistence.print_monitor`, `persistence.netsh_helper`, `persistence.screensaver`, `persistence.accessibility_backdoor` (*critical*: an accessibility program the logon screen runs that is a copy of a shell, or names another program in its version resource, T1546.008), `privesc.uac_bypass_key` (*critical*: a command in a user's `ms-settings`, `mscfile`, `exefile\shell\runas`, `Folder` (with an empty `DelegateExecute`), wsreset or `App Paths\control.exe` key, or a per-user `%windir%` — run elevated by fodhelper, eventvwr, sdclt, wsreset or SilentCleanup without a UAC prompt, T1548.002; also from Sysmon's registry events) |
 | **Services & scheduled tasks** | `persistence.service_unusual_path`, `persistence.service_script_host`, `persistence.service_unquoted_path`, `persistence.service_failure_command`, `lateral.service_in_windows_dir` (PsExec/Impacket), `persistence.scheduled_task_unusual_path`, `persistence.scheduled_task_hidden` (Tarrask), `persistence.scheduled_task_no_file`, `persistence.scheduled_task_unregistered` |
 | **COM & WMI persistence** | `persistence.com_hijack_user_shadow` (a per-user CLSID overriding a machine one), `persistence.com_server_unusual_path`, `persistence.com_script_server` (`scrobj.dll` / script-host server), `persistence.com_treatas_redirect`; `persistence.wmi_script_consumer` (fileless `ActiveScriptEventConsumer`), `persistence.wmi_commandline_consumer`, `persistence.wmi_consumer_unusual_path`, `persistence.wmi_consumer`, `persistence.wmi_filter`, `persistence.wmi_subscription_active` (a binding — the persistence is live), `persistence.wmi_timer` (an `__IntervalTimerInstruction`/`__AbsoluteTimerInstruction`), `persistence.wmi_timer_filter` (a `__TimerEvent` filter — a schedule-based trigger); TypeLib hijacking: `persistence.typelib_script_moniker`, `persistence.typelib_unusual_path`, `persistence.typelib_user_shadow` |
 | **Accounts & sessions** | `accounts.dollar_suffix_user`, `accounts.hidden_from_logon_screen`, `accounts.guest_enabled`, `accounts.password_not_required`, `sessions.remote_from_public_address` |
@@ -512,9 +543,10 @@ against both malicious and ordinary examples.
 | **Kernel drivers (BYOVD)** | `persistence.malicious_driver` (*critical*: a driver LOLDrivers lists as malicious, loaded or installed, T1014), `privesc.vulnerable_driver_loaded` (a known vulnerable driver in the kernel, T1068), `privesc.vulnerable_driver_installed` (*notable*: registered, not loaded), `privesc.driver_unusual_path` (a driver loaded from a temp, download or world-writable directory), `defense.loaded_driver_file_missing` (*notable*: loaded, then its file deleted, T1070.004); the loading policy: `defense.driver_blocklist_disabled` (Microsoft's vulnerable driver blocklist switched off, T1562.001), `defense.code_integrity_weakened` (kernel code integrity off, test signing or kernel debugging on, T1553.006) |
 | **Lateral movement & C2 traces** (`lateral`) | `network.c2_named_pipe` (a pipe named the way Cobalt Strike, a malleable profile, another framework or a known malware family names its pipes: *critical* for the defaults, *suspect* for profile names, T1071), `lateral.remote_exec_pipe` (PsExec, PAExec and CSExec at *notable*; RemCom, as Impacket's psexec uses it, at *suspect*, T1569.002), `privesc.potato_pipe` (*critical*: a pipe named after a path to another pipe, how PrintSpoofer and the potato exploits catch a coerced SYSTEM service, T1134.001), `cred.dump_tool_pipe` (*critical*: cachedump, lsadump, WCE, Koh), `lateral.impacket_output_file` (an output file Impacket's wmiexec, dcomexec or smbexec didn't get to delete, with the start of the output in the record), `network.portproxy_rule` (a port proxy: *suspect* when it relays to RDP, SMB, WinRM, LDAP, Kerberos, SQL or SSH, or to a public address, T1090.001) |
 | **Host defenses** (`defenses`) | `defense.defender_exclusion` (graded: a whole drive, a temporary, download or world-writable folder, an executable extension or a script host is *suspect*, anything else *notable*, T1562.001), `defense.defender_protection_off` (real-time, behaviour or script scanning off by preference or policy; cloud protection or tamper protection off at *notable*), `cred.wdigest_enabled` (*suspect*: WDigest set to keep passwords in clear text in LSASS, T1112), `cred.lsa_protection_off` (LSA protection switched off explicitly), `cred.restricted_admin_enabled` (RDP's Restricted Admin mode, which accepts a hash as a logon, T1550.002), `cred.ntlmv1_allowed` (`LmCompatibilityLevel` 2 or lower, T1557.001), `cred.dsrm_network_logon` (`DsrmAdminLogonBehavior` 2: the DC's DSRM administrator logs on over the network, T1098); AMSI: `defense.amsi_provider_hijacked` (Defender's provider CLSID registered to another DLL, T1562.001), `defense.amsi_provider_missing` (none registered while Defender is installed), `persistence.amsi_provider` (*notable*: a third-party provider, loaded into every script host; *suspect* from a user's profile or a temporary folder, T1546); .NET (from the registry environments, and each process's in `processes`): `defense.dotnet_etw_disabled` (`COMPlus_ETWEnabled=0`: .NET stops writing the ETW events EDR watches assemblies load by, T1562.006), `persistence.clr_profiler` (`COR_PROFILER`/`CORECLR_PROFILER`: a DLL loaded into every .NET process; *suspect* from a user's profile or temporary folder, T1574.012) |
-| **Event logs** | `defense.clear_event_logs` (Security 1102 / System 104), `eventlog.service_installed` (7045), `persistence.account_created` (4720), `persistence.admin_group_add` (4728/4732/4756 to a privileged group), `eventlog.powershell_suspicious_block` (4104), `eventlog.defender_detection` (Defender 1116/1117), Sysmon driver loads (event 6) matched against the vulnerable-driver list (the driver rules above) and `defense.unsigned_driver_loaded` (T1553.006), Sysmon process access (event 10) whose call trace starts in code no module backs: `defense.direct_syscall` (*critical* into LSASS, T1003.001), Sysmon pipe events (17, 18) against the `lateral` pipe names; `cred.pass_the_hash` (4624 logon type 9 through the Secondary Logon service: Mimikatz's `sekurlsa::pth`, Rubeus `createnetonly`, Cobalt Strike's `pth`; `runas /netonly` looks the same, T1550.002); Defender's own log: `defense.defender_protection_off` (5001, 5010, 5012, and 5007 switching a protection off), `defense.defender_exclusion` (5007 adding one, dated), `defense.defender_tamper_blocked` (5013); Sysmon's network events (3): `network.direct_dns`, `network.quic_outbound` (UDP 443 from a program that isn't a browser or a service that uses QUIC, T1071.001), `network.lolbin_outbound`; its DNS events (22), aggregated: `network.dns_tunnel` (*critical* from 100 names); remote threads (8): `memory.remote_thread_unbacked` (a thread started in memory no module backs; into LSASS, T1003.001), `memory.remote_thread_loadlibrary` (DLL injection, T1055.001); process tampering (25): `memory.process_tampering` (hollowing, herpaderping); Windows PowerShell's engine start (400): `defense.powershell_downgrade`; Code Integrity's log: `privesc.vulnerable_driver_blocked` (a LOLDrivers driver Windows refused to load, by the hashes the event records: a failed BYOVD attempt), `persistence.malicious_driver` for a listed malicious one, `privesc.vulnerable_driver_loaded` when the policy was only auditing, `defense.driver_load_blocked` (*notable*: any other driver refused), `cred.lsa_plugin_blocked` (a module LSA protection kept out of LSASS: mimilib, an SSP or password-filter backdoor, T1547.005) — plus the command-line rules above applied to 4688 command lines, 4104 script blocks, 7045 service ImagePaths and the actions of tasks registered or updated (4698, 4702), where Impacket's atexec task survives after the task itself is deleted |
+| **Event logs** | `defense.clear_event_logs` (Security 1102 / System 104), `eventlog.service_installed` (7045), `persistence.account_created` (4720), `persistence.admin_group_add` (4728/4732/4756 to a privileged group), `eventlog.powershell_suspicious_block` (4104), `eventlog.defender_detection` (Defender 1116/1117), Sysmon driver loads (event 6) matched against the vulnerable-driver list (the driver rules above) and `defense.unsigned_driver_loaded` (T1553.006), Sysmon process access (event 10) whose call trace starts in code no module backs: `defense.direct_syscall` (*critical* into LSASS, T1003.001), Sysmon pipe events (17, 18) against the `lateral` pipe names; `cred.pass_the_hash` (4624 logon type 9 through the Secondary Logon service: Mimikatz's `sekurlsa::pth`, Rubeus `createnetonly`, Cobalt Strike's `pth`; `runas /netonly` looks the same, T1550.002); Defender's own log: `defense.defender_protection_off` (5001, 5010, 5012, and 5007 switching a protection off), `defense.defender_exclusion` (5007 adding one, dated), `defense.defender_tamper_blocked` (5013); Sysmon's network events (3): `network.direct_dns`, `network.quic_outbound` (UDP 443 from a program that isn't a browser or a service that uses QUIC, T1071.001), `network.lolbin_outbound`; its DNS events (22), aggregated: `network.dns_tunnel` (*critical* from 100 names); remote threads (8): `memory.remote_thread_unbacked` (a thread started in memory no module backs; into LSASS, T1003.001), `memory.remote_thread_loadlibrary` (DLL injection, T1055.001); process tampering (25): `memory.process_tampering` (hollowing, herpaderping); registry events (12, 13): `privesc.uac_bypass_key`, even for a key deleted seconds later; Windows PowerShell's engine start (400): `defense.powershell_downgrade`; Code Integrity's log: `privesc.vulnerable_driver_blocked` (a LOLDrivers driver Windows refused to load, by the hashes the event records: a failed BYOVD attempt), `persistence.malicious_driver` for a listed malicious one, `privesc.vulnerable_driver_loaded` when the policy was only auditing, `defense.driver_load_blocked` (*notable*: any other driver refused), `cred.lsa_plugin_blocked` (a module LSA protection kept out of LSASS: mimilib, an SSP or password-filter backdoor, T1547.005) — plus the command-line rules above applied to 4688 command lines, 4104 script blocks, 7045 service ImagePaths and the actions of tasks registered or updated (4698, 4702), where Impacket's atexec task survives after the task itself is deleted |
 | **Active Directory** (a domain controller's and a CA's logs) | `cred.dcsync` (*critical*: DS-Replication-Get-Changes-All used by an account that isn't a DC or Azure AD Connect, T1003.006), `cred.kerberoasting` (RC4 service tickets to 4 or more user-account services within 15 minutes; *critical* from 10, T1558.003), `cred.asrep_roasting` (a TGT issued without pre-authentication; *suspect* when RC4, T1558.004), `cred.dpapi_backup_key` (*critical*: the domain's DPAPI backup key read, T1003.004), `cred.shadow_credentials` (a key credential added to an account, T1556), `privesc.rbcd_configured`, `privesc.constrained_delegation_configured` (T1098), `cred.spn_added_to_user` (*notable*: targeted Kerberoasting), `defense.dcshadow` (a DC's SPNs on a computer outside the Domain Controllers OU, T1207), `persistence.dcsync_rights_granted` (*critical*: replication rights granted on the domain to a non-default trustee), `persistence.adminsdholder_modified`, `persistence.domain_acl_changed` (the domain opened with WRITE_DAC), `persistence.sid_history_added` (*critical* for a privileged SID, T1134.005), `persistence.dsrm_password_set`, `cred.computer_certificate_logon` (PKINIT as a computer: PetitPotam + ESC8, T1649), `privesc.certificate_sid_mismatch` (the KDC refused a certificate whose SID isn't the account's), `privesc.adcs_alternate_identity` (a requester-supplied SAN naming another user: ESC1/ESC6, Certipy `req -upn`), `privesc.adcs_application_policies` (ESC15, CVE-2024-49019), `privesc.adcs_vulnerable_template` (an ESC1-shaped template; changed into that shape, ESC4), `privesc.reflection_dns_record` (*critical*: a DNS record named with a marshalled target-info blob, CVE-2025-33073, T1187) |
 | **Kerberos tickets** (`kerberos`) | `cred.golden_ticket` (*critical*: a TGT valid for more than a week; *suspect* over a day, T1558.001), `cred.rc4_tgt` (overpass-the-hash or a forged ticket; *suspect* when other tickets are AES, T1550.002), `cred.pass_the_ticket` (another account's TGT in a session, T1550.003), `cred.kerberos_ticket_anomaly` (*notable*: times that run backwards) |
+| **Known implants** (`implants`) | `malware.nik_c2` (*critical*: a program holding NIK C2's own strings — the AI-enabled Go RAT Cisco Talos described in October 2026 — running from outside the Windows and Program Files folders or sitting where it copies itself; the finding says it is marked critical and not to kill it, T1071.001), `malware.nik_c2_artifact` (*critical*: its bootkit placeholder, or its lock screen's page and batch file, in a temporary folder; *suspect* for other pairs of its staged files, or a copy of the master boot record) |
 | **AI agents** (`aiagents`) | `ai.mcp_server_unusual_path` (an MCP server started from a temporary or download folder), `ai.mcp_server_remote_code` (*notable*: fetched from a URL or git at each start, T1195.002), `ai.mcp_server_url` (a bare public IP; plain HTTP at *notable*), `ai.agent_hook_unusual_path` (a Claude Code hook running code from a temporary folder), `ai.hidden_instructions` (*critical*: Unicode tag characters or variation-selector smuggling in an instruction or configuration file, decoded; bidirectional controls and zero-width characters at *suspect*, T1027) — plus the command-line rules on every MCP command and hook |
 | **Logon sessions** (event log) | `logon.remote_interactive` (4624 type 10 / RDP — suspect from a public source address, T1021.001), `logon.network_external` (4624 type 3 from an external address, T1021), `logon.failed_external` (4625 from an external address, T1110) |
 | **Correlation** (event log × live state) | `correlate.service_installed_absent` (a 7045 service install with no matching live service — installed then removed, T1070.009), `correlate.task_registered_absent` (a 4698/106 task registration with no matching live task — deleted or hidden, T1070.009); and the `defense.clear_event_logs` finding is annotated with the surviving record-id/time range left by the clear. Independent of the event log: `correlate.task_comhandler_hijacked` (a scheduled task whose `IComHandlerAction` CLSID matches a COM registration `comhijack` flagged — schedule meets hijacked object, T1546.015) |
@@ -1223,7 +1255,7 @@ set that compiles and runs is exactly the set `-list` shows on that host.
 | `eventlog`, `sigma`, `-timeline`, `-iocs`, `-intel` | ✅ | ✅ | portable — on Linux the event log is Windows `.evtx` triaged offline with `-evtx` (there is no live Windows log to read) |
 | `amcache`, `authenticode`, `comhijack`, `prefetch`, `shimcache`, `wmi`, `dnscache`, `services`, `scheduledtasks` | ✅ | — | Windows-specific concepts; on Linux, service and scheduled-task persistence is covered by `autoruns` (systemd and cron) |
 | `drivers` (BYOVD) | ✅ | — | Windows drivers; Linux kernel modules are `kmod`'s. Sysmon driver-load events are matched in offline `-evtx` triage on any OS |
-| `lateral`, `defenses`, `kerberos` | ✅ | — | Windows named pipes, Impacket's output files, port proxies, Defender, AMSI and credential settings, Kerberos ticket caches. The matching event-log rules (Sysmon pipe, network, DNS and thread events, Defender and Code Integrity events, pass-the-hash logons, a domain controller's and a CA's events) run in offline `-evtx` triage on any OS |
+| `lateral`, `defenses`, `kerberos`, `implants` | ✅ | — | Windows named pipes, Impacket's output files, port proxies, Defender, AMSI and credential settings, Kerberos ticket caches, Windows implants' files. The matching event-log rules (Sysmon pipe, network, DNS, thread and registry events, Defender and Code Integrity events, pass-the-hash logons, a domain controller's and a CA's events) run in offline `-evtx` triage on any OS |
 
 On Linux the heuristics are Linux-shaped: path risk grades `/tmp`, `/dev/shm`,
 `memfd`, deleted images and home hidden dirs, and the command-line analytics
@@ -1295,8 +1327,15 @@ leaves behind, so you can account for it in your notes:
   can't be read, the record says so).
 - **Process environments (Windows).** `processes` opens each process a second
   time, with `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`, to read its
-  environment block for the .NET runtime's variables (and keeps only those).
-  LSASS is left alone. An EDR may log the `VM_READ` opens.
+  environment block for the .NET runtime's variables (and keeps only those) and
+  the name of the desktop it started on. LSASS is left alone. An EDR may log
+  the `VM_READ` opens. The critical flag is read with the first, query-only
+  handle (`IsProcessCritical`), and each image file is `stat`ed for its times.
+- **`implants`** reads whole program files to search them: Go programs running
+  from outside the Windows and Program Files folders, and programs in the
+  folders NIK C2 copies itself to — up to 64 MB each and 1 GB in all — and lists
+  the users' and Windows' temporary folders, reading the first kilobyte of any
+  file named like NIK C2's staged files.
 - **`kerberos`** asks LSA for ticket-cache metadata only. Run as SYSTEM it
   registers as a logon process (`LsaRegisterLogonProcess`) to read every
   session, which Windows records as event 4611 when that auditing is on.

@@ -1,5 +1,93 @@
 # Changelog
 
+## 0.14.0
+
+Adds detection of NIK C2, the AI-enabled Go remote-access tool Cisco Talos
+described in October 2026, and of the tricks it shares with other implants:
+making itself unkillable, working on a hidden desktop, back-dating its files,
+bypassing UAC through the registry, and the commands it runs.
+
+No new dependencies; the report schema is unchanged at 1.2 (new fields, a new
+collector and rules only).
+
+### Added
+- **`implants` collector (Windows, on by default).** Specific implant
+  families, found by their own strings and the files they stage.
+  - `malware.nik_c2` (*critical*): a Go program holding NIK C2's strings (at
+    least one only its code carries, and two in all), running from outside the
+    Windows and Program Files folders or sitting in a user's
+    `AppData\Roaming\Microsoft\Network` or temporary folder, where it copies
+    itself. Programs are read up to 64 MB each and 1 GB in all.
+  - `malware.nik_c2_artifact`: in the users' and Windows' temporary folders,
+    its bootkit placeholder (by content) or its lock screen's page and batch
+    file (*critical*); other pairs of its staged files, or a copy of the master
+    boot record (*suspect*).
+  - The marker strings are kept XOR-encoded in lrng's source, so lrng's own
+    binary never holds them; a test checks that.
+- **From each Windows process.**
+  - `defense.critical_process` (*critical*): a process outside Windows' own core
+    set marked critical (`IsProcessCritical`), so that ending it crashes
+    Windows. The finding tells the responder to suspend it rather than kill it.
+    A Windows program Windows doesn't mark is *notable*.
+  - `defense.hidden_desktop`: the desktop a process started on, read from its
+    process parameters with the environment. Explorer on a desktop of its own is
+    *critical* (hidden VNC), browsers and shells *suspect*, anything else
+    *notable*. Browser sandboxes' desktops (for their child processes) and
+    Windows Search's are left alone.
+  - Records gain `critical` and, when judged, `desktop`; `meta` gains
+    `critical_flags_read`, `critical_processes` and `desktops`.
+- **`defense.timestomp`.** An executable dated before 1980, which no file system
+  or archive a program arrives through can record, is *suspect* (Unix's time
+  zero, 1 January 1970, written by reproducible builds, is left alone); one
+  dated in the future is *notable*. Checked on Windows process images,
+  autostart programs and service files, and on Linux process images (through
+  `/proc/<pid>/exe`).
+- **`privesc.uac_bypass_key`.** A command in a user's `ms-settings`
+  (fodhelper, computerdefaults), `mscfile` (eventvwr), `exefile\shell\runas`
+  (sdclt), `Folder` with an empty `DelegateExecute` (sdclt), wsreset's AppX or
+  `App Paths\control.exe` key, or a per-user `%windir%` (SilentCleanup), from
+  each loaded user hive (`autoruns`) and from Sysmon's registry events (12, 13),
+  which keep a key deleted two seconds later as NIK C2 deletes its own.
+- **Command-line rules.** `cred.wifi_keys` (`netsh wlan … key=clear`),
+  `defense.raw_disk_access` (a script opening `\\.\PhysicalDrive`: an MBR read
+  or rewritten), `exec.mshta_local_file` (mshta running an HTML application
+  from a temporary or download folder), and at *notable*
+  `discovery.av_product` (SecurityCenter2 `AntiVirusProduct`) and
+  `exec.c2_shell_recon` (`chcp 65001` with reconnaissance in the same line:
+  the UTF-8 wrapper Go and Python implants put around each shell command).
+  `bcdedit /enum` and `Confirm-SecureBootUEFI` on their own aren't judged:
+  2026's Secure Boot certificate updates run them on many hosts.
+
+### Changed
+- **File times are converted without overflow.** A `FILETIME` before 1678
+  (which a stomped time can be) overflowed the conversion the file records
+  used, and an unset one showed as 1601; both now read correctly or are left
+  out.
+
+### Security
+- `processes` reads one more field through the handle it already opens for
+  the environment (the desktop name) and asks `IsProcessCritical` on its
+  query-only handle. `implants` opens program files read-only.
+
+### Tested
+- On the Windows runner:
+  - a desktop is created and ping started on it; the desktop is read back out
+    of ping's process parameters and `defense.hidden_desktop` must be reported;
+  - a copy of ping dated 1979 is run and `defense.timestomp` must be reported;
+  - fodhelper's key is planted in the test user's hive, pointing at a program
+    that doesn't exist, and `privesc.uac_bypass_key` must be reported (the key
+    is removed after);
+  - inert look-alikes of NIK C2's program (bytes shaped like a Go program, not
+    a runnable one) and bootkit placeholder are written where it leaves them,
+    and both must be reported;
+  - the smoke test requires Windows' own critical processes to be read as such,
+    and no critical-process, hidden-desktop, timestomp, UAC-bypass or implant
+    finding on the clean runner.
+- Talos's documented NIK C2 commands fire the new command-line rules, and
+  look-alikes administrators run don't.
+- Setting a process critical isn't tested live: if the test died before
+  clearing it, the runner would crash.
+
 ## 0.13.0
 
 Adds detection of:

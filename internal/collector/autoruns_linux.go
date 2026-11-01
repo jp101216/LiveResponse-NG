@@ -4,6 +4,7 @@ package collector
 
 import (
 	"context"
+	"crypto/md5"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,11 +28,14 @@ func collectAutoruns(ctx context.Context, opts RunOptions) (Result, error) {
 	p.scanRcLocal()
 	p.scanXdgAutostart()
 	p.scanShellProfiles()
+	p.scanPAM()
+	p.scanSudoers()
+	p.scanUdev()
 
 	res.SetMeta("platform", "linux")
 	res.SetMeta("note", "Linux persistence surfaces: ld.so.preload, cron, systemd (units, drop-ins and timers; "+
-		"system, vendor and user), rc.local, XDG autostart, shell startup files. Vendor systemd units and shell "+
-		"startup files are recorded only when they trip a heuristic")
+		"system, vendor and user), rc.local, XDG autostart, shell startup files, PAM, sudoers, udev rules in /etc. "+
+		"Vendor systemd units, shell startup files, PAM lines and sudo rules are recorded only when they trip a heuristic")
 	return res.Finish(), nil
 }
 
@@ -377,4 +381,104 @@ func userHomes() []string {
 		out = append(out, home)
 	}
 	return out
+}
+
+// scanPAM records PAM lines worth a look (a module by absolute path outside
+// the PAM directories, pam_exec) and checks every PAM module file against its
+// package's checksum (dpkg's md5sums; other package managers aren't read).
+func (p persistRecorder) scanPAM() {
+	for _, f := range dirFiles("/etc/pam.d") {
+		for _, e := range parsePAMFile(f, readFileSafe(f)) {
+			if fs := judgePAMEntry(e); len(fs) > 0 {
+				p.res.Add(map[string]any{"kind": "pam", "source": f, "line": e.Line, "type": e.Type, "control": e.Control,
+					"module": e.Module, "args": e.Args}, fs...)
+			}
+		}
+	}
+	sums := dpkgPAMSums()
+	if sums == nil {
+		p.res.SetMeta("pam_module_integrity", "not checked: no dpkg database (only Debian-family packages are verified)")
+		return
+	}
+	seen := map[string]bool{}
+	checked := 0
+	for _, dir := range pamModuleDirs {
+		for _, f := range dirFiles(strings.TrimSuffix(dir, "/")) {
+			if !strings.HasSuffix(f, ".so") {
+				continue
+			}
+			real, err := filepath.EvalSymlinks(f)
+			if err != nil || seen[real] {
+				continue
+			}
+			seen[real] = true
+			checked++
+			want, owned := sums[real]
+			have := ""
+			if b, err := os.ReadFile(real); err == nil {
+				have = fmt.Sprintf("%x", md5.Sum(b))
+			}
+			if fd, ok := pamModuleFinding(f, have, want, owned); ok {
+				fields := map[string]any{"kind": "pam_module", "path": f, "md5": have}
+				if want != "" {
+					fields["package_md5"] = want
+				}
+				p.add(fields, f, []Finding{fd})
+			}
+		}
+	}
+	p.res.SetMeta("pam_modules_checked", checked)
+}
+
+// dpkgPAMSums maps each PAM module a Debian package installed (by its real
+// path) to the md5 the package lists for it; nil without a dpkg database.
+func dpkgPAMSums() map[string]string {
+	files, err := filepath.Glob("/var/lib/dpkg/info/*.md5sums")
+	if err != nil || len(files) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for _, f := range files {
+		for _, line := range strings.Split(string(readFileSafe(f)), "\n") {
+			sum, rel, ok := strings.Cut(line, "  ")
+			if !ok || !strings.Contains(rel, "/security/") || !strings.HasSuffix(rel, ".so") {
+				continue
+			}
+			path := "/" + strings.TrimSpace(rel)
+			if real, err := filepath.EvalSymlinks(path); err == nil {
+				path = real
+			}
+			out[path] = strings.TrimSpace(sum)
+		}
+	}
+	return out
+}
+
+// scanSudoers records sudo rules that run anything as root without a
+// password.
+func (p persistRecorder) scanSudoers() {
+	users := map[string]passwdEntry{}
+	for _, u := range parsePasswd(readFileSafe("/etc/passwd")) {
+		users[u.Name] = u
+	}
+	for _, f := range append([]string{"/etc/sudoers"}, dirFiles("/etc/sudoers.d")...) {
+		for _, r := range parseSudoers(f, readFileSafe(f)) {
+			if fd, ok := judgeSudoRule(r, users); ok {
+				p.res.Add(map[string]any{"kind": "sudoers", "source": f, "line": r.Line, "who": r.Who, "rule": r.Spec}, fd)
+			}
+		}
+	}
+}
+
+// scanUdev records every program a udev rule in /etc/udev/rules.d runs (the
+// rules administrators and intruders write; packages ship theirs elsewhere).
+func (p persistRecorder) scanUdev() {
+	for _, f := range dirFiles("/etc/udev/rules.d") {
+		if !strings.HasSuffix(f, ".rules") {
+			continue
+		}
+		for _, cmd := range udevRunCommands(readFileSafe(f)) {
+			p.add(map[string]any{"kind": "udev", "source": f, "command": cmd}, cmd, judgeUdevCommand(f, cmd))
+		}
+	}
 }

@@ -75,6 +75,10 @@ pub struct Hit {
     /// For scan_memory: the memory region holding the first match.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<HitRegion>,
+    /// Structured values a scan extracted (a beacon's configuration), for
+    /// the report and the IOC export.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extracted: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]

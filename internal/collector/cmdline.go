@@ -94,7 +94,32 @@ var (
 	reMpDisable = regexp.MustCompile(`disable(?:realtimemonitoring|behaviormonitoring|ioavprotection|scriptscanning|blockatfirstseen|intrusionpreventionsystem)`)
 	reWevtClear = regexp.MustCompile(`(?:^|[\s"\\/&|;(])wevtutil(?:\.exe)?\s+(?:cl|clear-log)\b`)
 	reRegSave   = regexp.MustCompile(`(?:^|[\s"\\/&|;(])reg(?:\.exe)?\s+(?:save|export)\s+["']?(?:hklm|hkey_local_machine)\\(?:sam|system|security)\b`)
+
+	// The shells Impacket's and NetExec's remote-execution tools run. wmiexec
+	// and dcomexec (NetExec: wmiexec, mmcexec) send a command's output to a
+	// file they read back over SMB: "cmd.exe /Q /c <command> 1>
+	// \\127.0.0.1\ADMIN$\__<time> 2>&1" (NetExec: \Windows\Temp\<6 chars>, or
+	// a share on the attacker's own address).
+	reWmiexec = regexp.MustCompile(`(?:^|[\s"\\/])cmd(?:\.exe)?"?\s+/q\s+/c\s.*\s1>\s*(?:\\\\127\.0\.0\.1\\[^\\\s]+\\\S+|\\\\\d{1,3}(?:\.\d{1,3}){3}\\[^\\\s]+\\\S+|\\windows\\temp\\[a-z0-9]{6})\s+2>&1\s*$`)
+	// smbexec's service: "%COMSPEC% /Q /c echo <command> ^> <share>\<output>
+	// 2^>^&1 > <name>.bat & %COMSPEC% /Q /c <name>.bat & del <name>.bat".
+	reSmbexec = regexp.MustCompile(`(?:%comspec%|cmd(?:\.exe)?"?)\s+/q\s+/c\s+echo\s.*\^>\s*\S+\s+2\^>\^&1\s*>\s*\S+\.bat\s*&\s*(?:%comspec%|\S*cmd(?:\.exe)?"?)\s+/q\s+/c\s+\S+\.bat`)
+	// atexec's scheduled task: "cmd.exe /C <command> > %windir%\Temp\<8
+	// letters>.tmp 2>&1".
+	reAtexec = regexp.MustCompile(`(?:^|[\s"\\/])cmd(?:\.exe)?"?\s+/c\s.*\s>\s*(?:%windir%|%systemroot%|[a-z]:\\windows)\\temp\\[a-z]{8}\.tmp\s+2>&1\s*$`)
+
+	// Windows PowerShell started as version 2 ("-Version 2" and every
+	// prefix of -Version). Only switches, each with at most one bare value,
+	// may come before it, so a "-v 2" inside the script itself doesn't count.
+	// (pwsh has no version 2: its -v prints the version.)
+	rePSDowngrade = regexp.MustCompile(`(?:^|[\s"'\\/])powershell(?:\.exe)?"?\s+(?:[-/\x{2013}\x{2014}\x{2015}]\S+\s+(?:[^-/\s"'\x{2013}\x{2014}\x{2015}]\S*\s+)?)*?[-/\x{2013}\x{2014}\x{2015}]v(?:e(?:r(?:s(?:i(?:o(?:n)?)?)?)?)?)?\s+["']?2(?:\.0)?(?:$|[\s"'])`)
+	// A Chromium browser's DevTools port or pipe.
+	reRemoteDebug = regexp.MustCompile(`--remote-debugging-(?:port|pipe)\b`)
 )
+
+// chromiumBrowsers are the browsers whose own profile remote debugging
+// exposes (each keeps it under "…\User Data").
+var chromiumBrowsers = set("chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe", "chromium.exe")
 
 // cmdRule is one analytic. match returns a short description of what was
 // seen ("" means no match).
@@ -297,6 +322,60 @@ var cmdRules = []cmdRule{
 				return "starts a process on a remote host through WMI (lateral movement)"
 			}
 			return "starts a process through WMI"
+		}
+		return ""
+	}},
+	{"lateral.wmiexec", SevCritical, "T1047", 85, func(c *cmdInput) string {
+		if reWmiexec.MatchString(c.lower) {
+			return "runs a command the way Impacket's wmiexec and dcomexec (and NetExec's wmiexec and mmcexec) do, its output sent to a file read back over SMB: remote execution through WMI or DCOM"
+		}
+		return ""
+	}},
+	{"lateral.smbexec", SevCritical, "T1569.002", 90, func(c *cmdInput) string {
+		if reSmbexec.MatchString(c.lower) {
+			return "is the service command Impacket's and NetExec's smbexec install: it writes the command into a batch file, runs it with its output sent to a share, and deletes it (remote execution through a throwaway service)"
+		}
+		return ""
+	}},
+	{"lateral.atexec", SevCritical, "T1053.005", 80, func(c *cmdInput) string {
+		if reAtexec.MatchString(c.lower) {
+			return "runs a command the way Impacket's atexec does, its output sent to an 8-letter .tmp file in the Windows Temp folder for reading back over SMB: remote execution through a scheduled task"
+		}
+		return ""
+	}},
+	{"defense.powershell_downgrade", SevSuspect, "T1562.010", 65, func(c *cmdInput) string {
+		if rePSDowngrade.MatchString(c.lower) {
+			return "starts PowerShell 2.0, which has no script-block logging, no AMSI and no Constrained Language enforcement (a downgrade attack)"
+		}
+		return ""
+	}},
+	{"cred.browser_remote_debugging", SevSuspect, "T1539", 70, func(c *cmdInput) string {
+		if !reRemoteDebug.MatchString(c.lower) || c.has("--type=") {
+			return "" // the browser's own child processes carry --type=
+		}
+		browser := chromiumBrowsers[c.image]
+		for name := range chromiumBrowsers {
+			browser = browser || (c.image == "" && c.has(name))
+		}
+		if !browser {
+			return ""
+		}
+		// A throwaway profile is test automation (Selenium, Puppeteer,
+		// Playwright); the user's own is "…\User Data" or no
+		// --user-data-dir at all.
+		if i := strings.Index(c.lower, "--user-data-dir"); i >= 0 && !strings.Contains(c.lower[i:], `\user data`) {
+			return ""
+		}
+		what := "starts the browser with remote debugging on the user's own profile"
+		if c.has("--headless") {
+			what += ", headless"
+		}
+		return what + ": any local program can then read every cookie and signed-in session through the DevTools protocol, " +
+			"which is how infostealers get past Chrome's app-bound cookie encryption"
+	}},
+	{"network.portproxy_rule", SevSuspect, "T1090.001", 55, func(c *cmdInput) string {
+		if c.tok("netsh") && c.has("portproxy") && any2(c, " add ", " set ") {
+			return "adds a netsh port-proxy rule: the host relays connections from a local port to another address, a pivot deeper into the network (often to RDP)"
 		}
 		return ""
 	}},

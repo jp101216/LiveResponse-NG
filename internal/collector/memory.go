@@ -239,6 +239,15 @@ var memoryRecordKeys = []string{
 	// The image-integrity pass: images and code compared, rewrites, patches,
 	// header mismatches, unreadable backing files, and why anything was skipped.
 	"image_integrity",
+	// Hardware breakpoints and vectored exception handlers (Windows): threads
+	// read, breakpoints armed, handlers found and where they point.
+	"exception_hooks",
+	// System calls (Windows): threads in one, direct and indirect calls,
+	// stubs found in memory no image backs, extra copies of ntdll.
+	"syscalls",
+	// Threads (Windows): start addresses read, stacks walked and how the
+	// walks ended, JIT code ranges, and what was found.
+	"threads",
 }
 
 // memoryRecords turns sidecar responses into one record per process (every
@@ -298,8 +307,21 @@ func memoryRecords(targets []procInfo, skipped []memSkip, responses map[int]*sid
 			rulesMeta = summarizeRulesMeta(y)
 		}
 		var findings []Finding
+		var extracted []map[string]any
 		for _, h := range r.Hits {
 			findings = append(findings, hitToFinding(h))
+			if len(h.Extracted) > 0 {
+				x := map[string]any{"rule": h.Rule, "address": fmt.Sprintf("0x%x", uint64(h.Offset))}
+				for k, v := range h.Extracted {
+					x[k] = v
+				}
+				extracted = append(extracted, x)
+			}
+		}
+		if len(extracted) > 0 {
+			// Decoded configurations (a beacon's C2 hosts, URIs, watermark…),
+			// where the IOC export finds their hosts.
+			f["extracted"] = extracted
 		}
 		rows = append(rows, row{t.PID, Record{Fields: f, Findings: findings}})
 	}

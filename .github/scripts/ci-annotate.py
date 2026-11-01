@@ -19,6 +19,7 @@ import sys
 
 MAX_ANNOTATIONS = 10  # GitHub keeps at most 10 error annotations per step
 MAX_CHARS = 4000  # per annotation; the full text is in the job log
+MAX_SELFTEST_NOTICES = 8  # GitHub keeps at most 10 notices per step; one is the summary
 
 # "x_test.go:12: msg", "dir/x.go:3:7: msg", or a stack frame "D:/a/r/r/x_test.go:12 +0x1f"
 GO_FILE_LINE = re.compile(r"((?:[A-Za-z]:)?[^\s:]+\.go):(\d+)(?::(\d+))?(?=[:\s]|$)")
@@ -124,6 +125,18 @@ def go_test(_args):
             notes.append("%s %s: %s" % (pkg_dir(pkg) or pkg, test, " ".join(why) or "skipped"))
         title = "go test: %d passed, %d skipped" % (len(passed), len(skipped))
         print("::notice title=%s::%s" % (escape_prop(title), escape_data(clip("\n".join(notes) or title))))
+
+    # Lines a test logs with "lrng-selftest:" (what a check on the real host
+    # found, for the record) become notices too, the first few of them.
+    shown = 0
+    for (pkg, test), lines in output.items():
+        for l in lines:
+            i = l.find("lrng-selftest:")
+            if i < 0 or shown >= MAX_SELFTEST_NOTICES:
+                continue
+            title = "%s %s" % (pkg_dir(pkg) or pkg, test)
+            print("::notice title=%s::%s" % (escape_prop(title), escape_data(clip(l[i:].strip()))))
+            shown += 1
 
     tests = [k for k in failed if k[1]]
     failures = []

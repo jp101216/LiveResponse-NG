@@ -2,7 +2,9 @@
 //!
 //! Opens the target with PROCESS_QUERY_INFORMATION | PROCESS_VM_READ (falling
 //! back to PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ) and never asks
-//! for any write, thread or handle-duplication rights.
+//! for any write or handle-duplication rights. The one thread right it asks
+//! for is THREAD_GET_CONTEXT (with THREAD_QUERY_LIMITED_INFORMATION), to read
+//! each thread's debug registers (windows_hooks.rs).
 //!
 //! Compiled on Windows, and on Linux under `--cfg lrng_typecheck_windows` so
 //! it can be type-checked without a Windows toolchain (`make check-windows-rs`).
@@ -41,7 +43,7 @@ const HEADER_READ: usize = 0x10000;
 const MAX_IMAGE_FILE: u64 = 512 << 20;
 
 pub struct WinProcess {
-    h: HANDLE,
+    pub(super) h: HANDLE,
 }
 
 impl Drop for WinProcess {
@@ -237,7 +239,12 @@ impl ProcessMemory for WinProcess {
             rep.exec_outside.extend(c.exec_outside);
         }
         rep.settle_loader_pages();
+        rep.settle_known_sections();
         rep
+    }
+
+    fn thread_checks(&self, deadline: Instant) -> Option<super::procmem::ThreadChecks> {
+        Some(super::windows_hooks::read(self, deadline))
     }
 }
 
@@ -278,7 +285,7 @@ impl WinProcess {
 
 /// Read an image file back from disk. A path GetMappedFileName couldn't turn
 /// into a drive-letter path (\Device\...) is opened through GLOBALROOT.
-fn read_image_file(path: &str) -> std::io::Result<Vec<u8>> {
+pub(super) fn read_image_file(path: &str) -> std::io::Result<Vec<u8>> {
     let open = if path.starts_with(r"\Device\") {
         format!(r"\\?\GLOBALROOT{path}")
     } else {
@@ -357,7 +364,7 @@ fn executable(protect: u32) -> bool {
         )
 }
 
-fn protect_name(protect: u32) -> &'static str {
+pub(super) fn protect_name(protect: u32) -> &'static str {
     match protect & 0xff {
         PAGE_READONLY => "R",
         PAGE_READWRITE => "RW",
@@ -379,6 +386,11 @@ fn kind_name(t: u32) -> &'static str {
     }
 }
 
+/// The Windows self-tests plant things in their own process; one at a time,
+/// so none sees another's.
+#[cfg(test)]
+pub(crate) static SELFTEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +401,24 @@ mod tests {
     use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
     use windows_sys::Win32::System::Memory::VirtualProtect;
 
+    /// A child copy of this test binary holds a packed beacon configuration
+    /// and a running beacon's settings table on its heap (see
+    /// memscan::tests::beacon_plant_target); scanning it finds and decodes
+    /// both through the Windows memory reader.
+    #[test]
+    fn finds_planted_beacon_configurations() {
+        let r = crate::memscan::tests::scan_planted_beacons();
+        let configs: Vec<&str> = r
+            .hits
+            .iter()
+            .filter(|h| h.rule == "memory.cobalt_strike_config")
+            .map(|h| h.context.as_str())
+            .collect();
+        eprintln!("lrng-selftest: beacon configurations: {configs:?}");
+        crate::memscan::tests::assert_planted_beacons(&r);
+        crate::memscan::tests::assert_planted_demon(&r);
+    }
+
     /// End to end on this process, against the real Windows loader: every
     /// module this process has loaded must compare clean (a false-positive
     /// check on the system's own DLLs); then a renamed copy of version.dll is
@@ -396,6 +426,7 @@ mod tests {
     /// copy, and the check must find exactly that rewrite.
     #[test]
     fn integrity_finds_a_rewritten_image() {
+        let _serial = SELFTEST.lock();
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
         let dst = std::env::temp_dir().join(format!("lrng-integrity-{}.dll", std::process::id()));
         std::fs::copy(format!(r"{root}\System32\version.dll"), &dst).unwrap();

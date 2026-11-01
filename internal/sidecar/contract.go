@@ -78,6 +78,9 @@ type Hit struct {
 	Context    string     `json:"context,omitempty"` // sanitised snippet / rule summary
 	Confidence int        `json:"confidence"`        // 0-100
 	Region     *HitRegion `json:"region,omitempty"`  // scan_memory only
+	// Extracted holds structured values a scan decoded, such as a beacon's
+	// configuration (its C2 hosts are in "c2_hosts").
+	Extracted map[string]any `json:"extracted,omitempty"`
 }
 
 // HitRegion describes the memory region holding a scan_memory match.

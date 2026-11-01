@@ -2,6 +2,7 @@ package collector
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"github.com/jp101216/liveresponse-ng/internal/aidetect"
@@ -60,7 +61,7 @@ func linuxConnFindings(c connView) []Finding {
 	if exe := unixBaseName(strings.TrimSuffix(c.ImagePath, deletedSuffix)); exe != "" && exe != unixBaseName(c.Process) {
 		label = fmt.Sprintf("%s [%s] (pid %d)", c.Process, exe, c.PID)
 	}
-	var out []Finding
+	out := llmServerFindings(c, label)
 
 	// A shell or netcat listening on a non-loopback address is a bind shell or
 	// an ad-hoc server. An interpreter listening is usually an application
@@ -88,6 +89,11 @@ func linuxConnFindings(c connView) []Finding {
 	outbound := (c.State == "SYN_SENT" || (c.State == "ESTABLISHED" && !c.Inbound)) && aidetect.PublicAddr(c.Remote)
 	if !outbound {
 		return out
+	}
+	if c.RemotePort == 53 {
+		if f, ok := directDNSFinding(label, firstNonEmpty(c.ImagePath, c.Process), netip.AddrPortFrom(c.Remote, c.RemotePort), ""); ok {
+			out = append(out, f)
+		}
 	}
 	peer := c.Remote.String()
 	switch {

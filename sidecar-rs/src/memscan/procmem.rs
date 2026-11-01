@@ -1,6 +1,9 @@
 //! Platform-neutral view of another process's memory.
 
+use super::hooks;
 use super::integrity::Report;
+use super::syscalls;
+use super::threads;
 use std::time::Instant;
 
 /// One committed, readable memory region.
@@ -70,6 +73,21 @@ pub trait ProcessMemory {
     fn image_integrity(&self, _deadline: Instant, _max_bytes: u64) -> Report {
         Report::unsupported()
     }
+    /// The checks made thread by thread, on platforms that have them: hardware
+    /// breakpoints and vectored exception handlers (hooks.rs), system calls
+    /// (syscalls.rs), and where threads started and what their stacks show
+    /// (threads.rs). The stack walks and the search of memory for system-call
+    /// stubs stop at `deadline`.
+    fn thread_checks(&self, _deadline: Instant) -> Option<ThreadChecks> {
+        None
+    }
+}
+
+/// What the thread-by-thread checks found in one process.
+pub struct ThreadChecks {
+    pub hooks: hooks::Report,
+    pub calls: syscalls::Report,
+    pub threads: threads::Report,
 }
 
 /// Lower-cased file name of a path using either separator.

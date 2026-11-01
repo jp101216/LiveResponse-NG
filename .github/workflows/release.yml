@@ -118,7 +118,7 @@ jobs:
           for dir in dist/*/; do
             p=$(basename "$dir")
             mkdir "stage/$p"
-            cp "$dir"/* LICENSE "stage/$p/"
+            cp "$dir"/* LICENSE THIRD_PARTY_NOTICES.md internal/vulndrivers/data/LICENSE.loldrivers "stage/$p/"
             case "$p" in
               windows-*) (cd stage && zip -qr -X "../upload/lrng-$NAME-$p.zip" "$p") ;;
               *) tar -C stage --owner=0 --group=0 --numeric-owner -czf "upload/lrng-$NAME-$p.tar.gz" "$p" ;;

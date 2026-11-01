@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jp101216/liveresponse-ng/internal/aidetect"
+	"github.com/jp101216/liveresponse-ng/internal/vulndrivers"
 )
 
 // eventLogCollector reads the host's Windows event logs, parses the
@@ -91,6 +92,8 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 	keptPlain, keptFlagged, dropped := 0, 0, 0
 	ranges := map[string]*channelRange{}
 	agg := sigma.newAggregator() // nil unless a Sigma rule has an aggregation or a "near"
+	roast := newKerberoastTracker()
+	tunnels := newDNSTunnelTracker()
 	cancelled := false
 
 	for _, src := range sources {
@@ -140,6 +143,8 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 			}
 			trackChannelRange(ranges, ev) // every scanned record, for log-clear correlation
 			agg.observe(ev)               // feed Sigma aggregations and "near" rules (no-op if none)
+			roast.observe(ev)             // RC4 service tickets, for Kerberoasting
+			tunnels.observe(ev)           // Sysmon DNS queries, for DNS tunnels
 			fields, findings, keepIt := classifyWinEvent(ev, sigma)
 			if !keepIt {
 				return true
@@ -197,6 +202,17 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 			continue
 		}
 		r.Fields["source_log"] = "sigma:aggregation"
+		res.Add(r.Fields, r.Findings...)
+		keptFlagged++
+	}
+	// The built-in aggregations: bursts of RC4 service tickets
+	// (Kerberoasting), and many data-like names under one domain (DNS tunnels).
+	for _, r := range append(roast.flush(), tunnels.flush()...) {
+		if keptFlagged >= evtxMaxFlagged {
+			dropped++
+			continue
+		}
+		r.Fields["source_log"] = "builtin:aggregation"
 		res.Add(r.Fields, r.Findings...)
 		keptFlagged++
 	}
@@ -512,10 +528,160 @@ func eventFindings(ev winEvent) []Finding {
 		out = append(out, processCreateFindings(ev)...)
 	case 1116, 1117: // Microsoft Defender detected / acted on malware
 		out = append(out, defenderFindings(ev)...)
+	case 5001, 5007, 5010, 5012, 5013: // Microsoft Defender: protection off, configuration changed, tampering blocked
+		if strings.Contains(strings.ToLower(ev.Channel+" "+ev.Provider), "windows defender") {
+			out = append(out, defenderEventFindings(ev)...)
+		}
 	case 4624: // an account was successfully logged on
 		out = append(out, logonFindings(ev)...)
+	case 4698, 4702: // a scheduled task was registered / updated (Security)
+		out = append(out, taskEventFindings(ev)...)
 	case 4625: // an account failed to log on
 		out = append(out, failedLogonFindings(ev)...)
+	case 6: // Sysmon: a driver was loaded (other providers use 6 for other things)
+		if isSysmon(ev) {
+			out = append(out, driverLoadFindings(ev)...)
+		}
+	case 10: // Sysmon: a process was opened
+		if isSysmon(ev) {
+			out = append(out, processAccessFindings(ev)...)
+		}
+	case 17, 18: // Sysmon: a named pipe was created / connected to
+		if isSysmon(ev) {
+			out = append(out, pipeEventFindings(ev)...)
+		}
+	case 3004, 3023, 3033, 3034, 3076, 3077: // Code Integrity: an image refused (or, auditing, one that would have been)
+		if isCodeIntegrity(ev) {
+			out = append(out, codeIntegrityFindings(ev)...)
+		}
+	case 4662: // a directory service object was accessed (domain controller)
+		out = append(out, directoryAccessFindings(ev)...)
+	case 5136, 5137: // a directory service object was modified / created
+		out = append(out, directoryChangeFindings(ev)...)
+	case 4768: // a Kerberos ticket-granting ticket was requested (Kerberoasting's 4769s are aggregated)
+		out = append(out, tgtRequestFindings(ev)...)
+	case 4738, 4742: // a user / computer account was changed
+		out = append(out, accountChangeFindings(ev)...)
+	case 4765, 4766: // SID history was added to an account / an attempt failed
+		out = append(out, sidHistoryEventFindings(ev)...)
+	case 4794: // the Directory Services Restore Mode password was set
+		out = append(out, dsrmFindings(ev)...)
+	case 4887, 4888, 4889: // Certificate Services issued / denied / left pending a request
+		out = append(out, certRequestFindings(ev)...)
+	case 4898, 4899: // Certificate Services loaded / updated a certificate template
+		out = append(out, certTemplateFindings(ev)...)
+	case 400: // Windows PowerShell: an engine started (version 2 is a downgrade)
+		out = append(out, psEngineFindings(ev)...)
+	case 3: // Sysmon: a network connection (System and others use 3 too)
+		if isSysmon(ev) {
+			out = append(out, sysmonNetworkFindings(ev)...)
+		}
+	case 8: // Sysmon: a thread was created in another process
+		if isSysmon(ev) {
+			out = append(out, remoteThreadFindings(ev)...)
+		}
+	case 25: // Sysmon: process tampering (hollowing, herpaderping)
+		if isSysmon(ev) {
+			out = append(out, tamperingFindings(ev)...)
+		}
+	case 41: // KDC: a certificate's SID didn't match the account it maps to (Kernel-Power writes a 41 too)
+		if isKDC(ev) {
+			out = append(out, kdcCertificateFindings(ev)...)
+		}
+	}
+	return out
+}
+
+// processAccessFindings judges a Sysmon process-access event by its call
+// trace, the user-mode stack that opened the handle. Its first frame is the
+// code that made the system call: normally ntdll's NtOpenProcess stub. A
+// trace that starts in code no module backs ("UNKNOWN(...)") made the call
+// itself: a direct syscall from injected code, which is how NanoDump and
+// Dumpert open LSASS without passing EDR hooks.
+func processAccessFindings(ev winEvent) []Finding {
+	first, _, _ := strings.Cut(evData(ev, "CallTrace"), "|")
+	first = strings.TrimSpace(first)
+	if !strings.HasPrefix(strings.ToUpper(first), "UNKNOWN(") {
+		return nil
+	}
+	src := firstNonEmpty(evData(ev, "SourceImage"), "a process")
+	dst := firstNonEmpty(evData(ev, "TargetImage"), "another process")
+	when := ""
+	if !ev.TimeCreated.IsZero() {
+		when = " at " + ev.TimeCreated.UTC().Format(time.RFC3339)
+	}
+	f := Finding{
+		Rule: "defense.direct_syscall", Severity: SevSuspect, Technique: "T1106", Confidence: 60,
+		Detail: fmt.Sprintf("%s opened %s%s (access %s) with a system call made from code no module backs (the call trace starts at %s), "+
+			"not through ntdll: a direct syscall. Chromium-based apps (Teams, Discord, VS Code) and some games and security products do this too",
+			src, dst, when, firstNonEmpty(evData(ev, "GrantedAccess"), "unknown"), first),
+	}
+	if baseName(dst) == "lsass.exe" {
+		f.Severity, f.Technique, f.Confidence = SevCritical, "T1003.001", 80
+		f.Detail = fmt.Sprintf("%s opened LSASS%s (access %s) with a system call made from code no module backs (the call trace starts at %s), "+
+			"not through ntdll: a direct syscall, the way NanoDump and Dumpert reach LSASS to dump credentials past EDR hooks",
+			src, when, firstNonEmpty(evData(ev, "GrantedAccess"), "unknown"), first)
+	}
+	return []Finding{f}
+}
+
+// isSysmon reports whether an event comes from Sysmon, whose event ids
+// (1 to 29) overlap other providers'.
+func isSysmon(ev winEvent) bool {
+	return strings.EqualFold(ev.Provider, "Microsoft-Windows-Sysmon") ||
+		strings.EqualFold(ev.Channel, "Microsoft-Windows-Sysmon/Operational")
+}
+
+// driverLoadFindings judges a Sysmon driver-load event: the loaded file's
+// hashes against the vulnerable-driver list (Sysmon hashes with SHA-1 unless
+// configured otherwise, and either is matched), and its signature. A driver
+// that was loaded and unloaded long before lrng ran is still in this log.
+func driverLoadFindings(ev winEvent) []Finding {
+	img := firstNonEmpty(evData(ev, "ImageLoaded"), "a driver")
+	when := ""
+	if !ev.TimeCreated.IsZero() {
+		when = " at " + ev.TimeCreated.UTC().Format(time.RFC3339)
+	}
+	var out []Finding
+	if set, err := vulndrivers.Default(); err == nil {
+		for _, h := range sysmonHashes(evData(ev, "Hashes")) {
+			if m, ok := set.FileHex(h); ok {
+				out = append(out, knownDriverFinding(m, img, "was loaded"+when+" (Sysmon driver-load event)", false))
+				break
+			}
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(evData(ev, "Signed")), "false") {
+		out = append(out, Finding{
+			Rule: "defense.unsigned_driver_loaded", Severity: SevSuspect, Technique: "T1553.006", Confidence: 60,
+			Detail: fmt.Sprintf("an unsigned driver was loaded%s: %s. Windows refuses unsigned drivers unless test signing "+
+				"is on or code integrity was switched off or bypassed, and a vulnerable driver is the usual way to bypass it", when, img),
+		})
+	}
+	return out
+}
+
+// sysmonHashes returns the SHA-256 and SHA-1 values from a Sysmon Hashes
+// field ("SHA1=...,MD5=...,SHA256=...,IMPHASH=..."), SHA-256 first.
+func sysmonHashes(v string) []string {
+	var sha256, sha1 string
+	for _, part := range strings.Split(v, ",") {
+		k, h, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(k)) {
+		case "SHA256":
+			sha256 = strings.TrimSpace(h)
+		case "SHA1":
+			sha1 = strings.TrimSpace(h)
+		}
+	}
+	var out []string
+	for _, h := range []string{sha256, sha1} {
+		if h != "" {
+			out = append(out, h)
+		}
 	}
 	return out
 }
@@ -537,6 +703,25 @@ func logonFindings(ev winEvent) []Finding {
 			detail += " — external source address (RDP exposed to the internet, or arrived via a jump host)"
 		}
 		return []Finding{{Rule: "logon.remote_interactive", Severity: sev, Technique: "T1021.001", Confidence: conf, Detail: detail}}
+	case "9": // NewCredentials: the caller keeps its identity locally and uses other credentials on the network
+		if !strings.EqualFold(strings.TrimSpace(evData(ev, "LogonProcessName")), "seclogo") {
+			return nil
+		}
+		outbound := evData(ev, "TargetOutboundUserName")
+		if d := evData(ev, "TargetOutboundDomainName"); d != "" && outbound != "" && outbound != "-" {
+			outbound = d + "\\" + outbound
+		}
+		as := ""
+		if outbound != "" && outbound != "-" {
+			as = " with the network credentials of " + outbound
+		}
+		return []Finding{{
+			Rule: "cred.pass_the_hash", Severity: SevSuspect, Technique: "T1550.002", Confidence: 55,
+			Detail: fmt.Sprintf("a new-credentials logon (type 9) through the Secondary Logon service by %s%s, for %s: "+
+				"how Mimikatz's sekurlsa::pth, Rubeus createnetonly and Cobalt Strike's pth start a process with a stolen hash or ticket; "+
+				"runas /netonly makes the same event",
+				logonUser(ev), as, firstNonEmpty(evData(ev, "ProcessName"), "an unknown process")),
+		}}
 	case "3": // Network
 		if publicIP(ip) && !strings.HasSuffix(evData(ev, "TargetUserName"), "$") {
 			return []Finding{{
@@ -546,6 +731,27 @@ func logonFindings(ev winEvent) []Finding {
 		}
 	}
 	return nil
+}
+
+// taskEventFindings runs the command-line rules over the programs a
+// registered or updated task runs (Security 4698 and 4702 carry the task's
+// XML). Impacket's atexec deletes its task seconds after it runs, so this
+// event is often all that is left of it.
+func taskEventFindings(ev winEvent) []Finding {
+	content := evData(ev, "TaskContent")
+	if content == "" {
+		content = evData(ev, "TaskContentNew") // 4702
+	}
+	def, err := parseTaskXML([]byte(content))
+	if err != nil {
+		return nil
+	}
+	source := fmt.Sprintf("scheduled task %s (event %d)", firstNonEmpty(evData(ev, "TaskName"), "(unnamed)"), ev.EventID)
+	var out []Finding
+	for _, e := range def.Execs {
+		out = mergeFindings(out, analyzeCommandLine(source, e.Command, strings.TrimSpace(e.Command+" "+e.Arguments))...)
+	}
+	return out
 }
 
 // failedLogonFindings raises a 4625 failed logon that came from an external

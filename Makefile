@@ -52,7 +52,7 @@ LXARM := $(DIST)/linux-arm64
         linux linux-arm64 \
         sidecar-windows sidecar-windows-x86 sidecar-linux sidecar-linux-arm64 \
         release release-windows release-linux viewer-dist checksums \
-        intelgen intel-data \
+        intelgen intel-data drivergen driver-data \
         test test-race wine-test vet check-windows-rs fmt-check lint audit check clean
 
 help: ## Show this help
@@ -140,6 +140,20 @@ intelgen: ## Build the offline dataset generator -> ./intelgen
 intel-data: intelgen ## Regenerate the bundled dataset (expects ip2asn-combined.tsv.gz + torbulkexitlist in CWD)
 	./intelgen$(GOEXE) -v -ip2asn ip2asn-combined.tsv.gz -tor torbulkexitlist -out internal/intel/data/endpoints.tsv
 
+## ---- Vulnerable-driver dataset ---------------------------------------------
+
+drivergen: ## Build the vulnerable-driver dataset generator -> ./drivergen
+	$(GOBUILD) -o drivergen$(GOEXE) ./cmd/drivergen
+
+# Regenerate the bundled LOLDrivers dataset (internal/vulndrivers/data/
+# loldrivers.tsv) that the drivers collector checks against. Fetch the source
+# first (on a networked workstation, never on the triaged host):
+#   curl -LO https://www.loldrivers.io/api/drivers.json
+# then `make driver-data`, commit the result, and rebuild lrng to embed it.
+driver-data: drivergen ## Regenerate the vulnerable-driver dataset (expects LOLDrivers' drivers.json in CWD)
+	./drivergen$(GOEXE) -v -in drivers.json -source "LOLDrivers drivers.json, fetched $$(date -u +%Y-%m-%d)" \
+		-out internal/vulndrivers/data/loldrivers.tsv
+
 ## ---- Release ----------------------------------------------------------------
 
 WINDOWS_RELEASE := windows windows-x86 windows-arm64 sidecar-windows sidecar-windows-x86
@@ -202,5 +216,5 @@ audit: ## Known-vuln scan: govulncheck (Go) + cargo-audit (Rust, must be install
 check: fmt-check lint check-windows-rs test ## Everything CI should run
 
 clean: ## Remove build outputs
-	rm -rf $(DIST) $(BINARY) $(BINARY).exe $(SIDECAR) $(SIDECAR).exe intelgen intelgen.exe
+	rm -rf $(DIST) $(BINARY) $(BINARY).exe $(SIDECAR) $(SIDECAR).exe intelgen intelgen.exe drivergen drivergen.exe
 	cargo clean --manifest-path $(SIDECAR_MANIFEST)

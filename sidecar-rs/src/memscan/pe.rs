@@ -173,6 +173,11 @@ pub fn parse(b: &[u8]) -> Result<Pe, &'static str> {
 pub struct Exports(Vec<(u32, String)>);
 
 impl Exports {
+    /// Every named export, by RVA.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &str)> {
+        self.0.iter().map(|(rva, name)| (*rva, name.as_str()))
+    }
+
     /// "Name+0xoff" for the nearest export at or below `rva`, or "" when
     /// there is none close enough to be the containing function. Every name
     /// exported at that address is given ("NtTraceEvent/ZwTraceEvent+0x0"):

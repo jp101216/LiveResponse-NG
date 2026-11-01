@@ -62,10 +62,85 @@ func TestDefaultCollectorsOnWindows(t *testing.T) {
 		t.Log("running under Wine: skipping assertions about a real Windows host's shape")
 		return
 	}
-	min := map[string]int{"processes": 10, "services": 50, "network": 1, "autoruns": 1, "localaccounts": 1}
+	min := map[string]int{"processes": 10, "services": 50, "network": 1, "autoruns": 1, "localaccounts": 1, "drivers": 50,
+		"lateral": 1, "defenses": 3}
 	for name, n := range min {
 		if got := len(byName[name].Records); got < n {
 			t.Errorf("%s: %d records, want at least %d", name, got, n)
+		}
+	}
+	// Every Windows host has named pipes of its own (lsass, ntsvcs, ...): the
+	// listing must have found them.
+	for _, rec := range byName["lateral"].Records {
+		if rec.Fields["kind"] == "summary" {
+			if n, _ := rec.Fields["pipes"].(int); n < 5 {
+				t.Errorf("lateral: listed %d named pipes", n)
+			}
+			t.Logf("lateral: %v pipes, %v flagged", rec.Fields["pipes"], rec.Fields["pipes_flagged"])
+		}
+	}
+	amsiSeen := false
+	for _, rec := range byName["defenses"].Records {
+		t.Logf("defenses %v: %v", rec.Fields["area"], rec.Fields)
+		if rec.Fields["area"] == "amsi" {
+			amsiSeen = true
+			if p, _ := rec.Fields["providers"].([]string); len(p) == 0 {
+				t.Errorf("defenses: no AMSI provider registered on a host with Defender: %v", rec.Fields)
+			}
+		}
+		for _, f := range rec.Findings {
+			if strings.HasPrefix(f.Rule, "defense.amsi_") || f.Rule == "defense.dotnet_etw_disabled" {
+				t.Errorf("defenses: %s on a clean host: %s", f.Rule, f.Detail)
+			}
+		}
+	}
+	if !amsiSeen {
+		t.Error("defenses: no AMSI record")
+	}
+	// The accessibility programs the logon screen runs were each read and
+	// judged genuine.
+	if n, _ := byName["autoruns"].Meta["accessibility_binaries_checked"].(int); n < 3 {
+		t.Errorf("autoruns: checked %d accessibility programs (%v)", n, byName["autoruns"].Meta["accessibility_original_names"])
+	}
+	t.Logf("accessibility programs: %v", byName["autoruns"].Meta["accessibility_original_names"])
+	for _, rec := range byName["autoruns"].Records {
+		for _, f := range rec.Findings {
+			if f.Rule == "persistence.accessibility_backdoor" {
+				t.Errorf("autoruns: %s", f.Detail)
+			}
+		}
+	}
+	if ai := byName["aiagents"]; ai.Meta["entries_visited"] == nil || ai.Meta["entries_visited"] == 0 {
+		t.Errorf("aiagents: swept nothing (homes %v)", ai.Meta["homes"])
+	} else {
+		t.Logf("aiagents: homes %v, %v entries, %v MCP servers, %v instruction files", ai.Meta["homes"], ai.Meta["entries_visited"],
+			ai.Meta["mcp_servers"], ai.Meta["instruction_files"])
+	}
+	// Kerberos: LSA answered. The runner isn't SYSTEM, so only its own
+	// session is asked about, and that must be answered (with its tickets,
+	// or with Kerberos holding nothing for a local account).
+	if k := byName["kerberos"]; k.Meta["sessions"] == nil {
+		t.Errorf("kerberos: no logon sessions listed (errors %q)", k.Errors)
+	} else {
+		t.Logf("kerberos: all sessions %v, %v sessions, %v read, %v without Kerberos, %v unreadable, %v tickets",
+			k.Meta["all_sessions"], k.Meta["sessions"], k.Meta["sessions_read"], k.Meta["sessions_without_kerberos"],
+			k.Meta["sessions_unreadable"], k.Meta["tickets"])
+		read, _ := k.Meta["sessions_read"].(int)
+		none, _ := k.Meta["sessions_without_kerberos"].(int)
+		if all, _ := k.Meta["all_sessions"].(bool); !all && (read+none != 1 || k.Meta["sessions_unreadable"] != 0) {
+			t.Errorf("kerberos: its own session wasn't answered: %v", k.Meta)
+		}
+	}
+	if n, _ := byName["processes"].Meta["environments_read"].(int); n < 10 {
+		t.Errorf("processes: read %d environments (%v unreadable)", n, byName["processes"].Meta["environments_unreadable"])
+	} else {
+		t.Logf("processes: %d environments read, %v unreadable", n, byName["processes"].Meta["environments_unreadable"])
+	}
+	for _, rec := range byName["processes"].Records {
+		for _, f := range rec.Findings {
+			if f.Rule == "defense.dotnet_etw_disabled" || f.Rule == "persistence.clr_profiler" {
+				t.Logf("processes: %s on the runner: %s", f.Rule, f.Detail)
+			}
 		}
 	}
 	// The event-log collector keeps only targeted events, so a clean host may

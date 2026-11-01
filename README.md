@@ -16,15 +16,17 @@ modules, eBPF and the systemd journal behind the same interface.
 *The [report viewer](#report-viewer) on a lab VM seeded with harmless
 lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 
-> **Status:** v0.12. On **Linux**, a default run covers processes, network
+> **Status:** v0.13. On **Linux**, a default run covers processes, network
 > (TCP + UDP, with per-socket process attribution via `/proc`), loaded modules,
 > local accounts, persistence (cron, systemd, ld.so.preload, rc.local, XDG
-> autostart), kernel modules (with a cross-view that exposes a module hidden from
-> the list), the eBPF programs loaded in the kernel, and the systemd journal (SSH
+> autostart, PAM, sudo rules, udev), kernel modules (with a cross-view that
+> exposes a module hidden from the list), processes and sockets a rootkit hides
+> from `/proc`, the eBPF programs loaded in the kernel, the systemd journal (SSH
 > brute force, sudo and su, account changes, kernel warnings), read without
-> journalctl — judged by about 55 Linux-specific path, process, network, kernel,
-> log and command-line detections, with AI module A (LLM-callout detection)
-> running too; see [Platform support](#platform-support).
+> journalctl, and the AI agents' configuration (MCP servers, hooks, instruction
+> files with hidden text) — judged by about 70 Linux-specific path, process,
+> network, kernel, log and command-line detections, with AI module A
+> (LLM-callout detection) running too; see [Platform support](#platform-support).
 >
 > On **Windows**, a default run covers processes (with a process-tree,
 > command-line analysis and offline Authenticode verification that names the
@@ -32,17 +34,35 @@ lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 > scheduled tasks (cross-checked against the Task Scheduler's registry cache),
 > WMI event subscriptions (including timer triggers), COM CLSID and TypeLib
 > hijacking, ShimCache, AmCache, prefetch
-> (with decoded run counts and times), sessions, local accounts, loaded modules
-> and the Windows event logs, which can also be triaged offline from saved
-> `.evtx` files on any OS. A correlation pass lines the logs up against the live
-> state. That's about 120 named detections, each mapped to MITRE ATT&CK, plus
+> (with decoded run counts and times), sessions, local accounts, loaded modules,
+> kernel drivers (each checked against LOLDrivers' list of known vulnerable and
+> malicious drivers: bring your own vulnerable driver), named pipes and the
+> files remote-execution tools leave, port proxies, the settings an intruder
+> weakens (Defender's exclusions and protection, AMSI providers, WDigest, LSA
+> protection, .NET's ETW and profiler variables), the Kerberos tickets cached in
+> each logon session (golden tickets, overpass-the-hash, pass-the-ticket), the AI
+> agents' configuration and the Windows event logs — including a domain
+> controller's and a certificate authority's (DCSync, Kerberoasting, AS-REP
+> roasting, shadow credentials, delegation and ACL backdoors, AD CS abuse), DNS
+> tunnels and other covert channels — which can also be triaged offline from
+> saved `.evtx` files on any OS. A correlation pass lines the logs up against the
+> live state. That's about 230 named detections, each mapped to MITRE ATT&CK, plus
 > your own Sigma rules (or the bundled pack), an optional super-timeline,
 > indicator (IOC) export and offline endpoint-intelligence attribution
 > (ASN / country / cloud / CDN / hosting / Tor, air-gapped), AI
 > module A (LLM-callout detection), the Rust sidecar with AI module B
 > (embedded-prompt-artifact scanner), and opt-in live process-memory scanning
-> with YARA, memory-structure heuristics and an image-integrity check that finds
-> code overwritten in memory (module stomping, hollowing, AMSI/ETW patching).
+> with YARA, memory-structure heuristics, an image-integrity check that finds
+> code overwritten in memory (module stomping, hollowing, AMSI/ETW patching),
+> a check of every thread's hardware breakpoints and the process's vectored
+> exception handlers, which catches the AMSI/ETW bypasses that patch nothing,
+> a check of the system calls threads are in, which catches direct and
+> indirect syscalls (the Hell's Gate family, SysWhispers, RecycledGate, ...),
+> the stubs that make them and fresh copies of ntdll mapped around EDR hooks,
+> a check of where threads started and a walk of each waiting thread's
+> stack, which finds sleeping beacons, sleep-masked implants and spoofed
+> stacks, and Cobalt Strike and Havoc configurations decoded out of memory
+> (C2 hosts, URIs, watermark, sleep), which go into the IOC export.
 > Reports open in a [report viewer](#report-viewer): one offline HTML page, or
 > `-format html` for the report and viewer in one file. See
 > [Roadmap](#roadmap).
@@ -87,6 +107,9 @@ attacker-controlled input. They speak newline-delimited JSON over a pipe.
                  │          prefetch · amcache · sessions   │
                  │          modules · localaccounts · udp   │
                  │          comhijack · wmi                 │
+                 │          drivers ─ LOLDrivers (BYOVD)    │
+                 │          lateral · defenses · kerberos   │
+                 │          aiagents · rootkit (Linux)      │
                  │          network                         │
                  │            └─ AI module A (LLM callouts) │
                  │          eventlog (live, or -evtx)       │
@@ -107,8 +130,10 @@ attacker-controlled input. They speak newline-delimited JSON over a pipe.
                  │                                          │
                  │  scan_prompts ← AI module B on files     │
                  │  scan_memory  ← YARA-X + module B +      │
-                 │                 memory heuristics on     │
-                 │                 live process memory      │
+                 │                 memory heuristics,       │
+                 │                 image integrity, hooks,  │
+                 │                 system calls and stacks  │
+                 │                 on live process memory   │
                  └──────────────────────────────────────────┘
 ```
 
@@ -151,7 +176,11 @@ character is shown as a `\uXXXX` escape. When a parent was
 created *after* its child, the PID has been reused, so the record is marked
 `parent_pid_reused` instead of naming the wrong parent. Anything that couldn't
 be read is listed per record in `query_errors`. Every process is judged as
-part of a tree (see [Detections](#detections)).
+part of a tree (see [Detections](#detections)). On Windows, each process's
+environment is read for the .NET runtime's own variables — ETW switched off
+(`COMPlus_ETWEnabled=0`), a profiler DLL set to load (`COR_PROFILER`,
+`CORECLR_PROFILER`) — and only those are recorded (`runtime_env`): an
+environment also holds secrets, so nothing else in it is kept.
 
 **`network`** — every IPv4 and IPv6 TCP connection and listener with state,
 local/remote endpoints and owning PID/process, plus module A's findings and
@@ -165,6 +194,66 @@ expanded), the normalised program and its SHA-256, `ServiceDll`, start type,
 service type, account, recovery `FailureCommand`, and the key's last-write
 time (≈ when it was installed or changed).
 
+**`drivers`** — every kernel driver on the host: each module the kernel has
+loaded (from its own module list, so nothing is missed for lack of a service
+key) and each driver registered as a service but not loaded, merged into one
+record per file with its load order, service names, start type and the key's
+last-write time. Every file gets its SHA-256 and its **Authenticode digest**
+(the hash a signature covers, which stays the same when a driver is re-signed),
+and both are looked up in the bundled [LOLDrivers](https://www.loldrivers.io)
+list of known vulnerable and malicious drivers (over 700 drivers and 2,300
+known builds), offline. That is the check for **bring your own vulnerable driver** (BYOVD): an
+attacker with admin rights loads a legitimately signed driver with a known flaw
+to run code in the kernel (to kill EDR, strip process protection or load a
+rootkit), and Windows lets it because the signature is valid. Only exact hashes
+match: LOLDrivers' file names are hunting leads, not detections, since a patched
+build keeps its name. A match names the entry, its CVEs, which hash matched and
+whether that build loads with HVCI on, and links to its LOLDrivers page; the
+drivers worth a second look get their signer named. The first record is the
+host's driver-loading policy: kernel code integrity, test signing, kernel
+debugging, memory integrity (HVCI) and Microsoft's vulnerable driver blocklist.
+Crash-dump copies of storage drivers (`dump_storahci.sys`) are hashed as the
+file they were loaded from. The Authenticode digest is checked against an
+independent implementation on 207 Windows binaries and, in CI, against
+Windows' own for every loaded driver. `-no-hash` lists the drivers without
+checking them.
+
+**`lateral`** — what remote-execution and C2 tooling leaves on a host. Every
+named pipe is listed (by name, from `\\.\pipe\`, none of them opened) and the
+ones known tools use by default are reported: Cobalt Strike's (`msagent_##`,
+`postex_####`, `MSSE-####-server`, its Chrome look-alikes and the names
+published malleable profiles set), other frameworks' and malware families'
+(Covenant, PoshC2, SUNBURST, Turla, ...), credential tools' (Koh, WCE),
+potato exploits' (a pipe named after a path to another pipe, which a coerced
+SYSTEM service opens), and remote-execution tools' (PsExec, RemCom as
+Impacket's psexec uses it, PAExec, CSExec). A bare system pipe name
+(`spoolss`, `ntsvcs`, `wkssvc`) never matches, only the suffixed forms C2
+profiles use. It also looks for the output files Impacket's wmiexec, dcomexec
+and smbexec write to `ADMIN$` and `C$` and delete once read: one left behind
+is from a session that ended before it could, and its record keeps the start of
+the attacker's last command output. The same pipe names are judged in Sysmon's
+pipe events (17, 18), which name the program. And it lists the port proxies
+`netsh interface portproxy` set up (the IP Helper service relays a local port
+to another address): one aimed at RDP, SMB, WinRM, LDAP or SSH, or at a public
+address, is a pivot.
+
+**`defenses`** — the settings an intruder weakens first, one record per area
+holding every value read (so an absent setting, Windows' default, is told
+from one set to its default). Microsoft Defender: every exclusion (paths,
+extensions, processes and addresses, from its preferences and from group
+policy), graded by what it opens (a whole drive, a temporary or download
+folder, an executable extension or a script host is *suspect*; a vendor's own
+folder is *notable*), and its protection switched off (real-time, behaviour,
+script scanning, cloud, tamper protection). Credentials: WDigest set to keep
+passwords in clear text in LSASS, LSA protection switched off, RDP's
+Restricted Admin mode (which accepts a hash as a logon), NTLMv1, and a domain
+controller's DSRM administrator allowed to log on over the network. AMSI: every
+registered antimalware provider and the DLL its CLSID loads — Defender's
+provider pointing anywhere but Defender's `MpOav.dll`, no provider at all
+while Defender is installed, or a provider DLL in a user's profile or a
+temporary folder. And the .NET runtime's variables (ETW off, profilers) set in
+the system's environment, each signed-in user's, and each service's.
+
 **`autoruns`** — the auto-start extensibility points: per-machine and per-user
 Run/RunOnce (+ WOW64 and policy) keys with Task Manager's enable/disable state,
 Winlogon `Shell`/`Userinit`/`Taskman`/`AppSetup`, legacy `Windows\Load`/`Run`,
@@ -176,7 +265,12 @@ folders — with `.lnk` shortcuts resolved to the target and arguments they
 launch. Each entry carries the key's last-write time, the command (expanded
 under the right user's profile, with the raw value kept), the image and its
 SHA-256. User hives are read for local, domain and Microsoft Entra ID
-(`S-1-12-1-…`) accounts.
+(`S-1-12-1-…`) accounts. The accessibility programs the logon screen starts
+before anyone signs in (`sethc`, `utilman`, `osk`, `magnify`, `narrator`,
+`displayswitch`, `atbroker`) are compared byte for byte with `cmd.exe`,
+`powershell.exe`, `explorer.exe` and `taskmgr.exe` and judged by the original
+file name in their version resource: one replaced by a shell is a SYSTEM
+backdoor at the logon screen.
 
 **`scheduledtasks`** — the Task Scheduler store parsed from task XML
 (principal, run level, logon type, triggers, each action), the task file's
@@ -254,7 +348,9 @@ System, Application, Windows PowerShell and PowerShell/Operational,
 TaskScheduler, WMI-Activity, Windows Defender, both TerminalServices logs and
 Sysmon — and, within them, the events that matter: the security-relevant ones
 (log cleared, service installed, account created, privileged-group change,
-remote logon, Defender detection) are recorded in full, while high-volume command-bearing
+remote logon, Defender detection) are recorded in full, Sysmon's driver loads
+(event 6) are matched against the vulnerable-driver list by their SHA-256 or
+SHA-1 (so a driver loaded and gone before lrng ran is still caught), while high-volume command-bearing
 events (process creation 4688, PowerShell script blocks 4104) are kept only when
 a rule fires. Command lines inside events run through the same analytics as
 processes, services and task actions, so an encoded-PowerShell or
@@ -274,10 +370,69 @@ skipped — read it from a shadow copy or image then. The same parser also runs
 OS, applying the identical classification — for an exported log, a Volume Shadow
 Copy, or a file pulled from a disk image.
 
+On a **domain controller** or a **certificate authority**, the same logs show
+attacks on Active Directory: DCSync (replication rights used by an account that
+isn't a domain controller, 4662), Kerberoasting (one account asking for
+RC4-encrypted tickets to many services that run as user accounts within
+minutes — 4769s aggregated across the whole log), AS-REP roasting (4768
+without pre-authentication), the DPAPI domain backup key read, and the
+directory changes (5136) that plant backdoors: shadow credentials
+(`msDS-KeyCredentialLink`), resource-based and classic constrained
+delegation, an SPN added to a user (targeted Kerberoasting), DCShadow's
+domain-controller SPNs on an ordinary computer, AdminSDHolder's permissions,
+and replication rights granted on the domain (the new security descriptor is
+parsed and only trustees that don't hold them by default are reported), with
+SID history (4765, 4738), DSRM password changes (4794), certificate logons as
+a computer account (PetitPotam + ESC8), the KDC's certificate SID mismatch (an
+abused certificate meeting the SID the CA stamps in), certificate requests with
+a requester-supplied subject alternative name or application policies (ESC1,
+ESC6, ESC15 — as Certipy sends them), ESC1-shaped templates and templates
+changed into that shape (ESC4), and DNS records named for Kerberos and NTLM
+reflection (CVE-2025-33073). Each needs its auditing on: directory changes
+(5136) and Certificate Services (the audit policy and the CA's own audit
+filter) are off by default, and directory access (4662) is logged only for
+the rights an object's audit entries (SACL) name. Sysmon's
+network (3), remote-thread (8), DNS (22) and process-tampering (25) events add
+DNS tunnels (many long, random-looking names under one domain, per program),
+DNS sent straight to a public resolver, QUIC from programs that aren't browsers,
+signed proxy-execution binaries reaching the internet, injected threads and
+process hollowing; Windows PowerShell's event 400 shows a PowerShell 2.0
+downgrade.
+
+**`kerberos`** — the Kerberos tickets cached in each logon session, from LSA
+(the list `klist` shows: client, server, times, encryption type and flags; no
+ticket or key is ever retrieved), each judged for what forged and stolen
+tickets look like: a TGT valid for days or years, an RC4-encrypted TGT where
+other tickets are AES, another account's TGT in a session. Reading every
+session's cache needs SYSTEM; run as an administrator, lrng reads its own
+session's and says so (`meta.all_sessions`).
+
+**`aiagents`** *(Windows and Linux)* — how the AI agents on the host are set up.
+Every AI client's MCP servers (Claude Desktop, Claude Code with its per-project
+servers and managed files, Cursor, VS Code, Windsurf, Cline, Roo Code, Gemini
+CLI, Codex, Zed) are recorded with the command or URL they start or reach, and
+the names (never the values) of their environment; anything in arguments,
+URLs and hook commands that looks like a credential is redacted. An MCP server
+is a program a client starts by itself, with the user's rights, at every
+start: one started from a temporary folder, one fetched from a URL or a git
+repository at each start, one reached at a bare public IP or over plain HTTP,
+and Claude Code hooks that run a download cradle or code from a temporary
+folder are reported. Home directories are swept (bounded, skipping package
+caches and build output) for the instruction files agents read from projects —
+`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, Cursor's rules,
+`copilot-instructions.md`, Claude's commands and agents, Windsurf's and Cline's
+rules — and project MCP and settings files, and every one is checked for text a
+person reading it can't see: Unicode tag characters (decoded into the finding),
+bytes smuggled in runs of variation selectors (decoded), bidirectional controls
+and zero-width characters outside emoji and the scripts that need them — the
+"rules file backdoor".
+
 **`memory`** *(opt-in)* — YARA rules, the module-B prompt scan, memory
-structure heuristics and an image-integrity check (the code each process mapped
-from an image file, compared with that file) over the live memory of every
-process (or the ones you pick). See [Memory scanning](#memory-scanning-yara).
+structure heuristics, an image-integrity check (the code each process mapped
+from an image file, compared with that file) and, on Windows, each thread's
+hardware breakpoints and the process's vectored exception handlers, over the
+live memory of every process (or the ones you pick). See
+[Memory scanning](#memory-scanning-yara).
 
 **`dnscache`** *(opt-in)* — the DNS resolver cache: each cached name, its
 record types, and the addresses it resolved to (read with cache-only lookups,
@@ -295,6 +450,22 @@ letter. A cross-view of `/sys/module` against `/proc/modules` exposes a module
 that is loaded but removed from the list — how kernel rootkits hide. Config
 files are resolved before reading, so Debian's `modules.conf -> /etc/modules`
 link and merged `/usr` are read once.
+
+**`rootkit`** *(Linux)* — what a kernel rootkit hides from the tools an
+administrator runs. Every PID up to the larger of the highest listed and the
+last one the kernel handed out is asked for directly: a process whose
+`/proc/<pid>` answers but which `/proc`'s listing leaves out is hidden (threads
+answer too, and are told apart by their thread-group id; a process started
+during the probe is dropped on a second listing). Every TCP and UDP socket the
+kernel's own `sock_diag` netlink lists, in two dumps, is looked for in
+`/proc/net`: one missing there is filtered from what `netstat` reads. lrng
+reads `/proc` and netlink itself, so an `LD_PRELOAD` hider fools neither side.
+The Linux `autoruns` collector adds the authentication and device-event
+surfaces a rootkit's backdoor uses: PAM (a module loaded by path from outside
+the PAM directories, `pam_exec` — with the password, `expose_authtok` — and
+every PAM module file checked against its Debian package's md5), sudo rules
+that run anything without a password (graded by who gets them), and the
+programs udev rules in `/etc` run as root on device events.
 
 **`ebpf`** *(Linux, needs root)* — the eBPF programs loaded in the kernel, read
 with `bpf(2)` (no `bpftool`): type, name, tag, loader uid, load time, maps, run
@@ -329,25 +500,32 @@ against both malicious and ordinary examples.
 
 | Area | Rule ids |
 |---|---|
-| **Command lines** (processes, services, autoruns, task actions) | `exec.powershell_encoded` (decodes the payload into the finding), `exec.download_execute`, `exec.download_cradle`, `exec.powershell_reflective_load`, `exec.mshta_script`, `exec.rundll32_script`, `exec.regsvr32_scriptlet`, `exec.certutil_decode`, `exec.lolbin_proxy`, `exec.wmic_process_create`, `cred.lsass_dump` (comsvcs MiniDump, procdump), `cred.hive_or_ntds_dump`, `impact.inhibit_recovery` (vssadmin/wbadmin/bcdedit), `defense.clear_event_logs`, `defense.disable_defender`, `defense.firewall_disabled`, `persistence.account_created`, `persistence.admin_group_add`; context at *notable*: `exec.powershell_hidden`, `exec.frombase64`, `exec.obfuscated_blob`, `exec.scheduled_task_create`, `exec.service_create` |
+| **Command lines** (processes, services, autoruns, task actions) | `exec.powershell_encoded` (decodes the payload into the finding), `exec.download_execute`, `exec.download_cradle`, `exec.powershell_reflective_load`, `exec.mshta_script`, `exec.rundll32_script`, `exec.regsvr32_scriptlet`, `exec.certutil_decode`, `exec.lolbin_proxy`, `exec.wmic_process_create`, `lateral.wmiexec`, `lateral.smbexec` and `lateral.atexec` (*critical*: the shells Impacket's and NetExec's wmiexec, dcomexec, mmcexec, smbexec and atexec run, in the shapes their source builds, T1047, T1569.002, T1053.005), `cred.lsass_dump` (comsvcs MiniDump, procdump), `cred.hive_or_ntds_dump`, `impact.inhibit_recovery` (vssadmin/wbadmin/bcdedit), `defense.clear_event_logs`, `defense.disable_defender`, `defense.firewall_disabled`, `persistence.account_created`, `persistence.admin_group_add`, `defense.powershell_downgrade` (`powershell -version 2`: no script-block logging, no AMSI, T1562.010), `cred.browser_remote_debugging` (a Chromium browser started with `--remote-debugging-port` on the user's own profile, how infostealers read cookies past app-bound encryption, T1539), `network.portproxy_rule` (`netsh interface portproxy add`, T1090.001); context at *notable*: `exec.powershell_hidden`, `exec.frombase64`, `exec.obfuscated_blob`, `exec.scheduled_task_create`, `exec.service_create` |
 | **Process tree** | `process.masquerade_path` (a system binary name outside its Windows directory), `process.unexpected_parent` (e.g. `lsass.exe` not started by `wininit.exe`), `process.document_app_child` (Office → shell), `process.server_app_child` (w3wp → shell: web shell), `process.wmi_child`, `process.service_shell`, `process.name_typosquat` (`scvhost`, `Isass`), `process.unusual_path` |
-| **Autostarts** | `persistence.autorun_unusual_path`, `persistence.startup_folder_program`, `persistence.policies_run`, `persistence.windows_load`, `persistence.winlogon_hijack`, `persistence.winlogon_extra`, `persistence.ifeo_debugger`, `persistence.silent_process_exit`, `persistence.appinit_dlls`, `persistence.appcert_dlls`, `persistence.lsa_authentication_package`, `persistence.lsa_security_package`, `persistence.password_filter`, `persistence.boot_execute`, `persistence.cmd_autorun`, `persistence.print_monitor`, `persistence.netsh_helper`, `persistence.screensaver` |
+| **Autostarts** | `persistence.autorun_unusual_path`, `persistence.startup_folder_program`, `persistence.policies_run`, `persistence.windows_load`, `persistence.winlogon_hijack`, `persistence.winlogon_extra`, `persistence.ifeo_debugger`, `persistence.silent_process_exit`, `persistence.appinit_dlls`, `persistence.appcert_dlls`, `persistence.lsa_authentication_package`, `persistence.lsa_security_package`, `persistence.password_filter`, `persistence.boot_execute`, `persistence.cmd_autorun`, `persistence.print_monitor`, `persistence.netsh_helper`, `persistence.screensaver`, `persistence.accessibility_backdoor` (*critical*: an accessibility program the logon screen runs that is a copy of a shell, or names another program in its version resource, T1546.008) |
 | **Services & scheduled tasks** | `persistence.service_unusual_path`, `persistence.service_script_host`, `persistence.service_unquoted_path`, `persistence.service_failure_command`, `lateral.service_in_windows_dir` (PsExec/Impacket), `persistence.scheduled_task_unusual_path`, `persistence.scheduled_task_hidden` (Tarrask), `persistence.scheduled_task_no_file`, `persistence.scheduled_task_unregistered` |
 | **COM & WMI persistence** | `persistence.com_hijack_user_shadow` (a per-user CLSID overriding a machine one), `persistence.com_server_unusual_path`, `persistence.com_script_server` (`scrobj.dll` / script-host server), `persistence.com_treatas_redirect`; `persistence.wmi_script_consumer` (fileless `ActiveScriptEventConsumer`), `persistence.wmi_commandline_consumer`, `persistence.wmi_consumer_unusual_path`, `persistence.wmi_consumer`, `persistence.wmi_filter`, `persistence.wmi_subscription_active` (a binding — the persistence is live), `persistence.wmi_timer` (an `__IntervalTimerInstruction`/`__AbsoluteTimerInstruction`), `persistence.wmi_timer_filter` (a `__TimerEvent` filter — a schedule-based trigger); TypeLib hijacking: `persistence.typelib_script_moniker`, `persistence.typelib_unusual_path`, `persistence.typelib_user_shadow` |
 | **Accounts & sessions** | `accounts.dollar_suffix_user`, `accounts.hidden_from_logon_screen`, `accounts.guest_enabled`, `accounts.password_not_required`, `sessions.remote_from_public_address` |
-| **Network** | `network.lolbin_outbound`, `network.script_host_listener`, `network.unusual_path_outbound`, `network.script_host_outbound`; module A's `ai.llm_callout`, `ai.llm_callout_unattributed`, `ai.llm_callout_unusual_path`, `ai.llm_dns_cache` |
+| **Network** | `network.lolbin_outbound`, `network.script_host_listener`, `network.unusual_path_outbound`, `network.script_host_outbound`, `network.direct_dns` (DNS sent straight to a public resolver, past the host's DNS client, T1071.004; Windows and Linux); module A's `ai.llm_callout`, `ai.llm_callout_unattributed`, `ai.llm_callout_unusual_path`, `ai.llm_dns_cache`; `ai.local_llm_client` (a program that isn't an AI client asking a local Ollama, LM Studio, GPT4All or Jan server for output — checked against the process actually listening; how LLM-orchestrated malware such as the PromptLock proof of concept writes its scripts), `ai.remote_llm_server` (an Ollama API on the internet); and from the DNS cache (`dnscache`), `network.dns_tunnel` (many data-like names under one domain) |
 | **Execution evidence & modules** | `execution.shimcache_unusual_path`, `execution.prefetch_unusual_path`, `execution.amcache_unusual_path`, `modules.unusual_path` |
 | **Signature integrity** | `integrity.unsigned_system_binary` (a process image in System32/SysWOW64 that is unsigned or carries an untrusted signature; the finding quotes who that signature claims to be from) |
-| **Event logs** | `defense.clear_event_logs` (Security 1102 / System 104), `eventlog.service_installed` (7045), `persistence.account_created` (4720), `persistence.admin_group_add` (4728/4732/4756 to a privileged group), `eventlog.powershell_suspicious_block` (4104), `eventlog.defender_detection` (Defender 1116/1117) — plus the command-line rules above applied to 4688 command lines, 4104 script blocks and 7045 service ImagePaths |
+| **Kernel drivers (BYOVD)** | `persistence.malicious_driver` (*critical*: a driver LOLDrivers lists as malicious, loaded or installed, T1014), `privesc.vulnerable_driver_loaded` (a known vulnerable driver in the kernel, T1068), `privesc.vulnerable_driver_installed` (*notable*: registered, not loaded), `privesc.driver_unusual_path` (a driver loaded from a temp, download or world-writable directory), `defense.loaded_driver_file_missing` (*notable*: loaded, then its file deleted, T1070.004); the loading policy: `defense.driver_blocklist_disabled` (Microsoft's vulnerable driver blocklist switched off, T1562.001), `defense.code_integrity_weakened` (kernel code integrity off, test signing or kernel debugging on, T1553.006) |
+| **Lateral movement & C2 traces** (`lateral`) | `network.c2_named_pipe` (a pipe named the way Cobalt Strike, a malleable profile, another framework or a known malware family names its pipes: *critical* for the defaults, *suspect* for profile names, T1071), `lateral.remote_exec_pipe` (PsExec, PAExec and CSExec at *notable*; RemCom, as Impacket's psexec uses it, at *suspect*, T1569.002), `privesc.potato_pipe` (*critical*: a pipe named after a path to another pipe, how PrintSpoofer and the potato exploits catch a coerced SYSTEM service, T1134.001), `cred.dump_tool_pipe` (*critical*: cachedump, lsadump, WCE, Koh), `lateral.impacket_output_file` (an output file Impacket's wmiexec, dcomexec or smbexec didn't get to delete, with the start of the output in the record), `network.portproxy_rule` (a port proxy: *suspect* when it relays to RDP, SMB, WinRM, LDAP, Kerberos, SQL or SSH, or to a public address, T1090.001) |
+| **Host defenses** (`defenses`) | `defense.defender_exclusion` (graded: a whole drive, a temporary, download or world-writable folder, an executable extension or a script host is *suspect*, anything else *notable*, T1562.001), `defense.defender_protection_off` (real-time, behaviour or script scanning off by preference or policy; cloud protection or tamper protection off at *notable*), `cred.wdigest_enabled` (*suspect*: WDigest set to keep passwords in clear text in LSASS, T1112), `cred.lsa_protection_off` (LSA protection switched off explicitly), `cred.restricted_admin_enabled` (RDP's Restricted Admin mode, which accepts a hash as a logon, T1550.002), `cred.ntlmv1_allowed` (`LmCompatibilityLevel` 2 or lower, T1557.001), `cred.dsrm_network_logon` (`DsrmAdminLogonBehavior` 2: the DC's DSRM administrator logs on over the network, T1098); AMSI: `defense.amsi_provider_hijacked` (Defender's provider CLSID registered to another DLL, T1562.001), `defense.amsi_provider_missing` (none registered while Defender is installed), `persistence.amsi_provider` (*notable*: a third-party provider, loaded into every script host; *suspect* from a user's profile or a temporary folder, T1546); .NET (from the registry environments, and each process's in `processes`): `defense.dotnet_etw_disabled` (`COMPlus_ETWEnabled=0`: .NET stops writing the ETW events EDR watches assemblies load by, T1562.006), `persistence.clr_profiler` (`COR_PROFILER`/`CORECLR_PROFILER`: a DLL loaded into every .NET process; *suspect* from a user's profile or temporary folder, T1574.012) |
+| **Event logs** | `defense.clear_event_logs` (Security 1102 / System 104), `eventlog.service_installed` (7045), `persistence.account_created` (4720), `persistence.admin_group_add` (4728/4732/4756 to a privileged group), `eventlog.powershell_suspicious_block` (4104), `eventlog.defender_detection` (Defender 1116/1117), Sysmon driver loads (event 6) matched against the vulnerable-driver list (the driver rules above) and `defense.unsigned_driver_loaded` (T1553.006), Sysmon process access (event 10) whose call trace starts in code no module backs: `defense.direct_syscall` (*critical* into LSASS, T1003.001), Sysmon pipe events (17, 18) against the `lateral` pipe names; `cred.pass_the_hash` (4624 logon type 9 through the Secondary Logon service: Mimikatz's `sekurlsa::pth`, Rubeus `createnetonly`, Cobalt Strike's `pth`; `runas /netonly` looks the same, T1550.002); Defender's own log: `defense.defender_protection_off` (5001, 5010, 5012, and 5007 switching a protection off), `defense.defender_exclusion` (5007 adding one, dated), `defense.defender_tamper_blocked` (5013); Sysmon's network events (3): `network.direct_dns`, `network.quic_outbound` (UDP 443 from a program that isn't a browser or a service that uses QUIC, T1071.001), `network.lolbin_outbound`; its DNS events (22), aggregated: `network.dns_tunnel` (*critical* from 100 names); remote threads (8): `memory.remote_thread_unbacked` (a thread started in memory no module backs; into LSASS, T1003.001), `memory.remote_thread_loadlibrary` (DLL injection, T1055.001); process tampering (25): `memory.process_tampering` (hollowing, herpaderping); Windows PowerShell's engine start (400): `defense.powershell_downgrade`; Code Integrity's log: `privesc.vulnerable_driver_blocked` (a LOLDrivers driver Windows refused to load, by the hashes the event records: a failed BYOVD attempt), `persistence.malicious_driver` for a listed malicious one, `privesc.vulnerable_driver_loaded` when the policy was only auditing, `defense.driver_load_blocked` (*notable*: any other driver refused), `cred.lsa_plugin_blocked` (a module LSA protection kept out of LSASS: mimilib, an SSP or password-filter backdoor, T1547.005) — plus the command-line rules above applied to 4688 command lines, 4104 script blocks, 7045 service ImagePaths and the actions of tasks registered or updated (4698, 4702), where Impacket's atexec task survives after the task itself is deleted |
+| **Active Directory** (a domain controller's and a CA's logs) | `cred.dcsync` (*critical*: DS-Replication-Get-Changes-All used by an account that isn't a DC or Azure AD Connect, T1003.006), `cred.kerberoasting` (RC4 service tickets to 4 or more user-account services within 15 minutes; *critical* from 10, T1558.003), `cred.asrep_roasting` (a TGT issued without pre-authentication; *suspect* when RC4, T1558.004), `cred.dpapi_backup_key` (*critical*: the domain's DPAPI backup key read, T1003.004), `cred.shadow_credentials` (a key credential added to an account, T1556), `privesc.rbcd_configured`, `privesc.constrained_delegation_configured` (T1098), `cred.spn_added_to_user` (*notable*: targeted Kerberoasting), `defense.dcshadow` (a DC's SPNs on a computer outside the Domain Controllers OU, T1207), `persistence.dcsync_rights_granted` (*critical*: replication rights granted on the domain to a non-default trustee), `persistence.adminsdholder_modified`, `persistence.domain_acl_changed` (the domain opened with WRITE_DAC), `persistence.sid_history_added` (*critical* for a privileged SID, T1134.005), `persistence.dsrm_password_set`, `cred.computer_certificate_logon` (PKINIT as a computer: PetitPotam + ESC8, T1649), `privesc.certificate_sid_mismatch` (the KDC refused a certificate whose SID isn't the account's), `privesc.adcs_alternate_identity` (a requester-supplied SAN naming another user: ESC1/ESC6, Certipy `req -upn`), `privesc.adcs_application_policies` (ESC15, CVE-2024-49019), `privesc.adcs_vulnerable_template` (an ESC1-shaped template; changed into that shape, ESC4), `privesc.reflection_dns_record` (*critical*: a DNS record named with a marshalled target-info blob, CVE-2025-33073, T1187) |
+| **Kerberos tickets** (`kerberos`) | `cred.golden_ticket` (*critical*: a TGT valid for more than a week; *suspect* over a day, T1558.001), `cred.rc4_tgt` (overpass-the-hash or a forged ticket; *suspect* when other tickets are AES, T1550.002), `cred.pass_the_ticket` (another account's TGT in a session, T1550.003), `cred.kerberos_ticket_anomaly` (*notable*: times that run backwards) |
+| **AI agents** (`aiagents`) | `ai.mcp_server_unusual_path` (an MCP server started from a temporary or download folder), `ai.mcp_server_remote_code` (*notable*: fetched from a URL or git at each start, T1195.002), `ai.mcp_server_url` (a bare public IP; plain HTTP at *notable*), `ai.agent_hook_unusual_path` (a Claude Code hook running code from a temporary folder), `ai.hidden_instructions` (*critical*: Unicode tag characters or variation-selector smuggling in an instruction or configuration file, decoded; bidirectional controls and zero-width characters at *suspect*, T1027) — plus the command-line rules on every MCP command and hook |
 | **Logon sessions** (event log) | `logon.remote_interactive` (4624 type 10 / RDP — suspect from a public source address, T1021.001), `logon.network_external` (4624 type 3 from an external address, T1021), `logon.failed_external` (4625 from an external address, T1110) |
 | **Correlation** (event log × live state) | `correlate.service_installed_absent` (a 7045 service install with no matching live service — installed then removed, T1070.009), `correlate.task_registered_absent` (a 4698/106 task registration with no matching live task — deleted or hidden, T1070.009); and the `defense.clear_event_logs` finding is annotated with the surviving record-id/time range left by the clear. Independent of the event log: `correlate.task_comhandler_hijacked` (a scheduled task whose `IComHandlerAction` CLSID matches a COM registration `comhijack` flagged — schedule meets hijacked object, T1546.015) |
 | **Sigma** (`-sigma`) | `sigma.<rule>` for each matching Sigma rule, carrying the rule's level (→ severity) and first `attack.t*` tag (→ technique) — the analyst's own detections, run beside the built-in ones |
 | **Linux processes & modules** | `process.unusual_exec_path` (`/tmp`, `/dev/shm`, a hidden home dir), `process.deleted_binary` (self-deleting, T1070.004), `process.memfd_exec` (fileless, T1620), `process.kthread_masquerade` (a userland task named like `kworker/…`, T1036.004), `process.binary_replaced` (*notable*: the executable was replaced on disk — usually an upgrade pending a restart, T1554); `modules.unusual_path` (T1574.006), `modules.deleted_file`, `modules.memfd_exec`, `modules.replaced_on_disk` (*info*: upgraded system libraries) |
 | **Linux network** | `network.shell_listener` (a shell or netcat listening: bind shell), `network.shell_outbound` (a shell or netcat talking to a public address: reverse shell), `network.interpreter_listener` / `network.interpreter_outbound` (*notable*: an interpreter as a server or client), `network.unusual_path_outbound` — judged by the process name *and* its executable's name, so a reverse shell run as `./update.sh` is still a shell, and a client connected to a local server isn't counted as outbound |
 | **Linux command lines, persistence & accounts** | `exec.download_pipe_shell` (`curl … \| sh`), `exec.reverse_shell` (`/dev/tcp`, `nc -e`, socat `EXEC`, interpreter one-liners), `exec.base64_decode`, `exec.chmod_suspicious`, `persistence.ssh_authorized_keys`, `persistence.cron_install`, `persistence.shell_profile`, `persistence.boot_or_preload`; `persistence.ld_preload`, `persistence.unusual_path` (cron, systemd units and drop-ins, rc.local, XDG autostart); `accounts.uid0_nonroot`, `accounts.empty_password`, `accounts.system_account_login_shell`, `accounts.duplicate_uid`, `accounts.root_equiv_group`; anti-forensics: `defense.clear_linux_logs` (wiping `/var/log`, `journalctl --vacuum-*`, T1070.002), `defense.clear_shell_history` (T1070.003) |
+| **Linux rootkits & backdoors** (`rootkit`, `autoruns`) | `defense.hidden_process` (*critical*: a process that answers at `/proc/<pid>` but is filtered out of the listing, T1014), `defense.hidden_socket` (*critical*: a socket netlink lists and `/proc/net` leaves out, T1014), `persistence.pam_module` (a PAM module loaded from outside the PAM directories; *critical* from a temporary folder, T1556.003), `persistence.pam_module_modified` (*critical*: a PAM module that differs from its Debian package's copy), `persistence.pam_module_unowned` (*notable*), `persistence.pam_exec` (*suspect* with `expose_authtok`: a password logger), `persistence.sudo_nopasswd` (anything without a password: *notable* for a person or admin group, *suspect* for a service account or unknown name, *critical* for `ALL`, T1548.003), `persistence.udev_run` (a udev rule running a script, or a program outside the system's directories, as root, T1546) |
 | **Linux kernel modules & eBPF** | `persistence.kmod_hidden` (*critical*: loaded per `/sys/module` but missing from `/proc/modules`, T1014), `persistence.kmod_forced`, `persistence.kmod_unsigned` (*suspect* when it also loads at boot), `persistence.kmod_out_of_tree`, `persistence.kmod_boot_unknown` (set to load at boot but not in the running kernel's module tree), `persistence.modprobe_hook` (an `install`/`remove` command, T1547.006), `kernel.tainted`; `persistence.ebpf_write_user` (`bpf_probe_write_user`, T1014), `persistence.ebpf_override_return`, `persistence.ebpf_send_signal` |
 | **Linux journal** (`journald`) | `logon.ssh_bruteforce` (T1110.001), `logon.ssh_bruteforce_success` (*critical*: a logon after ten or more failures from the same address, T1110), `logon.ssh_external` (*suspect* for a root password logon, T1021.004), `privesc.sudo_denied`, `privesc.sudo_auth_failure`, `privesc.su_failed` (T1548), `persistence.account_created` (*critical* for a new UID 0, T1136.001), `persistence.admin_group_add` (to `sudo`, `wheel`, `docker`, … T1098), `persistence.password_changed` (root), `persistence.kmod_unsigned_loaded` and `persistence.ebpf_write_user` from the kernel's own warnings — plus the command-line rules on sudo and cron commands |
-| **Memory** (opt-in) | `yara:<rule>`, `memory.pe_in_private` (reflective/manual-mapped PE), `memory.elf_in_anonymous`, `memory.memfd_exec`, `memory.deleted_file_exec`, `memory.replaced_file_exec` (*info*: a system library replaced by an upgrade); image integrity: `memory.image_code_modified` (code overwritten after mapping — module stomping, T1055; *critical* from 16 KiB), `memory.image_header_mismatch` (the mapped image was replaced — hollowing and its relatives, T1055.012), `memory.image_exec_outside_code` (executable pages outside a module's code sections — stomping into a data section; *critical* when a payload was written there), `memory.image_file_unavailable`, `memory.image_inline_patch` (short patches: hooks), `defense.amsi_patched` (T1562.001), `defense.etw_patched` (T1562.006); and module B's `prompt.*`, `api.*`, `model.*` and `secret.*` (below) |
+| **Memory** (opt-in) | `yara:<rule>`, `memory.pe_in_private` (reflective/manual-mapped PE), `memory.elf_in_anonymous`, `memory.memfd_exec`, `memory.deleted_file_exec`, `memory.replaced_file_exec` (*info*: a system library replaced by an upgrade); image integrity: `memory.image_code_modified` (code overwritten after mapping — module stomping, T1055; *critical* from 16 KiB), `memory.image_header_mismatch` (the mapped image was replaced — hollowing and its relatives, T1055.012), `memory.image_exec_outside_code` (executable pages outside a module's code sections — stomping into a data section; *critical* when a payload was written there), `memory.image_file_unavailable`, `memory.image_inline_patch` (short patches: hooks), `defense.amsi_patched` (T1562.001), `defense.etw_patched` (T1562.006); exception hooks (Windows): `defense.amsi_hwbp` and `defense.etw_hwbp` (*critical*: a hardware breakpoint on AMSI or ntdll's ETW event writers, the patchless bypass), `memory.hardware_breakpoint` (*notable*: any other armed breakpoint), `memory.veh_unbacked` (*critical*: a vectored exception or continue handler in memory no image file backs, T1055); system calls (Windows x64): `defense.direct_syscall` (a thread in a system call made outside ntdll and win32u, T1106: *critical* from injected memory or a second ntdll), `defense.indirect_syscall` (a call through ntdll that returns into injected code), `defense.syscall_return_nonexec` (*critical*: one that returns into non-executable memory, as sleep obfuscation leaves it), `memory.syscall_stub` (direct, indirect and jumper stubs in memory no image backs), `defense.ntdll_second_copy` (ntdll mapped again to call around hooks, T1562.001), `defense.syscall_hwbp` (a hardware breakpoint on a system-call stub); threads (Windows): `memory.thread_start_unbacked` (*critical*: a thread started in memory no image backs, T1055), `memory.thread_start_loadlibrary` (a thread started at LoadLibrary, CreateRemoteThread DLL injection, T1055.001), `memory.thread_start_spoofed` (a start address inside a function rather than at its start, T1036), `memory.stack_unbacked` (a waiting thread's stack passes through code no image backs and no runtime registered as JIT code: a sleeping beacon, T1055), `defense.stack_return_nonexec` (*critical*: a frame in memory that isn't executable now, as a sleep mask leaves it, T1027), `defense.stack_frame_no_call` (a return address that follows no call: a spoofed frame, T1036), `defense.stack_jmp_gadget` (a return address on a `jmp [rbx]`-style gadget, SilentMoonwalk's desync, T1036), `defense.stack_truncated` (a stack that ends at a frame that isn't where threads begin: a zeroed return address, T1036), `defense.stack_fake_thread_start` (BaseThreadInitThunk appearing to call a Windows API in a module the thread didn't start in: forged thread-start frames, T1036); beacon configurations: `memory.cobalt_strike_config` (*critical*: a Cobalt Strike configuration, packed or a running beacon's settings table, decoded), `memory.havoc_config` (*critical*: a whole Havoc Demon payload's configuration, decoded); and module B's `prompt.*`, `api.*`, `model.*` and `secret.*` (below) |
 | **Endpoint intelligence** (`-intel`) | `intel.tor_endpoint` (a remote address that is Tor infrastructure, T1090.003), `intel.anonymizer_endpoint` (a known anonymising VPN/proxy, T1090.002) — from the offline ASN/country/category attribution of the run's public remote addresses |
 
 **False-positive discipline.** Path heuristics grade locations: temporary,
@@ -443,7 +621,8 @@ so the code reading attacker-controlled memory stays memory-safe end to end.
 ```
 
 **How it works.** For each process the sidecar opens the target read-only
-(`PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`, nothing else), walks its
+(`PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`, and each of its threads with
+`THREAD_GET_CONTEXT`: nothing that writes), walks its
 committed, readable regions with `VirtualQueryEx`, reads them in 16 MiB
 chunks (with a 4 KiB overlap so nothing straddling a chunk boundary is
 missed), and feeds each chunk to a YARA block scan *at its virtual address*.
@@ -497,6 +676,177 @@ compiler-built images (`LRNG_PE_SAMPLES`, `sidecar-rs/scripts/pe_golden.py`) —
 code sections, data sections and headers alike — and CI runs it against the
 real Windows loader, rewriting code and stomping a data section in a live
 module and requiring both to be found at their addresses.
+
+**Exception hooks (no rules needed, Windows).** A *patchless* AMSI or ETW
+bypass changes no code, so image integrity has nothing to compare: it puts a
+hardware breakpoint (a debug register, `Dr0`–`Dr3`) on `AmsiScanBuffer` or
+`EtwEventWrite`, and a vectored exception handler (VEH) it registered catches
+the breakpoint and skips the function. Both halves can be read from outside.
+The sidecar reads every thread's debug registers (`GetThreadContext`, debug
+registers only, without suspending the thread), names what each armed
+breakpoint sits on by image and export, and reports one on `amsi.dll` code as
+`defense.amsi_hwbp` and one on ntdll's ETW event writers as `defense.etw_hwbp`
+(lower when a debugger is attached; debuggers set breakpoints too), and any
+other as `memory.hardware_breakpoint`. It also walks ntdll's two lists of
+vectored handlers (exception and continue handlers). They sit at the same
+address in every process of one architecture, because ntdll is mapped once
+per boot, and the sidecar finds them by registering a no-op handler of each
+kind in itself, following it to its list's head and removing it again. Each
+list is read twice and checked link by link, so one changing underneath isn't
+misread, and every handler is decoded with the process's pointer cookie. Windows
+gives out another process's cookie (`DecodeRemotePointer`) only to a handle
+with more than read access, which lrng never asks for, so the cookie is read
+from the copy ntdll keeps in its own data, found the same way. A handler that
+points into executable memory no image file backs is `memory.veh_unbacked`:
+injected code handling its own exceptions, as patchless hooks and sleep
+obfuscation do. Handlers in images (the .NET runtime registers some, and so
+does every Rust program, for stack overflows) are listed in
+`exception_hooks.handler_modules`. A
+32-bit process's handlers live in its own 32-bit ntdll and aren't walked by
+the 64-bit sidecar (its debug registers still are). CI plants a handler on
+both lists and breakpoints on `AmsiScanBuffer`, `EtwEventWrite` and `Sleep` in
+a test process and requires each to be found, and requires a clean live
+PowerShell to show none.
+
+**System calls (no rules needed, Windows x64).** Only ntdll.dll and win32u.dll
+contain the instruction that enters the kernel, one small stub per system
+service (and, in a 32-bit process, WoW64's wow64cpu.dll, which makes the calls
+it dispatches itself), and EDR products hook those stubs. Malware goes around them in a few
+ways, and each leaves something a point-in-time look can see. A thread blocked
+in a system call has its instruction pointer just past the `syscall` it ran
+and its stack pointer at the address the stub returns to (read with the same
+`GetThreadContext` call as the debug registers). A thread is reported only if
+its registers and that address read the same a second time, so a busy thread
+caught on its way back from a short call isn't judged on a stack it has
+already reused. The sidecar reports:
+
+- a thread whose `syscall` is outside ntdll and win32u: `defense.direct_syscall`
+  (*critical* from memory no image backs or from a second ntdll; *suspect* from
+  another module; *notable* from a byte-for-byte copy of ntdll's stub, which
+  Chromium's sandbox keeps for the calls it intercepts);
+- one whose `syscall` is ntdll's but whose stub returns into executable memory
+  no image backs: `defense.indirect_syscall`;
+- one that returns into memory that isn't executable, or where nothing is
+  mapped: `defense.syscall_return_nonexec` (an implant hidden while it sleeps,
+  or a forged stack);
+- the stubs themselves, in executable memory no image backs, whether a thread is
+  in one or not: `memory.syscall_stub` (direct ones, ones that jump to a
+  `syscall` instruction in ntdll, and register "jumpers"). Hook trampolines,
+  which jump back into the middle of ntdll's stub rather than to its `syscall`,
+  and copies of ntdll's stubs are counted in the record's `syscalls` metadata,
+  not reported;
+- ntdll mapped a second time, as an image (found by its export directory's
+  name, so a renamed copy counts) or as an executable view of its file:
+  `defense.ntdll_second_copy`;
+- a hardware breakpoint on one of ntdll's system-call stubs:
+  `defense.syscall_hwbp`.
+
+ntdll's own stubs are read from its file on disk, where no hook reaches them,
+to name each call and to recognise copies. The event log adds the history:
+a Sysmon process-access event (10) whose call trace starts in code no module
+backs opened its target with a direct syscall (*critical* when the target is
+LSASS). How the named techniques show up:
+
+| Technique | What reports it |
+|---|---|
+| Direct syscalls: SysWhispers 1 and 2, SysWhispers3 (direct mode), Hell's Gate, Halo's Gate, Tartarus' Gate, FreshyCalls | `defense.direct_syscall` while a thread is in one; `memory.syscall_stub` for the stub in memory; Sysmon 10 for process access |
+| Indirect syscalls: SysWhispers3's jumper, RecycledGate, HellsHall, C2 frameworks' indirect modes | `defense.indirect_syscall`; `memory.syscall_stub` (indirect and jumper stubs) |
+| Hardware-breakpoint syscalls: TamperingSyscalls, LayeredSyscall | `defense.syscall_hwbp`, and `memory.veh_unbacked` for their exception handler |
+| Heaven's Gate (64-bit calls from 32-bit code) | `defense.direct_syscall`, from the thread's 64-bit context; `memory.syscall_stub` |
+| Unhooking with a fresh ntdll (from disk or KnownDlls) | `defense.ntdll_second_copy`; calls made from it are `defense.direct_syscall` |
+| Sleep obfuscation (Ekko, Foliage, Zilean), waiting in a system call from hidden code | `defense.syscall_return_nonexec`, or `defense.stack_return_nonexec` when the hidden code is further up the stack (below) |
+
+The gates differ in how they find a service number when ntdll is hooked; that
+lookup leaves nothing behind, so they are caught by the call they make. CI
+plants inert stubs of each shape (never run), poses suspended threads as
+stopped in direct, copied and indirect calls, maps ntdll twice, and requires
+each to be reported at the right address and a clean live PowerShell to show
+none.
+
+**Threads and their stacks (no rules needed, Windows x64).** Windows records
+the routine each thread was created to run, and the sidecar reads it for every
+thread (`NtQueryInformationThread`). A thread started in memory no image backs
+is `memory.thread_start_unbacked` (CreateRemoteThread or NtCreateThreadEx into
+shellcode); one started at LoadLibrary is `memory.thread_start_loadlibrary`
+(the classic DLL injection, still running); one started inside a module's
+function rather than at its start is `memory.thread_start_spoofed` (a start
+address chosen to look like system code, as Cobalt Strike's process-inject
+`CreateThread "ntdll!RtlUserThreadStart+0x42"` option does).
+
+Then each thread blocked in a system call has its stack walked, frame by
+frame, the way Windows' own `RtlVirtualUnwind` does it: with each module's
+unwind data, read from its file on disk. The first return address is the
+system-call checks'; the walk goes on from there. Code no image backs that
+waits on the call from further up is `memory.stack_unbacked`: a beacon that
+called `Sleep` or `WaitForSingleObject` from injected memory looks exactly
+like that, however it made the call. A frame in memory that isn't executable
+now is `defense.stack_return_nonexec`, which is what a sleep mask leaves
+while the implant waits. A return address that doesn't follow a call
+instruction is `defense.stack_frame_no_call`: it was forged so the stack looks
+ordinary. One that lands on an indirect jump through a register calls preserve
+(`jmp qword ptr [rbx]` and its kin) is `defense.stack_jmp_gadget`: the gadget a
+desynchronising spoofer returns through. A walk that reaches the end of the
+stack (a zero return address) anywhere but where threads begin (ntdll's thread
+and fiber starts, the WoW64 layer) is `defense.stack_truncated`: a return
+address zeroed so the walk stops short of the caller. And a frame that
+BaseThreadInitThunk appears to have called which is a Windows API in a module
+the thread didn't start in is `defense.stack_fake_thread_start`: thread-start
+frames forged beneath the real caller. JIT code is where .NET, browsers' script engines and Java run, and
+it isn't an image. Runtimes register their code ranges with ntdll so exceptions
+and debuggers can unwind them, so the sidecar reads that list (its head is at
+the same address in every process) and counts frames there instead of judging
+them. The same list spares managed code that calls an Nt function directly
+from `defense.indirect_syscall`. A finding is kept only if the thread's
+registers and the slot it came from read the same a second time.
+
+| Technique | What reports it |
+|---|---|
+| Sleeping beacons (Cobalt Strike, Havoc, Sliver shellcode waiting in `Sleep` or `WaitForSingleObject`) | `memory.stack_unbacked` |
+| Sleep masks that hide the implant while it waits (Ekko, Zilean, Foliage, Cobalt Strike's sleep mask) | `defense.stack_return_nonexec`; `memory.thread_start_unbacked` (*suspect*) when the thread started there too |
+| Thread-start spoofing (a start address inside a system function) | `memory.thread_start_spoofed` |
+| Call-stack spoofing with gadget frames | `defense.stack_frame_no_call`, `defense.stack_jmp_gadget` (SilentMoonwalk's desync), or `memory.stack_unbacked` for the frame it couldn't hide |
+| Stack truncation (ThreadStackSpoofer) | `defense.stack_truncated` |
+| Synthetic thread-start frames under the real caller | `defense.stack_fake_thread_start` |
+| CreateRemoteThread / NtCreateThreadEx injection | `memory.thread_start_unbacked`; `memory.thread_start_loadlibrary` for DLL injection |
+
+Spoofing that builds every frame from real return addresses after real calls,
+and ends where threads begin, unwinds cleanly and isn't caught by this. CI walks
+a real waiting thread with both this unwinder and `RtlVirtualUnwind` and
+requires the same frames. It then runs a thread that waits from a page no image
+backs (it only calls `WaitForSingleObject`), makes that page non-executable
+while it waits, registers it as JIT code, parks threads at LoadLibraryW and
+inside `RtlUserThreadStart`, and poses threads with a return address that
+follows no call, one on a `jmp [rbx]` gadget found in kernelbase, one whose
+stack ends after `WaitForSingleObjectEx`, and a copy of the stack of a thread
+really started at `SleepEx` (itself not judged) under a thread that started in
+the test's own code; each must be reported, or not, as described. The live
+gates scan a 64-bit and a 32-bit PowerShell, where nothing may be reported.
+
+**Beacon configurations (no rules needed).** Memory no image backs is searched
+for the configuration of the two C2 frameworks intruders run most, and what is
+found is decoded into the finding and into structured values the report keeps
+(`extracted`) and the IOC export reads (their C2 hosts). Cobalt Strike's comes
+in two shapes: the packed settings a payload carries (big-endian TLV entries,
+XOR-encoded with 0x2e for version 4 or 0x69 for version 3, or decoded), and the
+table a running beacon builds from them on its heap (a slot per setting,
+64- or 32-bit, whose data settings point at their buffers, which are read too —
+the structure BeaconEye looks for). A candidate is kept only if it holds
+together: a beacon type Cobalt Strike has, a port, a sleep, and a C2 setting
+that reads as text or a pipe. Decoded: C2 hosts and URIs, port, sleep and
+jitter, watermark, user agent, POST URI, spawn-to processes, pipe name, kill
+date, proxy, host header and DNS resolver. Havoc's Demon carries its
+configuration packed as plain little-endian fields, which a running Demon wipes
+once it has read them; so what is found is a Demon payload still whole in
+executable memory (the buffer an injector wrote and the loader mapped from, or
+a payload staged and not yet run), parsed field by field against the values
+Havoc's builder can write: HTTP(S) hosts and ports, URIs, user agent, headers
+and proxy (its credentials are never reported), or the SMB pipe; sleep, jitter,
+sleep obfuscation and spawn-to. A sleep mask that encrypts the beacon's memory
+between check-ins, or a custom loader that keeps neither form, hides a
+configuration from this; the stack checks above still see the thread. CI runs
+the test binary as a target holding both Cobalt Strike shapes (and, on
+Windows, a Havoc payload in executable memory) and requires every C2 host back
+out of the scan.
 
 **Rules.** Pass `-yara` a `.yar`/`.yara` file or a directory (searched
 recursively). Each file gets its own namespace, so rule names from different
@@ -807,6 +1157,23 @@ format is plain tab-separated text — `CIDR  ASN  CC  CATEGORIES  ORG` — so i
 diffs cleanly and can be hand-edited. Point `-intel-db` at a file to use one
 without rebuilding.
 
+### The vulnerable-driver dataset
+
+The `drivers` collector's list (`internal/vulndrivers/data/loldrivers.tsv`) is
+generated by `cmd/drivergen` from LOLDrivers' published API file and embedded
+in the binary. It keeps each driver's id, category, ATT&CK technique, CVEs and
+file names, and each sample's file and Authenticode SHA-256 and SHA-1, sorted
+so a refresh diffs cleanly. Refresh it before a release:
+
+```sh
+curl -LO https://www.loldrivers.io/api/drivers.json
+make driver-data       # drivergen -in drivers.json -out internal/vulndrivers/data/loldrivers.tsv
+```
+
+LOLDrivers is licensed under the Apache License 2.0; its license is shipped
+beside the data and in every release archive (see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+
 ---
 
 ## Demo
@@ -847,12 +1214,16 @@ set that compiles and runs is exactly the set `-list` shows on that host.
 | `udp` | ✅ | ✅ | `/proc/net/udp{,6}` |
 | `modules` | ✅ | ✅ | `/proc/<pid>/maps` (executable, file-backed mappings) |
 | `localaccounts` | ✅ | ✅ | `/etc/passwd`, `/etc/group`, `/etc/shadow`, and each user's `authorized_keys` (via sshd's `AuthorizedKeysFile`) |
-| `autoruns` (persistence) | ✅ | ✅ | ld.so.preload, cron, systemd, rc.local, XDG autostart, shell profiles |
+| `autoruns` (persistence) | ✅ | ✅ | ld.so.preload, cron, systemd, rc.local, XDG autostart, shell profiles, `/etc/pam.d` and PAM modules (with dpkg's md5sums), `/etc/sudoers{,.d}`, `/etc/udev/rules.d` |
+| `aiagents` | ✅ | ✅ | AI clients' MCP and settings files under each home (`/etc/passwd` homes), and a bounded sweep of the homes for agent instruction files |
+| `rootkit` | — | ✅ | `/proc` listing vs. `/proc/<pid>` probes; `sock_diag` netlink vs. `/proc/net/{tcp,udp}{,6}` |
 | AI module A (LLM callouts) | ✅ | ✅ | runs on the Linux `network` collector (OS-agnostic) |
 | `memory` (opt-in) | ✅ | ✅ | the Rust sidecar reads `/proc/<pid>/{maps,mem,map_files}` |
 | `kmod`, `ebpf`, `journald` | — | ✅ | `/proc/modules`, `/sys/module`, `modules-load.d`, `modprobe.d`; `bpf(2)` and `/proc/kallsyms`; the journal files under `/var/log/journal` and `/run/log/journal` |
 | `eventlog`, `sigma`, `-timeline`, `-iocs`, `-intel` | ✅ | ✅ | portable — on Linux the event log is Windows `.evtx` triaged offline with `-evtx` (there is no live Windows log to read) |
 | `amcache`, `authenticode`, `comhijack`, `prefetch`, `shimcache`, `wmi`, `dnscache`, `services`, `scheduledtasks` | ✅ | — | Windows-specific concepts; on Linux, service and scheduled-task persistence is covered by `autoruns` (systemd and cron) |
+| `drivers` (BYOVD) | ✅ | — | Windows drivers; Linux kernel modules are `kmod`'s. Sysmon driver-load events are matched in offline `-evtx` triage on any OS |
+| `lateral`, `defenses`, `kerberos` | ✅ | — | Windows named pipes, Impacket's output files, port proxies, Defender, AMSI and credential settings, Kerberos ticket caches. The matching event-log rules (Sysmon pipe, network, DNS and thread events, Defender and Code Integrity events, pass-the-hash logons, a domain controller's and a CA's events) run in offline `-evtx` triage on any OS |
 
 On Linux the heuristics are Linux-shaped: path risk grades `/tmp`, `/dev/shm`,
 `memfd`, deleted images and home hidden dirs, and the command-line analytics
@@ -895,9 +1266,10 @@ leaves behind, so you can account for it in your notes:
   the report says so), or select `dnscache`, which snapshots the cache before
   any lookup (`meta.taken_before_module_a_lookups`).
 - **File reads.** Hashing opens the binaries the report names (process
-  images, third-party and flagged service/autostart binaries; on Linux, process
+  images, third-party and flagged service/autostart binaries, every driver file
+  (read twice: its SHA-256 and its Authenticode digest); on Linux, process
   images through `/proc/<pid>/exe` and flagged persistence programs) — each file
-  at most once, up to 128 MiB. Use `-no-hash` to skip it.
+  at most once per hash, up to 128 MiB. Use `-no-hash` to skip it.
 - **Signature checks.** Verifying a process image opens it (to hash it for a
   catalog lookup) and queries the system catalog database. Verification is
   offline — no revocation traffic, so no network footprint — and each distinct
@@ -908,7 +1280,31 @@ leaves behind, so you can account for it in your notes:
 - **Memory scanning** opens other processes with `PROCESS_VM_READ` and reads
   their memory. That's exactly what EDR products watch for, so expect alerts
   (and blocks, for protected processes) and tell the SOC before a sweep. Its
-  image-integrity check also reads each loaded module's file from disk.
+  image-integrity check also reads each loaded module's file from disk. On
+  Windows it opens each of their threads with `THREAD_GET_CONTEXT` to read its
+  registers (a brief interruption of the thread, which isn't suspended) and
+  reads its start address on the same handle, or on one opened with
+  `THREAD_QUERY_INFORMATION` where Windows asks for that,
+  and the sidecar registers a no-op vectored handler of each kind in **its own**
+  process for a moment to find ntdll's handler lists; nothing is written to the
+  processes it scans.
+- **`lateral` and `defenses`** list the named pipes with `FindFirstFile`, which
+  opens none of them, read the start of any output file Impacket left behind,
+  and read Defender's, AMSI's, LSA's, the port proxies' and the environments'
+  registry keys (Defender's `Exclusions` key needs administrator rights; when it
+  can't be read, the record says so).
+- **Process environments (Windows).** `processes` opens each process a second
+  time, with `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`, to read its
+  environment block for the .NET runtime's variables (and keeps only those).
+  LSASS is left alone. An EDR may log the `VM_READ` opens.
+- **`kerberos`** asks LSA for ticket-cache metadata only. Run as SYSTEM it
+  registers as a logon process (`LsaRegisterLogonProcess`) to read every
+  session, which Windows records as event 4611 when that auditing is on.
+- **`aiagents`** reads the AI clients' configuration files and sweeps home
+  directories (bounded: 400,000 entries, depth 6, package caches skipped) for
+  agent instruction files, opening each one it finds to read it.
+- **`rootkit` (Linux)** stats `/proc/<pid>` for every PID up to the bound it
+  reports and dumps the socket table twice over netlink; nothing is written.
 - **Linux kernel state.** `ebpf` takes a file descriptor on each loaded eBPF
   program (and on each pinned object) just long enough to read its information;
   `kmod` and `journald` only read files — the journal is read directly, without
@@ -925,8 +1321,8 @@ leaves behind, so you can account for it in your notes:
   case notes.
 
 Everything else is read-only: registry keys are opened with `KEY_READ`,
-processes with query-only rights (outside the opt-in memory scan), and the
-DNS cache with cache-only lookups.
+processes with query-only rights (outside the opt-in memory scan and the
+environment read above), and the DNS cache with cache-only lookups.
 
 ---
 
@@ -1052,6 +1448,7 @@ Run from an elevated prompt. Keep `lrng-sidecar.exe` in the same folder as
 .\lrng.exe -timeline -iocs -format html -out E:\case42\HOST01.html   # the report in the viewer, one file
 .\lrng.exe -collectors network -allow myaiapp.exe,tools.exe
 .\lrng.exe -collectors services,autoruns,scheduledtasks    # just persistence
+.\lrng.exe -collectors drivers,eventlog -out E:\case42\HOST01-byovd.json   # vulnerable drivers: loaded, installed, and Sysmon's load history
 .\lrng.exe -collectors eventlog -out E:\case42\HOST01-logs.json   # just the event-log triage
 .\lrng.exe -evtx E:\case42\winevt\Logs -out E:\case42\HOST01-logs.json   # offline: a saved log dir (any OS)
 lrng -evtx Security.evtx -fail-on critical       # offline triage of one exported log
@@ -1181,4 +1578,6 @@ What's still to come. Everything already shipped is in
 
 Successor to an earlier PowerShell live-response suite — same triage
 philosophy, rebuilt as a portable compiled agent with structured output and the
-AI-aware modules. MIT licensed; see [`LICENSE`](LICENSE).
+AI-aware modules. MIT licensed; see [`LICENSE`](LICENSE). The bundled
+vulnerable-driver dataset comes from [LOLDrivers](https://www.loldrivers.io)
+under the Apache License 2.0; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

@@ -101,6 +101,13 @@ func collectConnections(ctx context.Context, opts RunOptions) (Result, error) {
 		return p
 	}
 
+	listenerName := map[uint16]string{} // port -> the process listening on it
+	for _, c := range conns {
+		if c.State == tcpStateListen && names[c.PID] != "" {
+			listenerName[c.Local.Port()] = names[c.PID]
+		}
+	}
+
 	correlated := 0
 	for _, c := range conns {
 		if err := ctx.Err(); err != nil {
@@ -161,6 +168,9 @@ func collectConnections(ctx context.Context, opts RunOptions) (Result, error) {
 				}
 			}
 			cv.Self = opts.isSelf(c.PID, cv.ImagePath)
+			if remote.IsLoopback() {
+				cv.PeerListener = listenerName[c.Remote.Port()]
+			}
 			findings = analyzeConnection(cv)
 		}
 		res.Add(fields, findings...)

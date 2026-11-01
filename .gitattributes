@@ -1,2 +1,5 @@
 # The viewer is embedded byte for byte (go:embed): the same page on every platform.
 viewer/lrng-viewer.html text eol=lf
+# The bundled vulnerable-driver dataset: generated (cmd/drivergen), embedded
+# byte for byte, collapsed in diffs.
+internal/vulndrivers/data/loldrivers.tsv text eol=lf linguist-generated

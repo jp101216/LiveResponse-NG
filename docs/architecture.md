@@ -5,6 +5,7 @@
 ```
 cmd/lrng/              CLI entry point (flags, validation, exit codes)
 cmd/intelgen/          Offline dataset generator for internal/intel (dev tool)
+cmd/drivergen/         LOLDrivers -> internal/vulndrivers dataset generator (dev tool)
 internal/
   collector/           Collector interface, registry, parallel dispatcher,
                        the Windows and Linux collectors and the portable
@@ -16,6 +17,11 @@ internal/
   aidetect/            AI module A — LLM-callout detection (OS-agnostic)
   intel/               Offline endpoint-intelligence engine (IP -> ASN /
                        country / category), with its go:embed'd dataset
+  vulndrivers/         Known vulnerable and malicious Windows drivers
+                       (LOLDrivers, go:embed'd), looked up by file and
+                       Authenticode hash
+  pehash/              Authenticode digest of a PE file (streamed,
+                       bounds-checked)
   winreg/              Read-only registry reader (advapi32), value decoding,
                        and an offline hive-file (regf) parser (hive.go) for
                        hives the live API doesn't expose, such as Amcache.hve
@@ -35,9 +41,26 @@ sidecar-rs/            Rust sidecar
                        memory heuristics, budgets
     integrity.rs       image integrity: diffing mapped code against its file,
                        change sites, verdicts and their findings
+    hooks.rs           exception hooks: hardware breakpoints and vectored
+                       handlers, and their findings (portable judging)
+    syscalls.rs        system calls made around ntdll: ntdll's stub table,
+                       the stub scanner and the judging (portable)
+    threads.rs         thread start addresses and stack frames: the judging
+                       (portable)
+    unwind.rs          x64 unwinding from a module's .pdata/.xdata, as
+                       RtlVirtualUnwind does it, and the follows-a-call
+                       check (portable)
     pe.rs              bounds-checked PE reader (sections, relocations,
                        exports) and the per-module comparison
     windows.rs         VirtualQueryEx / ReadProcessMemory (read-only)
+    windows_hooks.rs   debug registers (GetThreadContext) and ntdll's
+                       vectored handler lists, decoded with the
+                       pointer cookie ntdll keeps
+    windows_syscalls.rs threads in system calls, stubs in memory no image
+                       backs, second mappings of ntdll
+    windows_threads.rs start addresses, stack walks of waiting threads,
+                       modules' unwind data (cached per file), and the JIT
+                       ranges from ntdll's dynamic function table list
     linux.rs           /proc/<pid>/maps + /proc/<pid>/mem
     yara.rs            rule loading (file/dir, namespaces) and block scanning
 .github/workflows/     CI: Linux checks, real-Windows sweep, integration
@@ -256,12 +279,169 @@ cap and says so (`stopped`); Linux streams each mapping in chunks rather than
 holding it whole. With no YARA rules and no prompt scan, the region walk after
 it reads only each region's first chunk, which is all the heuristics need.
 
+On Windows the sidecar then reads the process's **exception hooks**
+(`windows_hooks.rs`, judged in `hooks.rs`): each thread's debug registers,
+with `THREAD_GET_CONTEXT` and without suspending it, and ntdll's two vectored
+handler lists. The lists' heads are in ntdll's data, at the same address in
+every process of one architecture, so they are found once, in the sidecar:
+it registers a no-op handler of each kind, reads its own entry to see where
+the encoded handler sits and follows the entry to the head inside ntdll, and
+removes the handler. A target's list is walked with each entry's back link
+checked and the walk repeated until two passes agree; each handler is decoded
+with the target's pointer cookie and placed with `VirtualQueryEx`. Windows
+gives out another process's cookie (`DecodeRemotePointer`) only to a handle
+with more than read access, so the cookie is read from ntdll's own copy instead: its address is
+found once by looking for the sidecar's cookie in the sidecar's ntdll, after
+checking that decoding with it undoes `EncodePointer`. A decoded address
+that isn't executable is counted as invalid, never judged. A 32-bit process
+under the 64-bit sidecar has its handlers in its own ntdll, so only its debug
+registers are read.
+
+The same `GetThreadContext` call returns, on x64, each thread's instruction
+and stack pointers, from which `windows_syscalls.rs` judges **system calls**
+(`syscalls.rs`): a thread whose two bytes before its instruction pointer are
+`syscall` (or `int 2Eh`) is in, or just back from, a system call. Where that
+instruction lies (ntdll at its usual base, win32u in System32, another image,
+a second ntdll, or memory no image backs) and where the address at the stack
+pointer leads are looked up with `VirtualQueryEx`. A call out of the ordinary
+is reported only if the thread's registers, and the address at its stack
+pointer, read the same a second time: a thread blocked in the kernel stays
+put, while one back from a short call has run on and may have reused the slot
+(it is counted in `threads_moved`). The sidecar's own thread, when it reads
+its own process, is skipped: its context is its own `GetThreadContext` call. A
+`syscall` in memory no image backs is compared with ntdll's own stubs, read
+once from its file on disk, so a byte-for-byte copy (Chromium's sandbox
+thunks) is told from a stub of the attacker's own. Executable memory no image
+backs is then read (up to 256 MiB, within half the per-process budget) and
+searched for stubs: `mov r10, rcx`, the service number (an immediate, a load,
+or nothing), ntdll's SharedUserData check when copied, then `syscall`, a
+register jump, or a jump whose target can be worked out; a jump to a `syscall`
+instruction is an indirect stub, one anywhere else is a hook trampoline.
+Images whose export directory names them ntdll.dll at another address, and
+executable views of ntdll's file, are second copies.
+
+`windows_threads.rs` then judges **threads** (`threads.rs`). Each thread's
+start address (`NtQueryInformationThread`, read in `windows_hooks.rs` on the
+handle already open) is placed with `VirtualQueryEx`. One in memory no image
+backs, at LoadLibrary, or inside a module function past its start (by the
+module's `.pdata`) is reported. Each thread blocked in a system call in ntdll
+or win32u is unwound frame by frame by `unwind.rs`: the stub is a leaf
+(unless ntdll gives it unwind data), and every caller's frame is undone with
+its function's UNWIND_INFO codes:
+- pushes, allocations and the frame register;
+- registers saved relative to the frame base;
+- chained entries, and indirect entries;
+- version-2 epilog codes, which are skipped.
+
+A return address is never mid-epilog, so no epilog needs simulating. Each
+module's table and exports come from its file, once per run, kept compactly
+(the function entries and the unwind information they point to, not the
+file).
+
+A walk stops at the first frame it can't go past:
+- the end of the stack (a zero return address);
+- a module with no x64 unwind data;
+- a machine frame (an exception, APC or callback dispatcher);
+- memory no image backs. Frame 1 there is the system-call checks' finding;
+  deeper, it is `memory.stack_unbacked` unless the address is in a code range
+  the process registered with ntdll.
+
+Those ranges come from the dynamic function table list (`RtlGetFunctionTableListHead`
+gives its head in ntdll's data, at the same address in every process; each
+`DYNAMIC_FUNCTION_TABLE` holds `MinimumAddress`/`MaximumAddress` at 0x20 and
+0x28), read with each entry's back link checked and the whole list read again
+if it changed. A finding is kept only if the thread's registers and the stack
+slot it came from read the same a second time. The self-test compares the
+walker with `RtlVirtualUnwind` on a real waiting thread in the test process.
+
+### Drivers
+
+`drivers` (Windows) reads the kernel's module list
+(`NtQuerySystemInformation(SystemModuleInformation)`, parsed portably in
+`drivers.go` for either pointer size) and the driver-type services, turns each
+kernel path (`\SystemRoot\…`, `\??\C:\…`, `System32\…`, `\Device\…`) into a
+Win32 path, and merges them into one record per file, loaded first in load
+order. Each file is hashed through the run's shared `FileHasher` and
+fingerprinted with `internal/pehash`; the file SHA-256, then the Authenticode
+SHA-256 and SHA-1, are looked up in `internal/vulndrivers`. Judging
+(`judgeDriver`, `codeIntegrity.findings`) and the record shape are portable and
+tested on any OS with real files and a planted dataset (`driverDataset` is a
+variable for that); the Windows tests plant entries for drivers the runner has
+loaded and check the digests against Windows' own. The same dataset serves the
+event-log collector's Sysmon event 6 check.
+
+### Lateral movement and host defenses
+
+`lateral` (Windows) lists `\\.\pipe\*` with `FindFirstFile`, which opens no
+pipe, and looks in the Windows folder (ADMIN$) and the system drive's root (C$)
+for the output files Impacket's exec tools name `__<time>` and
+`__output_<letters>`. The pipe names are regular expressions in `lateral.go`,
+anchored and suffixed so a bare system pipe never matches. `pipeEventFindings`
+applies them to Sysmon events 17 and 18. `defenses` (Windows) reads Defender's
+preference and policy keys (its exclusion lists are the value names of
+`Exclusions\{Paths,Extensions,Processes,IpAddresses}`) and the LSA and WDigest
+values. The judging (`judgeExclusion`, `defenderReport`, `credentialReport`)
+is portable and unit-tested. Defender's own events (5001, 5007, 5010, 5012,
+5013) and Code Integrity's (`codeintegrity.go`: 3004, 3023, 3033, 3077
+refused, 3034 and 3076 audited) are judged in the event-log collector. Code
+Integrity events carry the file's flat and Authenticode hashes, which are
+looked up in `internal/vulndrivers` like a driver file's.
+
+`lateral` also reads the port proxies (`Services\PortProxy\v4tov4\tcp` and
+the other three address-family pairs: value name listen, data connect;
+`portProxyFinding`). `defenses` also reads AMSI's providers and the DLL each
+CLSID registers (`judgeAMSIProvider`), `DsrmAdminLogonBehavior`, and the .NET
+runtime's variables in the system, user and service environments
+(`runtimeEnvFindings`, shared with the process collector, which reads each
+process's environment block out of its PEB in `procenv_windows.go` and keeps
+only those variables). `autoruns` compares the accessibility programs with the
+shells byte for byte and reads their language-neutral version resource
+(`GetFileVersionInfoExW`, `FILE_VER_GET_NEUTRAL`; Windows' own aliases are in
+`accessibilityAliases`, read off the CI runner).
+
+### Kerberos tickets, AI agents and Linux rootkits
+
+`kerberos` (Windows) connects to LSA — `LsaRegisterLogonProcess` when the agent
+runs as SYSTEM, `LsaConnectUntrusted` otherwise — lists the logon sessions
+(`LsaEnumerateLogonSessions`, `LsaGetLogonSessionData`) and asks the Kerberos
+package for each session's ticket cache (`KerbQueryTicketCacheExMessage`):
+metadata only, never a ticket or key. An untrusted connection is answered only
+about the caller's own session, asked for as LUID 0 (the agent's token's
+authentication ID names it). A session Kerberos holds nothing for
+(`STATUS_NO_SUCH_LOGON_SESSION`: a local account, a service's session) is
+counted in `meta.sessions_without_kerberos`, not as unreadable.
+`judgeTicket` is portable: lifetime against the 10-hour default, RC4 against
+the AES tickets on the same host, the client against the session's account
+(except in NewCredentials sessions, and virtual and service accounts holding
+the computer's tickets).
+
+`aiagents` (Windows and Linux) reads each client's configuration from a list of
+paths per OS (`aiClientConfigs`, `aiSystemConfigs`), parses JSON (VS Code's and
+Zed's with comments and trailing commas: `stripJSONC`) and Codex's TOML subset,
+redacts credentials (`redactArgs`, `redactURL`, `redactSecrets`) and judges each
+server and hook. The sweep for instruction files is a bounded `WalkDir` of each
+home (`aiWalkDepth`, `aiWalkMaxEntries`, `aiSkipDirs`); `findHiddenText` scans
+each file rune by rune (tag characters, variation-selector runs decoded as
+bytes, bidirectional controls, zero-width characters outside emoji and the
+scripts that use joiners). The network collectors pass `PeerListener` — the
+process listening on a loopback connection's remote port — so a local LLM
+server's clients are judged against the server that is really there.
+
+`rootkit` (Linux) compares `/proc`'s listing with direct `stat`s of
+`/proc/<pid>` up to `probeBound` (the larger of the highest listed PID and
+`/proc/loadavg`'s last PID, capped by `pid_max`), and the socket table from
+`NETLINK_SOCK_DIAG` (`SOCK_DIAG_BY_FAMILY` dumps of TCP and UDP, both families,
+taken twice) with `/proc/net`, keyed by inode. The Linux `autoruns` collector
+adds PAM (`parsePAMFile`, `judgePAMEntry`; module files hashed against
+`/var/lib/dpkg/info/*.md5sums`), sudoers (`parseSudoers`, `judgeSudoRule`) and
+udev (`udevRunCommands`, `judgeUdevCommand`).
+
 ### Event logs
 
 The `eventlog` collector reads the targeted channels from
 `%SystemRoot%\System32\winevt\Logs`: Security, System, Application, both
 PowerShell logs, TaskScheduler, WMI-Activity, Defender, the two
-TerminalServices logs and Sysmon. A channel the host doesn't have is counted
+TerminalServices logs, Sysmon and Code Integrity. A channel the host doesn't have is counted
 in `meta.logs_missing`, not reported as an error; one the EventLog service
 won't let lrng open is reported and skipped (take it from a shadow copy or
 image and parse it offline). The tag-free reader in `evtx.go` reads the file one
@@ -293,6 +473,18 @@ channel's record-id and time span (`channel_ranges`, which correlation
 measures a log clear against), and what the Sigma engine could and couldn't
 run (`sigma`: counts, each skipped rule with its reason, and each file that
 failed to parse).
+
+Two built-in aggregations run beside Sigma's and flush the same way, as
+synthetic records (`source_log` `builtin:aggregation`): Kerberoasting
+(`kerberoastTracker`: per account and client address, the busiest 15-minute
+window of RC4 service tickets to user-account services, by distinct service)
+and DNS tunnels (`dnsTunnelTracker`: Sysmon 22 queries grouped per program and
+registered domain, counting distinct data-like names; the DNS cache collector
+runs the same grouping over the cached names). The Active Directory rules are
+in `adattacks.go`: 4662's replication rights and object types, 5136's
+attributes (the new security descriptor of the domain object is parsed as SDDL
+and its replication grants compared with the default trustees), 4768, 4738 and
+4742, 4765/4766, 4794, the CA's 4887-4889 and 4898/4899, and the KDC's event 41.
 
 **Offline mode.** `-evtx <file|dir>` skips the live collectors and feeds the
 named files through the same reader and classifier (`ParseEventLogFiles`) on
@@ -483,6 +675,13 @@ why), or, with `ok: false`, `skipped`, `access_denied`, `not_found` or
 `error`. YARA hits never contain matched bytes. A process that couldn't be
 scanned is never reported as clean.
 
+A hit may also carry `extracted`: structured values the scan decoded. The
+beacon-configuration checks (`memscan/beacon.rs` for Cobalt Strike,
+`memscan/demon.rs` for Havoc) put a configuration there (`family`, `c2_hosts`,
+`c2_uris`, `port`, `sleep_ms`, `watermark`, `user_agent`, `spawnto_x64`…); the
+memory collector copies each into its record's `extracted` list, and the IOC
+export reads `c2_hosts` as hostnames (and any address in it as an IP).
+
 A `Hit` maps directly onto a collector `Finding` on the Go side. The transport
 is intentionally dumb: one process per call, crash-isolated, with stdout/stderr
 capped on the Go side. Swapping it for a long-lived streaming client, or a
@@ -511,7 +710,7 @@ static FFI library, is a later change that leaves these types untouched.
   "run": {
     "started_at": "2026-10-14T18:00:00Z", "finished_at": "2026-10-14T18:00:09Z",
     "pid": 5120, "elevated": true, "args": ["-out", "E:\\case42\\WS01.json"],
-    "collectors": ["amcache", "autoruns", "comhijack", "eventlog", "localaccounts", "modules",
+    "collectors": ["amcache", "autoruns", "comhijack", "drivers", "eventlog", "localaccounts", "modules",
                    "network", "prefetch", "processes", "scheduledtasks", "services", "sessions",
                    "shimcache", "udp", "wmi"],
     "workers": 6, "timeout": "1m0s", "dns_lookups": true, "dns_correlation": false,

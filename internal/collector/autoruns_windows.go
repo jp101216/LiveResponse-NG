@@ -83,6 +83,7 @@ func collectAutoruns(ctx context.Context, opts RunOptions) (Result, error) {
 	a.cmdAutoRun(winreg.LocalMachine, `SOFTWARE\Wow6432Node\Microsoft\Command Processor`, `HKLM\`, "", "")
 	a.printMonitors()
 	a.netshHelpers()
+	a.accessibility()
 
 	for _, sid := range hives {
 		if a.done() {

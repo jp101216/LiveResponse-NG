@@ -89,6 +89,7 @@ type credentialState struct {
 	LsaCfgFlags     *uint32 // Lsa\LsaCfgFlags (Credential Guard)
 	RestrictedAdmin *uint32 // Lsa\DisableRestrictedAdmin
 	LmCompat        *uint32 // Lsa\LmCompatibilityLevel
+	DsrmLogon       *uint32 // Lsa\DsrmAdminLogonBehavior (domain controllers)
 }
 
 // scriptAndBinaryExt are the extensions whose exclusion lets a payload run
@@ -223,6 +224,7 @@ func credentialReport(c credentialState) (map[string]any, []Finding) {
 	put("lsa_cfg_flags", c.LsaCfgFlags)
 	put("disable_restricted_admin", c.RestrictedAdmin)
 	put("lm_compatibility_level", c.LmCompat)
+	put("dsrm_admin_logon_behavior", c.DsrmLogon)
 	var out []Finding
 	if c.WDigest != nil && *c.WDigest == 1 {
 		out = append(out, Finding{Rule: "cred.wdigest_enabled", Severity: SevSuspect, Technique: "T1112", Confidence: 75,
@@ -243,6 +245,12 @@ func credentialReport(c credentialState) (map[string]any, []Finding) {
 		out = append(out, Finding{Rule: "cred.ntlmv1_allowed", Severity: SevNotable, Technique: "T1557.001", Confidence: 40,
 			Detail: fmt.Sprintf("this host sends NTLMv1 (Lsa\\LmCompatibilityLevel = %d; Windows' default is 3): an NTLMv1 response "+
 				"captured by a poisoner such as Responder cracks to the account's NT hash", *c.LmCompat)})
+	}
+	if c.DsrmLogon != nil && *c.DsrmLogon == 2 {
+		out = append(out, Finding{Rule: "cred.dsrm_network_logon", Severity: SevSuspect, Technique: "T1098", Confidence: 70,
+			Detail: "the Directory Services Restore Mode administrator may log on over the network (Lsa\\DsrmAdminLogonBehavior = 2). " +
+				"DSRM is a domain controller's local administrator, whose password rarely changes; letting it log on while the " +
+				"directory runs turns that password, or its hash, into permanent administrator access to the DC"})
 	}
 	return f, out
 }

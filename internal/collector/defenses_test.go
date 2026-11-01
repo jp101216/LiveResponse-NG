@@ -45,7 +45,7 @@ func TestDefensesReport(t *testing.T) {
 			{Path: `SOFTWARE\Policies\Microsoft\Windows Defender\Spynet`, Name: "SpynetReporting", Value: 0, Policy: true},
 		},
 		Tamper: &four,
-	}, credentialState{WDigest: &on, RunAsPPL: &off, RestrictedAdmin: &off, LmCompat: ptrU32(1)})
+	}, credentialState{WDigest: &on, RunAsPPL: &off, RestrictedAdmin: &off, LmCompat: ptrU32(1), DsrmLogon: ptrU32(2)})
 	got := res.Finish()
 	if len(got.Records) != 2 {
 		t.Fatalf("want a Defender and a credentials record: %+v", got.Records)
@@ -68,7 +68,7 @@ func TestDefensesReport(t *testing.T) {
 	for _, f := range cred.Findings {
 		names = append(names, f.Rule)
 	}
-	if strings.Join(names, ",") != "cred.wdigest_enabled,cred.lsa_protection_off,cred.restricted_admin_enabled,cred.ntlmv1_allowed" {
+	if strings.Join(names, ",") != "cred.wdigest_enabled,cred.lsa_protection_off,cred.restricted_admin_enabled,cred.ntlmv1_allowed,cred.dsrm_network_logon" {
 		t.Errorf("credential findings: %v", names)
 	}
 	if cred.Fields["wdigest_use_logon_credential"] != on || cred.Fields["lsa_cfg_flags"] != nil {
@@ -77,7 +77,7 @@ func TestDefensesReport(t *testing.T) {
 
 	// Windows' defaults read as nothing to report.
 	res = NewResult("defenses")
-	defensesReport(res, defenderState{Tamper: ptrU32(5)}, credentialState{WDigest: &off, LmCompat: ptrU32(3)})
+	defensesReport(res, defenderState{Tamper: ptrU32(5)}, credentialState{WDigest: &off, LmCompat: ptrU32(3), DsrmLogon: ptrU32(0)})
 	for _, r := range res.Finish().Records {
 		if len(r.Findings) != 0 {
 			t.Errorf("defaults: %+v", r.Findings)

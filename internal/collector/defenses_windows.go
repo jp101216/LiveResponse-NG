@@ -106,5 +106,6 @@ func readCredentials() credentialState {
 		LsaCfgFlags:     u(lsaControlKey, "LsaCfgFlags"),
 		RestrictedAdmin: u(lsaControlKey, "DisableRestrictedAdmin"),
 		LmCompat:        u(lsaControlKey, "LmCompatibilityLevel"),
+		DsrmLogon:       u(lsaControlKey, "DsrmAdminLogonBehavior"),
 	}
 }

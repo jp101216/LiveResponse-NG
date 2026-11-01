@@ -92,6 +92,7 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 	keptPlain, keptFlagged, dropped := 0, 0, 0
 	ranges := map[string]*channelRange{}
 	agg := sigma.newAggregator() // nil unless a Sigma rule has an aggregation or a "near"
+	roast := newKerberoastTracker()
 	cancelled := false
 
 	for _, src := range sources {
@@ -141,6 +142,7 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 			}
 			trackChannelRange(ranges, ev) // every scanned record, for log-clear correlation
 			agg.observe(ev)               // feed Sigma aggregations and "near" rules (no-op if none)
+			roast.observe(ev)             // RC4 service tickets, for Kerberoasting
 			fields, findings, keepIt := classifyWinEvent(ev, sigma)
 			if !keepIt {
 				return true
@@ -198,6 +200,16 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 			continue
 		}
 		r.Fields["source_log"] = "sigma:aggregation"
+		res.Add(r.Fields, r.Findings...)
+		keptFlagged++
+	}
+	// The built-in aggregation: bursts of RC4 service tickets (Kerberoasting).
+	for _, r := range roast.flush() {
+		if keptFlagged >= evtxMaxFlagged {
+			dropped++
+			continue
+		}
+		r.Fields["source_log"] = "builtin:aggregation"
 		res.Add(r.Fields, r.Findings...)
 		keptFlagged++
 	}
@@ -538,6 +550,26 @@ func eventFindings(ev winEvent) []Finding {
 	case 3004, 3023, 3033, 3034, 3076, 3077: // Code Integrity: an image refused (or, auditing, one that would have been)
 		if isCodeIntegrity(ev) {
 			out = append(out, codeIntegrityFindings(ev)...)
+		}
+	case 4662: // a directory service object was accessed (domain controller)
+		out = append(out, directoryAccessFindings(ev)...)
+	case 5136, 5137: // a directory service object was modified / created
+		out = append(out, directoryChangeFindings(ev)...)
+	case 4768: // a Kerberos ticket-granting ticket was requested (Kerberoasting's 4769s are aggregated)
+		out = append(out, tgtRequestFindings(ev)...)
+	case 4738, 4742: // a user / computer account was changed
+		out = append(out, accountChangeFindings(ev)...)
+	case 4765, 4766: // SID history was added to an account / an attempt failed
+		out = append(out, sidHistoryEventFindings(ev)...)
+	case 4794: // the Directory Services Restore Mode password was set
+		out = append(out, dsrmFindings(ev)...)
+	case 4887, 4888, 4889: // Certificate Services issued / denied / left pending a request
+		out = append(out, certRequestFindings(ev)...)
+	case 4898, 4899: // Certificate Services loaded / updated a certificate template
+		out = append(out, certTemplateFindings(ev)...)
+	case 41: // KDC: a certificate's SID didn't match the account it maps to (Kernel-Power writes a 41 too)
+		if isKDC(ev) {
+			out = append(out, kdcCertificateFindings(ev)...)
 		}
 	}
 	return out

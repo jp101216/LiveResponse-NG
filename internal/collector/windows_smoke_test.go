@@ -116,6 +116,19 @@ func TestDefaultCollectorsOnWindows(t *testing.T) {
 		t.Logf("aiagents: homes %v, %v entries, %v MCP servers, %v instruction files", ai.Meta["homes"], ai.Meta["entries_visited"],
 			ai.Meta["mcp_servers"], ai.Meta["instruction_files"])
 	}
+	// Implants: the programs outside Windows and Program Files were searched,
+	// and nothing on the runner is one.
+	if im, ok := byName["implants"]; !ok || im.Meta["programs_checked"] == nil {
+		t.Errorf("implants: didn't run (%v)", im.Errors)
+	} else {
+		t.Logf("implants: %v programs checked, %v searched, %v bytes read, %v temp folders", im.Meta["programs_checked"],
+			im.Meta["programs_searched"], im.Meta["bytes_read"], im.Meta["temp_folders_checked"])
+		for _, rec := range im.Records {
+			for _, f := range rec.Findings {
+				t.Errorf("implants: %s on a clean host: %s", f.Rule, f.Detail)
+			}
+		}
+	}
 	// Kerberos: LSA answered. The runner isn't SYSTEM, so only its own
 	// session is asked about, and that must be answered (with its tickets,
 	// or with Kerberos holding nothing for a local account).
@@ -138,8 +151,29 @@ func TestDefaultCollectorsOnWindows(t *testing.T) {
 	}
 	for _, rec := range byName["processes"].Records {
 		for _, f := range rec.Findings {
-			if f.Rule == "defense.dotnet_etw_disabled" || f.Rule == "persistence.clr_profiler" {
+			switch f.Rule {
+			case "defense.dotnet_etw_disabled", "persistence.clr_profiler":
 				t.Logf("processes: %s on the runner: %s", f.Rule, f.Detail)
+			case "defense.critical_process", "defense.hidden_desktop", "defense.timestomp":
+				t.Errorf("processes: %s on a clean host: %s", f.Rule, f.Detail)
+			}
+		}
+	}
+	// Critical flags were read, and Windows' own critical processes are
+	// among those marked.
+	pm := byName["processes"].Meta
+	t.Logf("processes: critical %v (read %v, unreadable %v); desktops %v; %v image files dated", pm["critical_processes"],
+		pm["critical_flags_read"], pm["critical_flags_unreadable"], pm["desktops"], pm["image_files_dated"])
+	crit, _ := pm["critical_processes"].(map[string]int)
+	if n, _ := pm["critical_flags_read"].(int); n < 10 || crit["csrss.exe"]+crit["smss.exe"]+crit["wininit.exe"]+crit["winlogon.exe"]+crit["services.exe"] == 0 {
+		t.Errorf("processes: critical flags read %v, Windows' own critical processes not among them: %v", pm["critical_flags_read"], crit)
+	}
+	for _, name := range []string{"services", "autoruns"} {
+		for _, rec := range byName[name].Records {
+			for _, rule := range []string{"defense.timestomp", "privesc.uac_bypass_key"} {
+				if f := hasFinding(rec.Findings, rule); f != nil {
+					t.Errorf("%s: %s on a clean host: %s", name, rule, f.Detail)
+				}
 			}
 		}
 	}

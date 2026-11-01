@@ -45,6 +45,11 @@ sidecar-rs/            Rust sidecar
                        handlers, and their findings (portable judging)
     syscalls.rs        system calls made around ntdll: ntdll's stub table,
                        the stub scanner and the judging (portable)
+    threads.rs         thread start addresses and stack frames: the judging
+                       (portable)
+    unwind.rs          x64 unwinding from a module's .pdata/.xdata, as
+                       RtlVirtualUnwind does it, and the follows-a-call
+                       check (portable)
     pe.rs              bounds-checked PE reader (sections, relocations,
                        exports) and the per-module comparison
     windows.rs         VirtualQueryEx / ReadProcessMemory (read-only)
@@ -53,6 +58,9 @@ sidecar-rs/            Rust sidecar
                        pointer cookie ntdll keeps
     windows_syscalls.rs threads in system calls, stubs in memory no image
                        backs, second mappings of ntdll
+    windows_threads.rs start addresses, stack walks of waiting threads,
+                       modules' unwind data (cached per file), and the JIT
+                       ranges from ntdll's dynamic function table list
     linux.rs           /proc/<pid>/maps + /proc/<pid>/mem
     yara.rs            rule loading (file/dir, namespaces) and block scanning
 .github/workflows/     CI: Linux checks, real-Windows sweep, integration
@@ -312,6 +320,40 @@ instruction is an indirect stub, one anywhere else is a hook trampoline.
 Images whose export directory names them ntdll.dll at another address, and
 executable views of ntdll's file, are second copies.
 
+`windows_threads.rs` then judges **threads** (`threads.rs`). Each thread's
+start address (`NtQueryInformationThread`, read in `windows_hooks.rs` on the
+handle already open) is placed with `VirtualQueryEx`. One in memory no image
+backs, at LoadLibrary, or inside a module function past its start (by the
+module's `.pdata`) is reported. Each thread blocked in a system call in ntdll
+or win32u is unwound frame by frame by `unwind.rs`: the stub is a leaf
+(unless ntdll gives it unwind data), and every caller's frame is undone with
+its function's UNWIND_INFO codes:
+- pushes, allocations and the frame register;
+- registers saved relative to the frame base;
+- chained entries, and indirect entries;
+- version-2 epilog codes, which are skipped.
+
+A return address is never mid-epilog, so no epilog needs simulating. Each
+module's table and exports come from its file, once per run, kept compactly
+(the function entries and the unwind information they point to, not the
+file).
+
+A walk stops at the first frame it can't go past:
+- the end of the stack (a zero return address);
+- a module with no x64 unwind data;
+- a machine frame (an exception, APC or callback dispatcher);
+- memory no image backs. Frame 1 there is the system-call checks' finding;
+  deeper, it is `memory.stack_unbacked` unless the address is in a code range
+  the process registered with ntdll.
+
+Those ranges come from the dynamic function table list (`RtlGetFunctionTableListHead`
+gives its head in ntdll's data, at the same address in every process; each
+`DYNAMIC_FUNCTION_TABLE` holds `MinimumAddress`/`MaximumAddress` at 0x20 and
+0x28), read with each entry's back link checked and the whole list read again
+if it changed. A finding is kept only if the thread's registers and the stack
+slot it came from read the same a second time. The self-test compares the
+walker with `RtlVirtualUnwind` on a real waiting thread in the test process.
+
 ### Drivers
 
 `drivers` (Windows) reads the kernel's module list
@@ -328,12 +370,29 @@ variable for that); the Windows tests plant entries for drivers the runner has
 loaded and check the digests against Windows' own. The same dataset serves the
 event-log collector's Sysmon event 6 check.
 
+### Lateral movement and host defenses
+
+`lateral` (Windows) lists `\\.\pipe\*` with `FindFirstFile`, which opens no
+pipe, and looks in the Windows folder (ADMIN$) and the system drive's root (C$)
+for the output files Impacket's exec tools name `__<time>` and
+`__output_<letters>`. The pipe names are regular expressions in `lateral.go`,
+anchored and suffixed so a bare system pipe never matches. `pipeEventFindings`
+applies them to Sysmon events 17 and 18. `defenses` (Windows) reads Defender's
+preference and policy keys (its exclusion lists are the value names of
+`Exclusions\{Paths,Extensions,Processes,IpAddresses}`) and the LSA and WDigest
+values. The judging (`judgeExclusion`, `defenderReport`, `credentialReport`)
+is portable and unit-tested. Defender's own events (5001, 5007, 5010, 5012,
+5013) and Code Integrity's (`codeintegrity.go`: 3004, 3023, 3033, 3077
+refused, 3034 and 3076 audited) are judged in the event-log collector. Code
+Integrity events carry the file's flat and Authenticode hashes, which are
+looked up in `internal/vulndrivers` like a driver file's.
+
 ### Event logs
 
 The `eventlog` collector reads the targeted channels from
 `%SystemRoot%\System32\winevt\Logs`: Security, System, Application, both
 PowerShell logs, TaskScheduler, WMI-Activity, Defender, the two
-TerminalServices logs and Sysmon. A channel the host doesn't have is counted
+TerminalServices logs, Sysmon and Code Integrity. A channel the host doesn't have is counted
 in `meta.logs_missing`, not reported as an error; one the EventLog service
 won't let lrng open is reported and skipped (take it from a shadow copy or
 image and parse it offline). The tag-free reader in `evtx.go` reads the file one

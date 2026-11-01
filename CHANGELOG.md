@@ -2,12 +2,19 @@
 
 ## 0.13.0
 
-Adds detection of bring-your-own-vulnerable-driver (BYOVD), of the
-"patchless" AMSI and ETW bypasses, which use a hardware breakpoint and a
-vectored exception handler instead of changing any code, and of system calls
-made around ntdll's hooks: direct and indirect syscalls, the stubs that make
-them, and fresh copies of ntdll. No new dependencies; the report schema is
-unchanged at 1.2 (new fields and rules only).
+Adds detection of:
+- bring-your-own-vulnerable-driver (BYOVD), including attempts Windows blocked;
+- the "patchless" AMSI and ETW bypasses, which use a hardware breakpoint and a
+  vectored exception handler instead of changing any code;
+- system calls made around ntdll's hooks: direct and indirect syscalls, the
+  stubs that make them, and fresh copies of ntdll;
+- where threads started and what the stacks of waiting threads show: injected
+  threads, sleeping beacons, sleep masks and spoofed frames;
+- what Impacket, NetExec and C2 frameworks leave behind;
+- the settings an intruder weakens (Defender, WDigest, LSA).
+
+No new dependencies; the report schema is unchanged at 1.2 (new fields and
+rules only).
 
 ### Added
 - **`drivers` collector (Windows, on by default).** Every module the kernel
@@ -72,6 +79,86 @@ unchanged at 1.2 (new fields and rules only).
 - **Sysmon process access (event 10)** whose call trace starts in code no
   module backs is `defense.direct_syscall` too: the target was opened with a
   direct syscall. *Critical* when the target is LSASS (NanoDump, Dumpert).
+- **Threads in the memory scan (Windows; stacks on x64).**
+  - Start addresses (Windows records the routine each thread was created to
+    run):
+    - `memory.thread_start_unbacked`: started in memory no image backs.
+      *Critical* while that memory is executable, *suspect* once it isn't.
+    - `memory.thread_start_loadlibrary`: started at LoadLibrary, the classic
+      CreateRemoteThread DLL injection, still running.
+    - `memory.thread_start_spoofed`: started inside a function rather than at
+      its start. Cobalt Strike's process-inject `CreateThread
+      "module!function+0x.."` option does this.
+  - Stacks: each thread blocked in a system call is unwound with its modules'
+    own unwind data, read from their files, the way `RtlVirtualUnwind` does it
+    (the new `unwind.rs`):
+    - `memory.stack_unbacked`: a frame in code no image backs and no runtime
+      registered as JIT code (a beacon sleeping in `Sleep` or
+      `WaitForSingleObject`).
+    - `defense.stack_return_nonexec` (*critical*): a frame in memory that
+      isn't executable now (a sleep mask).
+    - `defense.stack_frame_no_call`: a return address that follows no call
+      instruction (a spoofed frame).
+  - JIT code (.NET, V8, Java) is recognised from the ranges the process
+    registered with ntdll (its dynamic function table list) and counted,
+    not judged.
+  - Each process's record gains `threads`: start addresses read, stacks
+    walked and how each walk ended, JIT ranges and frames.
+- **`lateral` collector (Windows, on by default).** Every named pipe is
+  listed, without opening any, and those known tools use by default are
+  reported:
+  - `network.c2_named_pipe`: Cobalt Strike's defaults (*critical*) and the
+    names published malleable profiles set (*suspect*), Covenant, PoshC2, and
+    known malware families (SUNBURST, Turla, ...).
+  - `lateral.remote_exec_pipe`: PsExec, PAExec and CSExec (*notable*); RemCom,
+    as Impacket's psexec uses it (*suspect*).
+  - `privesc.potato_pipe`: a pipe named after a path to another pipe, which a
+    coerced SYSTEM service opens.
+  - `cred.dump_tool_pipe`: cachedump, lsadump, WCE, Koh.
+
+  `lateral.impacket_output_file` is an output file Impacket's wmiexec,
+  dcomexec or smbexec didn't get to delete; its record keeps the start of the
+  output. Sysmon's pipe events (17, 18) are judged by the same names, with the
+  program that made the pipe.
+- **`defenses` collector (Windows, on by default).** One record per area,
+  with every value read:
+  - Microsoft Defender's exclusions, from its preferences and group policy:
+    `defense.defender_exclusion`, graded. A whole drive, a temporary,
+    download or world-writable folder, an executable extension or a script
+    host is *suspect*.
+  - Defender's protection switched off: `defense.defender_protection_off`
+    (real-time, behaviour or script scanning; cloud or tamper protection at
+    *notable*).
+  - `cred.wdigest_enabled` (WDigest keeping passwords in clear text in LSASS),
+    `cred.lsa_protection_off`, `cred.restricted_admin_enabled` (RDP accepts a
+    hash) and `cred.ntlmv1_allowed`.
+- **Impacket and NetExec command lines.** `lateral.wmiexec`,
+  `lateral.smbexec` and `lateral.atexec` (*critical*) match the shells their
+  wmiexec, dcomexec, mmcexec, smbexec and atexec run, in the shapes their
+  source builds. They apply wherever command lines are judged, now including
+  the actions of tasks registered or updated (Security 4698, 4702). atexec's
+  task survives there after it is deleted.
+- **More of the event log.**
+  - `cred.pass_the_hash`: a 4624 logon of type 9 through the Secondary Logon
+    service (Mimikatz's `sekurlsa::pth`, Rubeus `createnetonly`; `runas
+    /netonly` looks the same).
+  - Defender's own events date its changes: 5001, 5010 and 5012 (protection
+    off), 5007 (an exclusion added or a protection switched off) and 5013
+    (`defense.defender_tamper_blocked`).
+  - Code Integrity's log is now read. A driver it refused is matched against
+    LOLDrivers by the event's hashes: `privesc.vulnerable_driver_blocked` (a
+    failed BYOVD attempt), `persistence.malicious_driver` for a listed
+    malicious one, and `privesc.vulnerable_driver_loaded` when the policy was
+    only auditing. Any other refused driver is `defense.driver_load_blocked`
+    (*notable*); a module LSA protection kept out of LSASS is
+    `cred.lsa_plugin_blocked` (mimilib, an SSP or password-filter backdoor).
+
+### Changed
+- **The system-call checks re-read before reporting.** A call is reported
+  only if the thread's registers and its stack slot read the same a second
+  time (`threads_moved` counts the rest), and the sidecar's own thread is
+  never judged. A call through ntdll that returns into JIT code a runtime
+  registered is counted (`jit_returns`), not reported as an indirect syscall.
 - **`internal/pehash`**, the Authenticode digest (SHA-256 and SHA-1 in one
   streamed pass), and **`cmd/drivergen`**, which builds the dataset from
   LOLDrivers' `drivers.json` (`make driver-data`), sorted so a refresh diffs
@@ -88,6 +175,14 @@ unchanged at 1.2 (new fields and rules only).
   produce a finding. Handlers are decoded with the target's pointer cookie,
   read from ntdll's own copy of it: `DecodeRemotePointer` would need more than
   read access to the process.
+- **Thread start addresses** are read on the same thread handle, or on one
+  opened with `THREAD_QUERY_INFORMATION` where Windows asks for that. Stack
+  walks read the stack and each module's file only; a frame is reported only
+  if the thread is still where it was. The integer registers a walk starts
+  from come from the same `GetThreadContext` call.
+- `lateral` lists pipes with `FindFirstFile`, which opens none of them, and
+  `defenses` only reads registry values. Event data (hashes, names, task XML)
+  is attacker-influenced text: it is matched, never executed or followed.
 - Driver files and `drivers.json` are hostile input: the Authenticode reader
   bounds-checks every offset (fuzzed), and the dataset parser rejects any
   malformed line.
@@ -108,8 +203,21 @@ unchanged at 1.2 (new fields and rules only).
   suspended threads as stopped in a direct call, a call from a copied stub,
   and calls through ntdll returning into injected and into non-executable
   memory, and maps ntdll twice; each must be reported at its address. Nothing
-  planted is executed. The live PowerShell scan gates all ten new memory rules
-  against false positives.
+  planted is executed.
+- A third self-test walks a real waiting thread with both the new unwinder
+  and Windows' `RtlVirtualUnwind`, and requires the same frames. It then:
+  - runs a thread that waits from a page no image backs (it only calls
+    `WaitForSingleObject`), makes the page non-executable while it waits,
+    then registers it as JIT code;
+  - parks threads at LoadLibraryW and inside `RtlUserThreadStart`;
+  - poses one with a return address that follows no call.
+
+  Each must be reported (or, as JIT code, not).
+- The live scans of a 64-bit and a 32-bit PowerShell gate all sixteen new
+  memory rules against false positives. The 64-bit one must also find .NET's
+  registered JIT ranges.
+- The Windows smoke test requires `lateral` to list the host's pipes and
+  `defenses` to return both records.
 
 ### Third-party data
 - LOLDrivers (Apache License 2.0). Its license ships beside the data and in

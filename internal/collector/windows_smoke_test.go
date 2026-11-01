@@ -62,7 +62,7 @@ func TestDefaultCollectorsOnWindows(t *testing.T) {
 		t.Log("running under Wine: skipping assertions about a real Windows host's shape")
 		return
 	}
-	min := map[string]int{"processes": 10, "services": 50, "network": 1, "autoruns": 1, "localaccounts": 1}
+	min := map[string]int{"processes": 10, "services": 50, "network": 1, "autoruns": 1, "localaccounts": 1, "drivers": 50}
 	for name, n := range min {
 		if got := len(byName[name].Records); got < n {
 			t.Errorf("%s: %d records, want at least %d", name, got, n)

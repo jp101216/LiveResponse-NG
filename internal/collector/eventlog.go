@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jp101216/liveresponse-ng/internal/aidetect"
+	"github.com/jp101216/liveresponse-ng/internal/vulndrivers"
 )
 
 // eventLogCollector reads the host's Windows event logs, parses the
@@ -516,6 +517,71 @@ func eventFindings(ev winEvent) []Finding {
 		out = append(out, logonFindings(ev)...)
 	case 4625: // an account failed to log on
 		out = append(out, failedLogonFindings(ev)...)
+	case 6: // Sysmon: a driver was loaded (other providers use 6 for other things)
+		if isSysmon(ev) {
+			out = append(out, driverLoadFindings(ev)...)
+		}
+	}
+	return out
+}
+
+// isSysmon reports whether an event comes from Sysmon, whose event ids
+// (1 to 29) overlap other providers'.
+func isSysmon(ev winEvent) bool {
+	return strings.EqualFold(ev.Provider, "Microsoft-Windows-Sysmon") ||
+		strings.EqualFold(ev.Channel, "Microsoft-Windows-Sysmon/Operational")
+}
+
+// driverLoadFindings judges a Sysmon driver-load event: the loaded file's
+// hashes against the vulnerable-driver list (Sysmon hashes with SHA-1 unless
+// configured otherwise, and either is matched), and its signature. A driver
+// that was loaded and unloaded long before lrng ran is still in this log.
+func driverLoadFindings(ev winEvent) []Finding {
+	img := firstNonEmpty(evData(ev, "ImageLoaded"), "a driver")
+	when := ""
+	if !ev.TimeCreated.IsZero() {
+		when = " at " + ev.TimeCreated.UTC().Format(time.RFC3339)
+	}
+	var out []Finding
+	if set, err := vulndrivers.Default(); err == nil {
+		for _, h := range sysmonHashes(evData(ev, "Hashes")) {
+			if m, ok := set.FileHex(h); ok {
+				out = append(out, knownDriverFinding(m, img, "was loaded"+when+" (Sysmon driver-load event)", false))
+				break
+			}
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(evData(ev, "Signed")), "false") {
+		out = append(out, Finding{
+			Rule: "defense.unsigned_driver_loaded", Severity: SevSuspect, Technique: "T1553.006", Confidence: 60,
+			Detail: fmt.Sprintf("an unsigned driver was loaded%s: %s. Windows refuses unsigned drivers unless test signing "+
+				"is on or code integrity was switched off or bypassed, and a vulnerable driver is the usual way to bypass it", when, img),
+		})
+	}
+	return out
+}
+
+// sysmonHashes returns the SHA-256 and SHA-1 values from a Sysmon Hashes
+// field ("SHA1=...,MD5=...,SHA256=...,IMPHASH=..."), SHA-256 first.
+func sysmonHashes(v string) []string {
+	var sha256, sha1 string
+	for _, part := range strings.Split(v, ",") {
+		k, h, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(k)) {
+		case "SHA256":
+			sha256 = strings.TrimSpace(h)
+		case "SHA1":
+			sha1 = strings.TrimSpace(h)
+		}
+	}
+	var out []string
+	for _, h := range []string{sha256, sha1} {
+		if h != "" {
+			out = append(out, h)
+		}
 	}
 	return out
 }

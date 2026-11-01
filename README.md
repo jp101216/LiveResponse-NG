@@ -1141,6 +1141,7 @@ Run from an elevated prompt. Keep `lrng-sidecar.exe` in the same folder as
 .\lrng.exe -timeline -iocs -format html -out E:\case42\HOST01.html   # the report in the viewer, one file
 .\lrng.exe -collectors network -allow myaiapp.exe,tools.exe
 .\lrng.exe -collectors services,autoruns,scheduledtasks    # just persistence
+.\lrng.exe -collectors drivers,eventlog -out E:\case42\HOST01-byovd.json   # vulnerable drivers: loaded, installed, and Sysmon's load history
 .\lrng.exe -collectors eventlog -out E:\case42\HOST01-logs.json   # just the event-log triage
 .\lrng.exe -evtx E:\case42\winevt\Logs -out E:\case42\HOST01-logs.json   # offline: a saved log dir (any OS)
 lrng -evtx Security.evtx -fail-on critical       # offline triage of one exported log

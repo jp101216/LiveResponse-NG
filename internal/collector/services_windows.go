@@ -5,6 +5,7 @@ package collector
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/jp101216/liveresponse-ng/internal/winreg"
 )
@@ -15,6 +16,7 @@ const servicesKey = `SYSTEM\CurrentControlSet\Services`
 // then judges it (see judgeService).
 func collectServices(ctx context.Context, opts RunOptions) (Result, error) {
 	res := NewResult("services")
+	now := time.Now()
 
 	root, err := winreg.Open(winreg.LocalMachine, servicesKey)
 	if err != nil {
@@ -103,6 +105,17 @@ func collectServices(ctx context.Context, opts RunOptions) (Result, error) {
 
 		findings := judgeService(svc, sysRoot)
 		fields["suspicious_path"] = hasRule(findings, "persistence.service_unusual_path")
+		// The service's files' times: set by hand to look old (timestomping).
+		for _, f := range []struct{ what, path string }{{"service program", svc.Image}, {"service DLL", svc.ServiceDLL}} {
+			if f.path == "" {
+				continue
+			}
+			if c, m, ok := statTimes(f.path); ok {
+				if ts, ok := timestompFinding(f.what, f.path, c, m, now); ok {
+					findings = mergeFindings(findings, ts)
+				}
+			}
+		}
 
 		// Hash third-party binaries, and anything flagged; Windows' own
 		// drivers and services (hundreds of them) are left alone.

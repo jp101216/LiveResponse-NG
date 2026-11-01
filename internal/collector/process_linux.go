@@ -121,12 +121,24 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 		}
 	}
 
-	hashed := 0
+	hashed, dated := 0, 0
+	now := time.Now()
 	for i := range rows {
 		r := rows[i]
 		var findings []Finding
 		if !r.self {
 			findings = linuxProcessFindings(r)
+			// The executable's modification time, through /proc/<pid>/exe
+			// (the file really running): set by hand to look old.
+			if r.exe != "" && !r.kernel {
+				if _, m, ok := statTimes(fmt.Sprintf("/proc/%d/exe", r.pid)); ok {
+					dated++
+					label := fmt.Sprintf("the executable of process %s (pid %d)", r.st.Name, r.pid)
+					if f, ok := timestompFinding(label, r.exe, time.Time{}, m, now); ok {
+						findings = mergeFindings(findings, f)
+					}
+				}
+			}
 		}
 		// Hash the executable through /proc/<pid>/exe, not the path text: that
 		// reaches the file the process really runs — a deleted or memfd payload
@@ -142,6 +154,7 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 	res.SetMeta("platform", "linux")
 	res.SetMeta("processes", len(rows))
 	res.SetMeta("images_hashed", hashed)
+	res.SetMeta("image_files_dated", dated)
 	res.SetMeta("hashing", opts.Hasher != nil)
 	if opts.Hasher != nil && ctx.Err() != nil {
 		res.Fail("time budget ran out while hashing images; later records have no image_sha256")

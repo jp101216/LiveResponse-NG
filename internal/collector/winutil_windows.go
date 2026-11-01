@@ -121,8 +121,8 @@ func win32Error(code uintptr) string {
 func fileTimes(info fs.FileInfo) (created, modified, accessed time.Time) {
 	modified = info.ModTime().UTC()
 	if ad, ok := info.Sys().(*syscall.Win32FileAttributeData); ok {
-		created = time.Unix(0, ad.CreationTime.Nanoseconds()).UTC()
-		accessed = time.Unix(0, ad.LastAccessTime.Nanoseconds()).UTC()
+		created = filetimeToTime(ad.CreationTime)
+		accessed = filetimeToTime(ad.LastAccessTime)
 	}
 	return
 }

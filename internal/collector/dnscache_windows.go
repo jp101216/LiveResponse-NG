@@ -241,6 +241,13 @@ func collectDNSCache(ctx context.Context, opts RunOptions) (Result, error) {
 	polluted := snapshotPolluted(s.Done)
 	res.SetMeta("taken_before_module_a_lookups", !polluted)
 
+	grouper := newDNSTunnelGrouper()
+	for _, n := range s.Names {
+		grouper.add("", n.Name, time.Time{})
+	}
+	for _, t := range grouper.tunnels() {
+		res.Add(t.fields(), t.finding("names still in the DNS client cache"))
+	}
 	for _, n := range s.Names {
 		if err := ctx.Err(); err != nil {
 			res.Fail("cancelled: " + err.Error())

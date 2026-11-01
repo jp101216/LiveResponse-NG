@@ -2,6 +2,7 @@ package collector
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"github.com/jp101216/liveresponse-ng/internal/aidetect"
@@ -88,6 +89,11 @@ func linuxConnFindings(c connView) []Finding {
 	outbound := (c.State == "SYN_SENT" || (c.State == "ESTABLISHED" && !c.Inbound)) && aidetect.PublicAddr(c.Remote)
 	if !outbound {
 		return out
+	}
+	if c.RemotePort == 53 {
+		if f, ok := directDNSFinding(label, firstNonEmpty(c.ImagePath, c.Process), netip.AddrPortFrom(c.Remote, c.RemotePort), ""); ok {
+			out = append(out, f)
+		}
 	}
 	peer := c.Remote.String()
 	switch {

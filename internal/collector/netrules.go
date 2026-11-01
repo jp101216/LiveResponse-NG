@@ -140,6 +140,11 @@ func analyzeConnection(c connView) []Finding {
 		return out
 	}
 	peer := netip.AddrPortFrom(c.Remote, c.RemotePort).String()
+	if c.RemotePort == 53 {
+		if f, ok := directDNSFinding(label, firstNonEmpty(c.ImagePath, c.Process), netip.AddrPortFrom(c.Remote, c.RemotePort), ""); ok {
+			out = append(out, f)
+		}
+	}
 	switch {
 	case proxyBeaconHosts[name]:
 		out = append(out, Finding{

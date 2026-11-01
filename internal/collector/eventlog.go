@@ -93,6 +93,7 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 	ranges := map[string]*channelRange{}
 	agg := sigma.newAggregator() // nil unless a Sigma rule has an aggregation or a "near"
 	roast := newKerberoastTracker()
+	tunnels := newDNSTunnelTracker()
 	cancelled := false
 
 	for _, src := range sources {
@@ -143,6 +144,7 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 			trackChannelRange(ranges, ev) // every scanned record, for log-clear correlation
 			agg.observe(ev)               // feed Sigma aggregations and "near" rules (no-op if none)
 			roast.observe(ev)             // RC4 service tickets, for Kerberoasting
+			tunnels.observe(ev)           // Sysmon DNS queries, for DNS tunnels
 			fields, findings, keepIt := classifyWinEvent(ev, sigma)
 			if !keepIt {
 				return true
@@ -203,8 +205,9 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 		res.Add(r.Fields, r.Findings...)
 		keptFlagged++
 	}
-	// The built-in aggregation: bursts of RC4 service tickets (Kerberoasting).
-	for _, r := range roast.flush() {
+	// The built-in aggregations: bursts of RC4 service tickets
+	// (Kerberoasting), and many data-like names under one domain (DNS tunnels).
+	for _, r := range append(roast.flush(), tunnels.flush()...) {
 		if keptFlagged >= evtxMaxFlagged {
 			dropped++
 			continue
@@ -569,6 +572,10 @@ func eventFindings(ev winEvent) []Finding {
 		out = append(out, certTemplateFindings(ev)...)
 	case 400: // Windows PowerShell: an engine started (version 2 is a downgrade)
 		out = append(out, psEngineFindings(ev)...)
+	case 3: // Sysmon: a network connection (System and others use 3 too)
+		if isSysmon(ev) {
+			out = append(out, sysmonNetworkFindings(ev)...)
+		}
 	case 8: // Sysmon: a thread was created in another process
 		if isSysmon(ev) {
 			out = append(out, remoteThreadFindings(ev)...)

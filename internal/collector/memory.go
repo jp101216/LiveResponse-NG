@@ -307,8 +307,21 @@ func memoryRecords(targets []procInfo, skipped []memSkip, responses map[int]*sid
 			rulesMeta = summarizeRulesMeta(y)
 		}
 		var findings []Finding
+		var extracted []map[string]any
 		for _, h := range r.Hits {
 			findings = append(findings, hitToFinding(h))
+			if len(h.Extracted) > 0 {
+				x := map[string]any{"rule": h.Rule, "address": fmt.Sprintf("0x%x", uint64(h.Offset))}
+				for k, v := range h.Extracted {
+					x[k] = v
+				}
+				extracted = append(extracted, x)
+			}
+		}
+		if len(extracted) > 0 {
+			// Decoded configurations (a beacon's C2 hosts, URIs, watermark…),
+			// where the IOC export finds their hosts.
+			f["extracted"] = extracted
 		}
 		rows = append(rows, row{t.PID, Record{Fields: f, Findings: findings}})
 	}

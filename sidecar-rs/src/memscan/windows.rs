@@ -401,6 +401,24 @@ mod tests {
     use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
     use windows_sys::Win32::System::Memory::VirtualProtect;
 
+    /// A child copy of this test binary holds a packed beacon configuration
+    /// and a running beacon's settings table on its heap (see
+    /// memscan::tests::beacon_plant_target); scanning it finds and decodes
+    /// both through the Windows memory reader.
+    #[test]
+    fn finds_planted_beacon_configurations() {
+        let r = crate::memscan::tests::scan_planted_beacons();
+        let configs: Vec<&str> = r
+            .hits
+            .iter()
+            .filter(|h| h.rule == "memory.cobalt_strike_config")
+            .map(|h| h.context.as_str())
+            .collect();
+        eprintln!("lrng-selftest: beacon configurations: {configs:?}");
+        crate::memscan::tests::assert_planted_beacons(&r);
+        crate::memscan::tests::assert_planted_demon(&r);
+    }
+
     /// End to end on this process, against the real Windows loader: every
     /// module this process has loaded must compare clean (a false-positive
     /// check on the system's own DLLs); then a renamed copy of version.dll is

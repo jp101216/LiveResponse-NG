@@ -149,3 +149,33 @@ func TestDispatcherHonoursTimeoutOverride(t *testing.T) {
 		t.Fatalf("override ignored: %+v", res[0].Errors)
 	}
 }
+
+// TestExtractedConfigReachesRecordAndIOCs follows a decoded beacon
+// configuration from the sidecar's hit into the memory record, and its C2
+// hosts into the IOC export.
+func TestExtractedConfigReachesRecordAndIOCs(t *testing.T) {
+	resp := map[int]*sidecar.Response{
+		50: {OK: true, Meta: map[string]any{"pid": 50.0, "status": "scanned"},
+			Hits: []sidecar.Hit{{Rule: "memory.cobalt_strike_config", Severity: "critical", Technique: "T1071.001", Offset: 0x1f0000,
+				Confidence: 95, Context: "Cobalt Strike beacon configuration (packed settings, XOR 0x2e (version 4)): HTTPS beacon to cdn.example-c2.net",
+				Region: &sidecar.HitRegion{Base: 0x1f0000, Size: 65536, Protect: "RW", Kind: "private"},
+				Extracted: map[string]any{"family": "Cobalt Strike", "c2_hosts": []any{"cdn.example-c2.net", "203.0.113.80"},
+					"c2_uris": []any{"/jquery-3.3.1.min.js"}, "watermark": 305419896.0}}}},
+	}
+	recs, _, _ := memoryRecords([]procInfo{{PID: 50, Name: "rundll32.exe"}}, nil, resp)
+	if len(recs) != 1 {
+		t.Fatalf("records: %+v", recs)
+	}
+	x, _ := recs[0].Fields["extracted"].([]map[string]any)
+	if len(x) != 1 || x[0]["family"] != "Cobalt Strike" || x[0]["address"] != "0x1f0000" || x[0]["rule"] != "memory.cobalt_strike_config" {
+		t.Fatalf("extracted: %+v", recs[0].Fields["extracted"])
+	}
+	iocs := ExtractIOCs([]Result{{Collector: "memory", Records: recs}})
+	got := map[string]bool{}
+	for _, r := range iocs.Records {
+		got[r.Fields["type"].(string)+" "+r.Fields["value"].(string)] = true
+	}
+	if !got["domain cdn.example-c2.net"] || !got["ipv4 203.0.113.80"] {
+		t.Errorf("IOCs: %v", got)
+	}
+}

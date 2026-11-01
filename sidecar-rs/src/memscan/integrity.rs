@@ -324,6 +324,7 @@ fn hit(
         context,
         confidence,
         region: None,
+        extracted: None,
     }
 }
 

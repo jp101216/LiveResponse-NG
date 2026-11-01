@@ -482,6 +482,7 @@ fn hit(rule: &str, severity: &str, confidence: i64, addr: usize, context: String
         context,
         confidence,
         region: None,
+        extracted: None,
     }
 }
 

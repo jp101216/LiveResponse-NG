@@ -289,6 +289,10 @@ func walkIOCStrings(key string, v any, visit func(field, s string)) {
 		for _, e := range x {
 			walkIOCStrings(key, e, visit)
 		}
+	case []map[string]any:
+		for _, e := range x {
+			walkIOCStrings(key, e, visit)
+		}
 	case map[string]string:
 		ks := make([]string, 0, len(x))
 		for k := range x {
@@ -330,7 +334,7 @@ func recordRulesAndSeverity(rec Record) ([]string, Severity, int) {
 // anywhere else (a process, a service) is not.
 func fieldIsDomainBearing(collectorName, field string) bool {
 	switch field {
-	case "remote_hosts", "hostnames", "dns_name":
+	case "remote_hosts", "hostnames", "dns_name", "c2_hosts":
 		return true
 	case "name":
 		return collectorName == "dnscache"

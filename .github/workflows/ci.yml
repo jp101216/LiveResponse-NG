@@ -181,7 +181,7 @@ jobs:
           function Esc($s) { $s -replace '%','%25' -replace "`r",'%0D' -replace "`n",'%0A' }
           # GitHub keeps 10 notices per step: one per self-test, its lines together.
           $rest = @($out | Where-Object { $_ -match 'lrng-selftest:' })
-          foreach ($group in 'lrng-selftest: (threads|stack walk)', 'lrng-selftest: system calls', 'lrng-selftest: (exception hooks|handlers)') {
+          foreach ($group in 'lrng-selftest: (threads|stack walk)', 'lrng-selftest: system calls', 'lrng-selftest: (exception hooks|handlers)', 'lrng-selftest: beacon') {
             $sel = @($rest | Where-Object { $_ -match $group })
             $rest = @($rest | Where-Object { $_ -notmatch $group })
             if ($sel.Count) { Write-Output ("::notice::" + (Esc ($sel -join "`n"))) }
@@ -242,7 +242,8 @@ jobs:
                             'defense.direct_syscall', 'defense.indirect_syscall', 'defense.syscall_return_nonexec', 'defense.syscall_hwbp',
                             'memory.syscall_stub', 'defense.ntdll_second_copy',
                             'memory.thread_start_unbacked', 'memory.thread_start_loadlibrary', 'memory.thread_start_spoofed',
-                            'memory.stack_unbacked', 'defense.stack_return_nonexec', 'defense.stack_frame_no_call') {
+                            'memory.stack_unbacked', 'defense.stack_return_nonexec', 'defense.stack_frame_no_call',
+                            'memory.cobalt_strike_config', 'memory.havoc_config') {
             if ($r.summary.by_rule.$rule) { throw "false positive: $rule on a clean PowerShell process" }
           }
           # The same on a 32-bit PowerShell: under WoW64 its threads' 64-bit side runs
@@ -260,7 +261,8 @@ jobs:
           if ($th32.Count -lt 1 -or $th32[0].starts_read -lt 1 -or $th32[0].stacks_walked -lt 1) { throw "threads weren't checked in a live 32-bit process" }
           foreach ($rule in 'defense.direct_syscall', 'defense.indirect_syscall', 'defense.syscall_return_nonexec', 'memory.syscall_stub',
                             'memory.thread_start_unbacked', 'memory.thread_start_loadlibrary', 'memory.thread_start_spoofed',
-                            'memory.stack_unbacked', 'defense.stack_return_nonexec', 'defense.stack_frame_no_call') {
+                            'memory.stack_unbacked', 'defense.stack_return_nonexec', 'defense.stack_frame_no_call',
+                            'memory.cobalt_strike_config', 'memory.havoc_config') {
             if ($r32.summary.by_rule.$rule) { throw "false positive: $rule on a clean 32-bit PowerShell process" }
           }
 

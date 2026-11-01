@@ -361,6 +361,7 @@ impl RawHit {
             context: format!("{}  (x{})", self.context, self.count),
             confidence: self.weight.min(100),
             region: None,
+            extracted: None,
         }
     }
 }

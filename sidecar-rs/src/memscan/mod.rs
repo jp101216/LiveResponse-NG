@@ -22,6 +22,8 @@
 //! (only rule, pattern identifiers and addresses). Prompt-scan contexts are the
 //! same sanitised, secret-redacted snippets used for files.
 
+mod beacon;
+mod demon;
 pub mod hooks;
 pub mod integrity;
 mod pe;
@@ -335,6 +337,7 @@ fn region_heuristic_with(r: &Region, first: &[u8], exists: &dyn Fn(&str) -> bool
         context: what,
         confidence,
         region: None,
+        extracted: None,
     })
 }
 
@@ -401,6 +404,8 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
     let mut heuristic_hits: Vec<Hit> = Vec::new();
     let mut heuristics_truncated = false;
     let mut stats = ExecStats::default();
+    let mut beacon_candidates: Vec<beacon::Candidate> = Vec::new();
+    let mut demon_candidates: Vec<usize> = Vec::new();
     let mut buf = vec![0u8; CHUNK + OVERLAP];
     let (mut bytes_scanned, mut regions_scanned, mut read_failures) = (0u64, 0usize, 0usize);
     let mut stopped: Option<String> = None;
@@ -446,6 +451,17 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
                     } else {
                         heuristics_truncated = true;
                     }
+                }
+            }
+
+            // Beacon configurations live in memory no image file backs: the
+            // payload's own private allocation, or the heap.
+            if is_unbacked(r) {
+                beacon::find(block, block_base, carry, &mut beacon_candidates);
+                // A whole Havoc Demon payload sits in executable memory: the
+                // buffer its injector wrote.
+                if is_exec(r) {
+                    demon::find(block, block_base, carry, &mut demon_candidates);
                 }
             }
 
@@ -501,9 +517,10 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
 
             any = true;
             bytes_scanned += n as u64;
-            if session.is_none() && !opts.prompts {
-                // Only the heuristics read the bytes, and they look at each
-                // region's first chunk.
+            if session.is_none() && !opts.prompts && !is_unbacked(r) {
+                // Only the heuristics read these bytes, and they look at each
+                // region's first chunk. (Unbacked memory is read whole for
+                // beacon configurations.)
                 break;
             }
             off += n;
@@ -575,6 +592,35 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
         h.region = region_info(&regions, h.offset as usize, mem.as_ref());
         hits.push(h);
     }
+    // Beacon configurations: each candidate parsed (with reads through its
+    // pointers), the ones that hold together reported once each.
+    let beacon_seen = beacon_candidates.len();
+    let mut beacon_configs = 0usize;
+    let mut beacon_addrs = std::collections::BTreeSet::new();
+    for c in beacon_candidates {
+        if beacon_configs >= beacon::MAX_CONFIGS || !beacon_addrs.insert(c.addr) {
+            continue;
+        }
+        if let Some(cfg) = beacon::parse(c, &|addr, buf| mem.read(addr, buf)) {
+            let mut h = cfg.hit();
+            h.region = region_info(&regions, c.addr, mem.as_ref());
+            hits.push(h);
+            beacon_configs += 1;
+        }
+    }
+    let demon_seen = demon_candidates.len();
+    let mut demon_configs = 0usize;
+    for addr in demon_candidates {
+        if demon_configs >= demon::MAX_CONFIGS || !beacon_addrs.insert(addr) {
+            continue;
+        }
+        if let Some(cfg) = demon::parse(addr, &|a, buf| mem.read(a, buf)) {
+            let mut h = cfg.hit();
+            h.region = region_info(&regions, addr, mem.as_ref());
+            hits.push(h);
+            demon_configs += 1;
+        }
+    }
     hits.sort_by_key(|h| h.offset);
 
     let status = if stopped.is_some() || yara_error.is_some() {
@@ -625,6 +671,10 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
             "unbacked_exec_regions": stats.private_exec,
             "unbacked_rwx_regions": stats.private_rwx,
             "memory_heuristic_hits": heuristic_count,
+            "beacon_candidates": beacon_seen,
+            "beacon_configs": beacon_configs,
+            "demon_candidates": demon_seen,
+            "demon_configs": demon_configs,
             "memory_heuristics_truncated": heuristics_truncated,
             "image_integrity": integrity.meta(),
             "exception_hooks": hooks.as_ref().map(|h| h.meta()),
@@ -709,6 +759,7 @@ fn yara_hit(m: yara::YaraMatch, regions: &[Region], mem: &dyn ProcessMemory) -> 
         context: ctx,
         confidence: score.unwrap_or(75),
         region: m.first_addr.and_then(|a| region_info(regions, a, mem)),
+        extracted: None,
     }
 }
 

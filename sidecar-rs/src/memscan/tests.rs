@@ -391,3 +391,152 @@ fn scan_reports_unbacked_exec_stats() {
     assert!(m["unbacked_exec_regions"].is_u64(), "{m}");
     assert!(m["memory_heuristic_hits"].is_u64(), "{m}");
 }
+
+/// When LRNG_PLANT_BEACON is set, this test is a scan target rather than a
+/// test: it keeps a packed version-4 beacon configuration and a running
+/// beacon's 64-bit settings table (with the strings it points at) on its heap,
+/// says so, and waits to be scanned. Nothing in it runs or connects anywhere.
+#[test]
+fn beacon_plant_target() {
+    if std::env::var_os("LRNG_PLANT_BEACON").is_none() {
+        return;
+    }
+    let packed: Vec<u8> = beacon::tests::packed().iter().map(|b| b ^ 0x2e).collect();
+    let mut strings = vec![0u8; 4096];
+    let (table, content) = beacon::tests::table(8, strings.as_ptr() as usize);
+    strings[..content.len()].copy_from_slice(&content);
+    // A whole Havoc Demon payload in executable memory, as an injector
+    // leaves it (Windows: VirtualAlloc; the Linux side has no allocator for
+    // executable memory without libc, so there it stays a unit test).
+    #[cfg(any(windows, lrng_typecheck_windows))]
+    let demon_at = {
+        use windows_sys::Win32::System::Memory::{
+            VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
+        };
+        let payload = demon::tests::packed(false);
+        // SAFETY: a fresh allocation of payload.len() bytes, filled once and
+        // never executed.
+        unsafe {
+            let p = VirtualAlloc(
+                std::ptr::null(),
+                payload.len(),
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_EXECUTE_READWRITE,
+            ) as *mut u8;
+            assert!(!p.is_null());
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), p, payload.len());
+            p as usize
+        }
+    };
+    #[cfg(not(any(windows, lrng_typecheck_windows)))]
+    let demon_at = 0usize;
+    let held = std::hint::black_box((packed, table, strings, demon_at));
+    println!("lrng-plant-ready");
+    std::thread::sleep(Duration::from_secs(60));
+    drop(held);
+}
+
+/// Start this test binary as beacon_plant_target and scan it: both shapes are
+/// found and decoded, their C2 hosts among the structured values.
+pub(crate) fn scan_planted_beacons() -> Response {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let mut c = Command::new(std::env::current_exe().expect("test binary"));
+    c.args([
+        "memscan::tests::beacon_plant_target",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1",
+    ])
+    .env("LRNG_PLANT_BEACON", "1")
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    let mut child = Target(c.spawn().expect("spawn the planted target"));
+    let out = child.0.stdout.take().expect("stdout");
+    let ready = BufReader::new(out)
+        .lines()
+        .map_while(Result::ok)
+        .any(|l| l.contains("lrng-plant-ready"));
+    assert!(ready, "the target never got ready");
+    let resp = run(Request {
+        op: "scan_memory".into(),
+        pid: child.0.id() as i64,
+        prompts: Some(false),
+        ..Default::default()
+    });
+    drop(child);
+    resp.into_iter().next().expect("one response")
+}
+
+pub(crate) fn assert_planted_beacons(r: &Response) {
+    let configs: Vec<&Hit> = r
+        .hits
+        .iter()
+        .filter(|h| h.rule == "memory.cobalt_strike_config")
+        .collect();
+    let m = r.meta.as_ref().unwrap();
+    let mut hosts: Vec<String> = configs
+        .iter()
+        .flat_map(|h| {
+            h.extracted.as_ref().unwrap()["c2_hosts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    assert_eq!(
+        hosts,
+        [
+            "203.0.113.80",
+            "cdn.example-c2.net",
+            "update.example-c2.org"
+        ],
+        "configs found: {:?}; meta {m}",
+        configs.iter().map(|h| &h.context).collect::<Vec<_>>()
+    );
+    assert!(configs
+        .iter()
+        .all(|h| h.region.is_some() && h.severity == "critical"));
+    assert_eq!(m["beacon_configs"], configs.len());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn finds_beacon_configurations_in_a_live_process() {
+    let r = scan_planted_beacons();
+    assert_planted_beacons(&r);
+}
+
+/// The Havoc Demon payload the planted target holds in executable memory
+/// (Windows) was found and decoded.
+#[cfg_attr(not(any(windows, lrng_typecheck_windows)), allow(dead_code))]
+pub(crate) fn assert_planted_demon(r: &Response) {
+    let demons: Vec<&Hit> = r
+        .hits
+        .iter()
+        .filter(|h| h.rule == "memory.havoc_config")
+        .collect();
+    assert_eq!(
+        demons.len(),
+        1,
+        "demon configs: {:?}; meta {}",
+        demons,
+        r.meta.as_ref().unwrap()
+    );
+    let x = demons[0].extracted.as_ref().unwrap();
+    assert_eq!(
+        x["c2_hosts"],
+        serde_json::json!(["havoc.example-c2.com", "198.51.100.23"])
+    );
+    assert!(
+        demons[0]
+            .region
+            .as_ref()
+            .is_some_and(|reg| reg.protect.contains('X')),
+        "{:?}",
+        demons[0].region
+    );
+}

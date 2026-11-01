@@ -62,11 +62,25 @@ func TestDefaultCollectorsOnWindows(t *testing.T) {
 		t.Log("running under Wine: skipping assertions about a real Windows host's shape")
 		return
 	}
-	min := map[string]int{"processes": 10, "services": 50, "network": 1, "autoruns": 1, "localaccounts": 1, "drivers": 50}
+	min := map[string]int{"processes": 10, "services": 50, "network": 1, "autoruns": 1, "localaccounts": 1, "drivers": 50,
+		"lateral": 1, "defenses": 2}
 	for name, n := range min {
 		if got := len(byName[name].Records); got < n {
 			t.Errorf("%s: %d records, want at least %d", name, got, n)
 		}
+	}
+	// Every Windows host has named pipes of its own (lsass, ntsvcs, ...): the
+	// listing must have found them.
+	for _, rec := range byName["lateral"].Records {
+		if rec.Fields["kind"] == "summary" {
+			if n, _ := rec.Fields["pipes"].(int); n < 5 {
+				t.Errorf("lateral: listed %d named pipes", n)
+			}
+			t.Logf("lateral: %v pipes, %v flagged", rec.Fields["pipes"], rec.Fields["pipes_flagged"])
+		}
+	}
+	for _, rec := range byName["defenses"].Records {
+		t.Logf("defenses %v: %v", rec.Fields["area"], rec.Fields)
 	}
 	// The event-log collector keeps only targeted events, so a clean host may
 	// keep none -- but it must have read the host's logs (there is always a

@@ -513,8 +513,14 @@ func eventFindings(ev winEvent) []Finding {
 		out = append(out, processCreateFindings(ev)...)
 	case 1116, 1117: // Microsoft Defender detected / acted on malware
 		out = append(out, defenderFindings(ev)...)
+	case 5001, 5007, 5010, 5012, 5013: // Microsoft Defender: protection off, configuration changed, tampering blocked
+		if strings.Contains(strings.ToLower(ev.Channel+" "+ev.Provider), "windows defender") {
+			out = append(out, defenderEventFindings(ev)...)
+		}
 	case 4624: // an account was successfully logged on
 		out = append(out, logonFindings(ev)...)
+	case 4698, 4702: // a scheduled task was registered / updated (Security)
+		out = append(out, taskEventFindings(ev)...)
 	case 4625: // an account failed to log on
 		out = append(out, failedLogonFindings(ev)...)
 	case 6: // Sysmon: a driver was loaded (other providers use 6 for other things)
@@ -524,6 +530,14 @@ func eventFindings(ev winEvent) []Finding {
 	case 10: // Sysmon: a process was opened
 		if isSysmon(ev) {
 			out = append(out, processAccessFindings(ev)...)
+		}
+	case 17, 18: // Sysmon: a named pipe was created / connected to
+		if isSysmon(ev) {
+			out = append(out, pipeEventFindings(ev)...)
+		}
+	case 3004, 3023, 3033, 3034, 3076, 3077: // Code Integrity: an image refused (or, auditing, one that would have been)
+		if isCodeIntegrity(ev) {
+			out = append(out, codeIntegrityFindings(ev)...)
 		}
 	}
 	return out
@@ -640,6 +654,25 @@ func logonFindings(ev winEvent) []Finding {
 			detail += " — external source address (RDP exposed to the internet, or arrived via a jump host)"
 		}
 		return []Finding{{Rule: "logon.remote_interactive", Severity: sev, Technique: "T1021.001", Confidence: conf, Detail: detail}}
+	case "9": // NewCredentials: the caller keeps its identity locally and uses other credentials on the network
+		if !strings.EqualFold(strings.TrimSpace(evData(ev, "LogonProcessName")), "seclogo") {
+			return nil
+		}
+		outbound := evData(ev, "TargetOutboundUserName")
+		if d := evData(ev, "TargetOutboundDomainName"); d != "" && outbound != "" && outbound != "-" {
+			outbound = d + "\\" + outbound
+		}
+		as := ""
+		if outbound != "" && outbound != "-" {
+			as = " with the network credentials of " + outbound
+		}
+		return []Finding{{
+			Rule: "cred.pass_the_hash", Severity: SevSuspect, Technique: "T1550.002", Confidence: 55,
+			Detail: fmt.Sprintf("a new-credentials logon (type 9) through the Secondary Logon service by %s%s, for %s: "+
+				"how Mimikatz's sekurlsa::pth, Rubeus createnetonly and Cobalt Strike's pth start a process with a stolen hash or ticket; "+
+				"runas /netonly makes the same event",
+				logonUser(ev), as, firstNonEmpty(evData(ev, "ProcessName"), "an unknown process")),
+		}}
 	case "3": // Network
 		if publicIP(ip) && !strings.HasSuffix(evData(ev, "TargetUserName"), "$") {
 			return []Finding{{
@@ -649,6 +682,27 @@ func logonFindings(ev winEvent) []Finding {
 		}
 	}
 	return nil
+}
+
+// taskEventFindings runs the command-line rules over the programs a
+// registered or updated task runs (Security 4698 and 4702 carry the task's
+// XML). Impacket's atexec deletes its task seconds after it runs, so this
+// event is often all that is left of it.
+func taskEventFindings(ev winEvent) []Finding {
+	content := evData(ev, "TaskContent")
+	if content == "" {
+		content = evData(ev, "TaskContentNew") // 4702
+	}
+	def, err := parseTaskXML([]byte(content))
+	if err != nil {
+		return nil
+	}
+	source := fmt.Sprintf("scheduled task %s (event %d)", firstNonEmpty(evData(ev, "TaskName"), "(unnamed)"), ev.EventID)
+	var out []Finding
+	for _, e := range def.Execs {
+		out = mergeFindings(out, analyzeCommandLine(source, e.Command, strings.TrimSpace(e.Command+" "+e.Arguments))...)
+	}
+	return out
 }
 
 // failedLogonFindings raises a 4625 failed logon that came from an external

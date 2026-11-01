@@ -23,6 +23,7 @@ var eventLogTargets = []string{
 	"Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx",
 	"Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx",
 	"Microsoft-Windows-Sysmon%4Operational.evtx",
+	"Microsoft-Windows-CodeIntegrity%4Operational.evtx",
 }
 
 // collectEventLog triages the host's live event logs. It builds the targeted

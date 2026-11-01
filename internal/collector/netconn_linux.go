@@ -56,9 +56,13 @@ func collectConnections(ctx context.Context, opts RunOptions) (Result, error) {
 	// (a client of a local server) isn't mistaken for this host reaching out.
 	listeners := map[netip.AddrPort]bool{}
 	wildcard := map[uint16]bool{}
+	listenerName := map[uint16]string{} // port -> the process listening on it
 	for _, fr := range rows {
 		if linuxTCPStateName(fr.row.State) != "LISTEN" {
 			continue
+		}
+		if n := comm[inodePID[fr.row.Inode]]; n != "" {
+			listenerName[fr.row.Local.Port()] = n
 		}
 		if a := fr.row.Local.Addr(); a.IsUnspecified() {
 			wildcard[fr.row.Local.Port()] = true
@@ -130,6 +134,9 @@ func collectConnections(ctx context.Context, opts RunOptions) (Result, error) {
 				State: state, Local: local, LocalPort: r.Local.Port(),
 				Remote: remote, RemotePort: r.Remote.Port(), PID: uint32(pid), Process: name,
 				ImagePath: exe, Self: self, Inbound: inbound,
+			}
+			if remote.IsLoopback() && !inbound {
+				cv.PeerListener = listenerName[r.Remote.Port()]
 			}
 			findings = linuxConnFindings(cv)
 		}

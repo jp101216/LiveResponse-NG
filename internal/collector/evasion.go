@@ -190,10 +190,13 @@ var accessibilityBinaries = []string{"sethc.exe", "utilman.exe", "osk.exe", "mag
 var accessibilityShells = set("cmd.exe", "powershell.exe", "pwsh.exe", "explorer.exe", "taskmgr.exe", "regedit.exe",
 	"mmc.exe", "rundll32.exe", "conhost.exe", "wscript.exe", "cscript.exe", "mshta.exe", "notepad.exe", "powershell_ise.exe")
 
-// accessibilityAliases are original file names Windows itself gives
-// accessibility programs that differ from the file's name.
+// accessibilityAliases are the original file names Windows' own
+// accessibility programs carry that differ from the file's name (as read on
+// Windows Server 2022 and 2025).
 var accessibilityAliases = map[string]map[string]bool{
-	"utilman.exe": set("utilman2.exe"),
+	"utilman.exe":  set("utilman2.exe"),
+	"magnify.exe":  set("screenmagnifier.exe"),
+	"narrator.exe": set("sr.exe"),
 }
 
 // accessibilityFinding judges one accessibility program by its version

@@ -60,7 +60,7 @@ func linuxConnFindings(c connView) []Finding {
 	if exe := unixBaseName(strings.TrimSuffix(c.ImagePath, deletedSuffix)); exe != "" && exe != unixBaseName(c.Process) {
 		label = fmt.Sprintf("%s [%s] (pid %d)", c.Process, exe, c.PID)
 	}
-	var out []Finding
+	out := llmServerFindings(c, label)
 
 	// A shell or netcat listening on a non-loopback address is a bind shell or
 	// an ad-hoc server. An interpreter listening is usually an application

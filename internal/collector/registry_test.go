@@ -14,7 +14,7 @@ func TestExpectedCollectorsRegistered(t *testing.T) {
 		"sessions", "localaccounts",
 		"modules", "udp", "dnscache",
 		"comhijack", "wmi", "eventlog",
-		"drivers", "lateral", "defenses",
+		"drivers", "lateral", "defenses", "aiagents",
 	}
 	mu.RLock()
 	defer mu.RUnlock()
@@ -37,7 +37,7 @@ func TestOptInCollectors(t *testing.T) {
 	optIn := map[string]bool{"memory": true, "dnscache": true}
 	for _, name := range []string{"services", "autoruns", "scheduledtasks", "shimcache",
 		"prefetch", "sessions", "localaccounts", "modules", "udp", "comhijack", "wmi", "eventlog",
-		"drivers", "lateral", "defenses"} {
+		"drivers", "lateral", "defenses", "aiagents"} {
 		if c, ok := registry[name]; ok && IsOptIn(c) {
 			t.Errorf("collector %q should run by default, but is opt-in", name)
 		}

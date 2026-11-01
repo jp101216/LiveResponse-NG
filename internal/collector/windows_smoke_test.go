@@ -110,6 +110,12 @@ func TestDefaultCollectorsOnWindows(t *testing.T) {
 			}
 		}
 	}
+	if ai := byName["aiagents"]; ai.Meta["entries_visited"] == nil || ai.Meta["entries_visited"] == 0 {
+		t.Errorf("aiagents: swept nothing (homes %v)", ai.Meta["homes"])
+	} else {
+		t.Logf("aiagents: homes %v, %v entries, %v MCP servers, %v instruction files", ai.Meta["homes"], ai.Meta["entries_visited"],
+			ai.Meta["mcp_servers"], ai.Meta["instruction_files"])
+	}
 	if n, _ := byName["processes"].Meta["environments_read"].(int); n < 10 {
 		t.Errorf("processes: read %d environments (%v unreadable)", n, byName["processes"].Meta["environments_unreadable"])
 	}

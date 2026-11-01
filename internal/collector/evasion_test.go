@@ -110,8 +110,11 @@ func TestAccessibilityFinding(t *testing.T) {
 	if f, ok := accessibilityFinding(p, "sethc.exe.mui", ""); ok {
 		t.Errorf("genuine: %+v", f)
 	}
-	if f, ok := accessibilityFinding(`C:\Windows\System32\Utilman.exe`, "utilman2.exe", ""); ok {
-		t.Errorf("alias: %+v", f)
+	for file, orig := range map[string]string{"Utilman.exe": "utilman2.exe", "Magnify.exe": "ScreenMagnifier.exe", "Narrator.exe": "SR.exe",
+		"AtBroker.exe": "ATBroker.exe"} {
+		if f, ok := accessibilityFinding(`C:\Windows\System32\`+file, orig, ""); ok {
+			t.Errorf("Windows' own %s: %+v", file, f)
+		}
 	}
 	if f, ok := accessibilityFinding(p, "", ""); ok {
 		t.Errorf("unreadable resource alone: %+v", f)

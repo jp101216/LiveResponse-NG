@@ -219,6 +219,15 @@ fn read_threads(_: u32, _: &mut Report, _: &mut Vec<Regs>) {}
 /// and stack pointers (into `regs`).
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 fn read_threads(pid: u32, rep: &mut Report, regs: &mut Vec<Regs>) {
+    // The calling thread, when its own process is read: its context is its
+    // own GetThreadContext call, and its stack has moved on by the time the
+    // syscall checks look, so it has no call to judge.
+    #[cfg(target_arch = "x86_64")]
+    let own = {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+        // SAFETY: plain queries about the calling thread.
+        (pid == unsafe { GetCurrentProcessId() }).then(|| unsafe { GetCurrentThreadId() })
+    };
     for tid in threads_of(pid) {
         // SAFETY: the thread handle is closed below; the context is aligned
         // and only the debug registers and control registers are asked for.
@@ -237,11 +246,13 @@ fn read_threads(pid: u32, rep: &mut Report, regs: &mut Vec<Regs>) {
             if GetThreadContext(th, &mut c.0) != 0 {
                 rep.threads += 1;
                 #[cfg(target_arch = "x86_64")]
-                regs.push(Regs {
-                    tid,
-                    rip: c.0.Rip as usize,
-                    rsp: c.0.Rsp as usize,
-                });
+                if own != Some(tid) {
+                    regs.push(Regs {
+                        tid,
+                        rip: c.0.Rip as usize,
+                        rsp: c.0.Rsp as usize,
+                    });
+                }
                 let dr = [
                     c.0.Dr0 as usize,
                     c.0.Dr1 as usize,

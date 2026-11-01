@@ -177,7 +177,10 @@ jobs:
           $code = $LASTEXITCODE
           $out | Write-Output
           function Esc($s) { $s -replace '%','%25' -replace "`r",'%0D' -replace "`n",'%0A' }
-          $out | Where-Object { $_ -match 'lrng-selftest:' } | Select-Object -First 10 | ForEach-Object { Write-Output ("::notice::" + (Esc $_)) }
+          # GitHub keeps 10 notices per step: the system-call lines first.
+          $lines = @($out | Where-Object { $_ -match 'lrng-selftest:' })
+          @($lines | Where-Object { $_ -match 'lrng-selftest: system calls' }) + @($lines | Where-Object { $_ -notmatch 'lrng-selftest: system calls' }) |
+            Select-Object -First 10 | ForEach-Object { Write-Output ("::notice::" + (Esc $_)) }
           if ($code -ne 0) {
             $p = -1
             for ($i = 0; $i -lt $out.Count; $i++) { if ($out[$i] -match 'panicked at') { $p = $i; break } }

@@ -575,7 +575,10 @@ service, and EDR products hook those stubs. Malware goes around them in a few
 ways, and each leaves something a point-in-time look can see. A thread blocked
 in a system call has its instruction pointer just past the `syscall` it ran
 and its stack pointer at the address the stub returns to (read with the same
-`GetThreadContext` call as the debug registers). The sidecar reports:
+`GetThreadContext` call as the debug registers). A thread is reported only if
+its registers and that address read the same a second time, so a busy thread
+caught on its way back from a short call isn't judged on a stack it has
+already reused. The sidecar reports:
 
 - a thread whose `syscall` is outside ntdll and win32u: `defense.direct_syscall`
   (*critical* from memory no image backs or from a second ntdll; *suspect* from

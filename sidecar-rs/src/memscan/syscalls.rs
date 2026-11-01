@@ -448,6 +448,9 @@ pub struct Report {
     /// ordinary.
     pub in_syscall: usize,
     pub calls: Vec<Call>,
+    /// Threads that looked out of the ordinary but had moved when read again
+    /// (back from a short call, their stack slot reused): not reported.
+    pub moved: usize,
     pub stub_regions: Vec<StubRegion>,
     pub stub_copies: usize,
     pub trampolines: usize,
@@ -593,6 +596,7 @@ impl Report {
         json!({
             "supported": true,
             "threads_in_syscall": self.in_syscall,
+            "threads_moved": self.moved,
             "direct": count(Verdict::Direct),
             "indirect": count(Verdict::Indirect),
             "return_not_executable": count(Verdict::ReturnNotExecutable),
@@ -838,6 +842,7 @@ mod tests {
         let r = Report {
             supported: true,
             in_syscall: 9,
+            moved: 2,
             calls: vec![
                 call(ntdll(), Some((0x5000, image()))),        // ordinary
                 call(unbacked("RWX"), None),                   // direct, injected
@@ -896,7 +901,13 @@ mod tests {
             ),
             (Some(4), Some(1), Some(2))
         );
-        assert_eq!(m["threads_in_syscall"], 9);
+        assert_eq!(
+            (
+                m["threads_in_syscall"].as_u64(),
+                m["threads_moved"].as_u64()
+            ),
+            (Some(9), Some(2))
+        );
     }
 
     #[test]

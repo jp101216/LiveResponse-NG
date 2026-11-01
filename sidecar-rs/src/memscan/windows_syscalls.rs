@@ -5,6 +5,10 @@
 //!   whose two bytes before its instruction pointer are a `syscall` is in (or
 //!   just back from) a system call; where that instruction lies, and where the
 //!   address at its stack pointer leads, are looked up with VirtualQueryEx.
+//!   A call out of the ordinary is reported only if the thread's registers
+//!   and that address read the same a second time: a thread blocked in the
+//!   kernel stays put, one back from a short call has moved on and may have
+//!   reused the slot. The sidecar's own calling thread is never judged.
 //! - Stubs: executable memory no image backs is read with ReadProcessMemory
 //!   (capped, and within the scan's time budget) and searched for stubs.
 //! - ntdll copies: every image mapping whose export directory names it
@@ -176,6 +180,13 @@ pub(super) fn read(p: &WinProcess, regs: &[Regs], deadline: Instant) -> Report {
                 ))
             );
         if !ordinary {
+            // The registers were read a while ago. A thread back from a short
+            // call has run on, and may have reused the stack slot read above:
+            // report only a thread still where it was.
+            if !still_in_call(p, r, call.ret.as_ref().map(|(ret, _)| *ret)) {
+                rep.moved += 1;
+                continue;
+            }
             rep.calls.push(call);
         }
     }
@@ -191,6 +202,41 @@ pub(super) fn read(p: &WinProcess, regs: &[Regs], deadline: Instant) -> Report {
         }
     }
     rep
+}
+
+/// Whether a thread is still at the instruction and stack pointers it was
+/// read with, and (when given) the address at its stack pointer is still
+/// `ret`. A thread blocked in a system call stays put.
+fn still_in_call(p: &WinProcess, r: &Regs, ret: Option<usize>) -> bool {
+    registers_now(r.tid) == Some((r.rip, r.rsp))
+        && ret.is_none_or(|v| read_usize(p.h, r.rsp) == Some(v))
+}
+
+/// A thread's instruction and stack pointers, read now.
+#[cfg(target_arch = "x86_64")]
+fn registers_now(tid: u32) -> Option<(usize, usize)> {
+    use super::windows_hooks::AlignedContext;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::Debug::{GetThreadContext, CONTEXT_CONTROL_AMD64};
+    use windows_sys::Win32::System::Threading::{OpenThread, THREAD_GET_CONTEXT};
+    // SAFETY: the handle is closed below; the context is aligned and only its
+    // control registers are asked for.
+    unsafe {
+        let th = OpenThread(THREAD_GET_CONTEXT, 0, tid);
+        if th.is_null() {
+            return None;
+        }
+        let mut c: AlignedContext = core::mem::zeroed();
+        c.0.ContextFlags = CONTEXT_CONTROL_AMD64;
+        let ok = GetThreadContext(th, &mut c.0) != 0;
+        CloseHandle(th);
+        ok.then_some((c.0.Rip as usize, c.0.Rsp as usize))
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn registers_now(_: u32) -> Option<(usize, usize)> {
+    None
 }
 
 /// Where an address lies, for the syscall checks.
@@ -629,8 +675,13 @@ mod tests {
             find("defense.syscall_return_nonexec", "critical").offset as usize,
             ntdll_syscall + 2
         );
-        let s = find("memory.syscall_stub", "suspect");
-        assert_eq!(s.offset as usize, page + direct, "{}", s.context);
+        // The planted page by its address: the executable view of ntdll's
+        // file is searched too, and is reported as a copy of ntdll below.
+        let s = hits
+            .iter()
+            .find(|h| h.rule == "memory.syscall_stub" && h.offset as usize == page + direct)
+            .unwrap_or_else(|| panic!("no memory.syscall_stub at 0x{:x}: {hits:?}", page + direct));
+        assert_eq!(s.severity, "suspect");
         assert!(
             s.context.contains("holds 3 system-call stub(s)"),
             "{}",

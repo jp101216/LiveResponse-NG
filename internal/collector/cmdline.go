@@ -115,6 +115,14 @@ var (
 	rePSDowngrade = regexp.MustCompile(`(?:^|[\s"'\\/])powershell(?:\.exe)?"?\s+(?:[-/\x{2013}\x{2014}\x{2015}]\S+\s+(?:[^-/\s"'\x{2013}\x{2014}\x{2015}]\S*\s+)?)*?[-/\x{2013}\x{2014}\x{2015}]v(?:e(?:r(?:s(?:i(?:o(?:n)?)?)?)?)?)?\s+["']?2(?:\.0)?(?:$|[\s"'])`)
 	// A Chromium browser's DevTools port or pipe.
 	reRemoteDebug = regexp.MustCompile(`--remote-debugging-(?:port|pipe)\b`)
+
+	// The physical disk opened by name, below every file system permission.
+	reRawDisk = regexp.MustCompile(`\\\\[.?]\\(?:physicaldrive\d+|globalroot\\device\\harddisk\d+\\(?:dr\d+|partition0))\b`)
+	// The console switched to UTF-8 ("chcp 65001"), as implants written in Go
+	// and Python do before each shell command so its output reads back
+	// cleanly, followed in the same line by reconnaissance.
+	reChcpUTF8 = regexp.MustCompile(`(?:^|[\s"&|;(/])chcp(?:\.com)?\s+65001\b`)
+	reRecon    = regexp.MustCompile(`\b(?:systeminfo|whoami|ipconfig|tasklist|netstat|wmic|bcdedit|confirm-securebootuefi|get-process|get-ciminstance|get-wmiobject|nltest|quser|net1?(?:\.exe)?\s+(?:user|group|localgroup|view|share|session)|netsh(?:\.exe)?\s+wlan)\b`)
 )
 
 // chromiumBrowsers are the browsers whose own profile remote debugging
@@ -376,6 +384,41 @@ var cmdRules = []cmdRule{
 	{"network.portproxy_rule", SevSuspect, "T1090.001", 55, func(c *cmdInput) string {
 		if c.tok("netsh") && c.has("portproxy") && any2(c, " add ", " set ") {
 			return "adds a netsh port-proxy rule: the host relays connections from a local port to another address, a pivot deeper into the network (often to RDP)"
+		}
+		return ""
+	}},
+	{"cred.wifi_keys", SevSuspect, "T1555", 65, func(c *cmdInput) string {
+		if c.tok("netsh") && c.has("wlan") && c.has("key=clear") {
+			return "prints a saved Wi-Fi network's password in clear text (netsh wlan show profile ... key=clear): infostealers and RATs collect every one (NIK C2 among them)"
+		}
+		return ""
+	}},
+	{"defense.raw_disk_access", SevSuspect, "T1006", 60, func(c *cmdInput) string {
+		if scriptHosts[c.image] && reRawDisk.MatchString(c.text()) {
+			return "a script opens the physical disk directly (\\\\.\\PhysicalDrive), below every file permission: reading or rewriting the master boot record, as bootkits, wipers and fake ransomware do (NIK C2 copies the MBR this way)"
+		}
+		return ""
+	}},
+	{"discovery.av_product", SevNotable, "T1518.001", 40, func(c *cmdInput) string {
+		if strings.Contains(c.text(), "securitycenter2") && strings.Contains(c.text(), "antivirusproduct") {
+			return "asks Windows Security Center which antivirus is installed (SecurityCenter2 AntiVirusProduct): among the first things an implant reports back"
+		}
+		return ""
+	}},
+	{"exec.c2_shell_recon", SevNotable, "T1059.003", 40, func(c *cmdInput) string {
+		if reChcpUTF8.MatchString(c.lower) && reRecon.MatchString(c.text()) {
+			return "switches the console to UTF-8 (chcp 65001) and runs reconnaissance in the same line: the wrapper implants written in Go and Python put around each shell command so its output reads back cleanly (NIK C2 runs systeminfo, wmic and the rest this way)"
+		}
+		return ""
+	}},
+	{"exec.mshta_local_file", SevSuspect, "T1218.005", 60, func(c *cmdInput) string {
+		if !c.tok("mshta") || reURL.MatchString(c.lower) {
+			return "" // remote and inline scripts are exec.mshta_script
+		}
+		lvl, why, culprit := commandPathRisk(c.lower)
+		l := strings.ToLower(strings.Trim(culprit, `"' `))
+		if lvl == riskHigh && (strings.HasSuffix(l, ".hta") || strings.HasSuffix(l, ".htm") || strings.HasSuffix(l, ".html")) {
+			return "mshta runs an HTML application from " + why + " (" + culprit + "): HTA droppers run this way, and so do fake ransomware lock screens (NIK C2's is an HTML page in Temp that mshta reopens every five seconds)"
 		}
 		return ""
 	}},

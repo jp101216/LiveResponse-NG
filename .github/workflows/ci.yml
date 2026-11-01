@@ -133,7 +133,12 @@ jobs:
           cargo clippy --locked --manifest-path sidecar-rs/Cargo.toml --no-default-features --all-targets --message-format=json -- -D warnings 2>&1
           | python3 .github/scripts/ci-annotate.py cargo sidecar-rs
       - name: Windows memory code type-check
-        run: make check-windows-rs
+        shell: bash
+        # make check-windows-rs, with each diagnostic raised as an annotation
+        run: >-
+          CARGO_TARGET_DIR=sidecar-rs/target/typecheck-windows RUSTFLAGS="--cfg lrng_typecheck_windows"
+          cargo clippy --locked --manifest-path sidecar-rs/Cargo.toml --all-targets --message-format=json -- -D warnings 2>&1
+          | python3 .github/scripts/ci-annotate.py cargo sidecar-rs
       - run: cargo test --locked --manifest-path sidecar-rs/Cargo.toml
       - run: cargo test --locked --manifest-path sidecar-rs/Cargo.toml --no-default-features
 

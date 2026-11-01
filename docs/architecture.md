@@ -387,6 +387,49 @@ refused, 3034 and 3076 audited) are judged in the event-log collector. Code
 Integrity events carry the file's flat and Authenticode hashes, which are
 looked up in `internal/vulndrivers` like a driver file's.
 
+`lateral` also reads the port proxies (`Services\PortProxy\v4tov4\tcp` and
+the other three address-family pairs: value name listen, data connect;
+`portProxyFinding`). `defenses` also reads AMSI's providers and the DLL each
+CLSID registers (`judgeAMSIProvider`), `DsrmAdminLogonBehavior`, and the .NET
+runtime's variables in the system, user and service environments
+(`runtimeEnvFindings`, shared with the process collector, which reads each
+process's environment block out of its PEB in `procenv_windows.go` and keeps
+only those variables). `autoruns` compares the accessibility programs with the
+shells byte for byte and reads their language-neutral version resource
+(`GetFileVersionInfoExW`, `FILE_VER_GET_NEUTRAL`; Windows' own aliases are in
+`accessibilityAliases`, read off the CI runner).
+
+### Kerberos tickets, AI agents and Linux rootkits
+
+`kerberos` (Windows) connects to LSA — `LsaRegisterLogonProcess` when the agent
+runs as SYSTEM, `LsaConnectUntrusted` otherwise — lists the logon sessions
+(`LsaEnumerateLogonSessions`, `LsaGetLogonSessionData`) and asks the Kerberos
+package for each session's ticket cache (`KerbQueryTicketCacheExMessage`):
+metadata only, never a ticket or key. `judgeTicket` is portable: lifetime
+against the 10-hour default, RC4 against the AES tickets on the same host, the
+client against the session's account (NewCredentials sessions excepted).
+
+`aiagents` (Windows and Linux) reads each client's configuration from a list of
+paths per OS (`aiClientConfigs`, `aiSystemConfigs`), parses JSON (VS Code's and
+Zed's with comments and trailing commas: `stripJSONC`) and Codex's TOML subset,
+redacts credentials (`redactArgs`, `redactURL`, `redactSecrets`) and judges each
+server and hook. The sweep for instruction files is a bounded `WalkDir` of each
+home (`aiWalkDepth`, `aiWalkMaxEntries`, `aiSkipDirs`); `findHiddenText` scans
+each file rune by rune (tag characters, variation-selector runs decoded as
+bytes, bidirectional controls, zero-width characters outside emoji and the
+scripts that use joiners). The network collectors pass `PeerListener` — the
+process listening on a loopback connection's remote port — so a local LLM
+server's clients are judged against the server that is really there.
+
+`rootkit` (Linux) compares `/proc`'s listing with direct `stat`s of
+`/proc/<pid>` up to `probeBound` (the larger of the highest listed PID and
+`/proc/loadavg`'s last PID, capped by `pid_max`), and the socket table from
+`NETLINK_SOCK_DIAG` (`SOCK_DIAG_BY_FAMILY` dumps of TCP and UDP, both families,
+taken twice) with `/proc/net`, keyed by inode. The Linux `autoruns` collector
+adds PAM (`parsePAMFile`, `judgePAMEntry`; module files hashed against
+`/var/lib/dpkg/info/*.md5sums`), sudoers (`parseSudoers`, `judgeSudoRule`) and
+udev (`udevRunCommands`, `judgeUdevCommand`).
+
 ### Event logs
 
 The `eventlog` collector reads the targeted channels from
@@ -424,6 +467,18 @@ channel's record-id and time span (`channel_ranges`, which correlation
 measures a log clear against), and what the Sigma engine could and couldn't
 run (`sigma`: counts, each skipped rule with its reason, and each file that
 failed to parse).
+
+Two built-in aggregations run beside Sigma's and flush the same way, as
+synthetic records (`source_log` `builtin:aggregation`): Kerberoasting
+(`kerberoastTracker`: per account and client address, the busiest 15-minute
+window of RC4 service tickets to user-account services, by distinct service)
+and DNS tunnels (`dnsTunnelTracker`: Sysmon 22 queries grouped per program and
+registered domain, counting distinct data-like names; the DNS cache collector
+runs the same grouping over the cached names). The Active Directory rules are
+in `adattacks.go`: 4662's replication rights and object types, 5136's
+attributes (the new security descriptor of the domain object is parsed as SDDL
+and its replication grants compared with the default trustees), 4768, 4738 and
+4742, 4765/4766, 4794, the CA's 4887-4889 and 4898/4899, and the KDC's event 41.
 
 **Offline mode.** `-evtx <file|dir>` skips the live collectors and feeds the
 named files through the same reader and classifier (`ParseEventLogFiles`) on
@@ -613,6 +668,13 @@ bytes.
 why), or, with `ok: false`, `skipped`, `access_denied`, `not_found` or
 `error`. YARA hits never contain matched bytes. A process that couldn't be
 scanned is never reported as clean.
+
+A hit may also carry `extracted`: structured values the scan decoded. The
+beacon-configuration checks (`memscan/beacon.rs` for Cobalt Strike,
+`memscan/demon.rs` for Havoc) put a configuration there (`family`, `c2_hosts`,
+`c2_uris`, `port`, `sleep_ms`, `watermark`, `user_agent`, `spawnto_x64`…); the
+memory collector copies each into its record's `extracted` list, and the IOC
+export reads `c2_hosts` as hostnames (and any address in it as an IP).
 
 A `Hit` maps directly onto a collector `Finding` on the Go side. The transport
 is intentionally dumb: one process per call, crash-isolated, with stdout/stderr

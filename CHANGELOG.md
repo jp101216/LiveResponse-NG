@@ -11,10 +11,22 @@ Adds detection of:
 - where threads started and what the stacks of waiting threads show: injected
   threads, sleeping beacons, sleep masks and spoofed frames;
 - what Impacket, NetExec and C2 frameworks leave behind;
-- the settings an intruder weakens (Defender, WDigest, LSA).
+- the settings an intruder weakens (Defender, AMSI, WDigest, LSA, .NET's ETW
+  and profiler variables);
+- attacks on Active Directory in a domain controller's and a certificate
+  authority's logs (DCSync, Kerberoasting, AS-REP roasting, shadow
+  credentials, delegation and ACL backdoors, AD CS abuse), and forged and
+  stolen Kerberos tickets in the ticket caches;
+- Cobalt Strike and Havoc configurations decoded out of memory, and more
+  call-stack spoofing;
+- AI agents' MCP servers, hooks and instruction files with hidden text, and
+  programs driving a local LLM;
+- covert channels: DNS tunnels, DNS past the resolver, QUIC;
+- Linux rootkits (hidden processes and sockets) and PAM, sudo and udev
+  backdoors.
 
-No new dependencies; the report schema is unchanged at 1.2 (new fields and
-rules only).
+No new dependencies; the report schema is unchanged at 1.2 (new fields,
+collectors and rules only).
 
 ### Added
 - **`drivers` collector (Windows, on by default).** Every module the kernel
@@ -153,6 +165,91 @@ rules only).
     only auditing. Any other refused driver is `defense.driver_load_blocked`
     (*notable*); a module LSA protection kept out of LSASS is
     `cred.lsa_plugin_blocked` (mimilib, an SSP or password-filter backdoor).
+- **Active Directory attacks in a DC's and a CA's logs.**
+  - Directory access (4662): `cred.dcsync` (replication rights used by an
+    account that isn't a domain controller or Azure AD Connect's; *critical*
+    for Get-Changes-All), `cred.dpapi_backup_key` (the domain's DPAPI backup
+    key read), `persistence.domain_acl_changed` (the domain opened with
+    WRITE_DAC: ntlmrelayx `--escalate-user`, PrivExchange).
+  - Kerberos: `cred.kerberoasting` (one account asking for RC4 tickets to 4
+    or more user-account services within 15 minutes — 4769s aggregated across
+    the log; *critical* from 10), `cred.asrep_roasting` (4768 without
+    pre-authentication; *suspect* when RC4), `cred.computer_certificate_logon`
+    (PKINIT as a computer: a relayed DC certificate, PetitPotam + ESC8), and
+    the KDC's event 41, `privesc.certificate_sid_mismatch`.
+  - Directory changes (5136): `cred.shadow_credentials`,
+    `privesc.rbcd_configured`, `privesc.constrained_delegation_configured`
+    (also from 4738/4742), `cred.spn_added_to_user`, `defense.dcshadow`,
+    `persistence.adminsdholder_modified`, and
+    `persistence.dcsync_rights_granted` (the domain's new security descriptor
+    parsed as SDDL; only trustees that don't hold replication rights by
+    default are reported).
+  - `persistence.sid_history_added` (4765, 4766, 4738; *critical* for a
+    privileged SID), `persistence.dsrm_password_set` (4794), and
+    `privesc.reflection_dns_record` (a DNS record named with a marshalled
+    target-information blob, CVE-2025-33073; from 4662 and 5136/5137).
+  - Certificate Services: `privesc.adcs_alternate_identity` (a request whose
+    subject alternative name the requester supplied — as Certipy sends one for
+    `-upn`, `-dns` and `-sid` — naming another user: ESC1, ESC6),
+    `privesc.adcs_application_policies` (ESC15), and
+    `privesc.adcs_vulnerable_template` (an ESC1-shaped template loaded, or a
+    template changed into that shape: ESC4).
+- **`kerberos` collector (Windows, on by default).** Each logon session's
+  cached tickets from LSA, metadata only: `cred.golden_ticket` (a TGT valid
+  for days or years), `cred.rc4_tgt` (*suspect* when other tickets are AES),
+  `cred.pass_the_ticket` (another account's TGT in a session),
+  `cred.kerberos_ticket_anomaly`. Every session needs SYSTEM; otherwise the
+  agent's own is read and `meta.all_sessions` says so.
+- **Evasion and persistence on Windows.**
+  - The .NET runtime's variables, from every process's environment (only
+    those variables are kept) and the system, user and service environments:
+    `defense.dotnet_etw_disabled`, `persistence.clr_profiler`.
+  - AMSI providers: `defense.amsi_provider_hijacked`,
+    `defense.amsi_provider_missing`, `persistence.amsi_provider`.
+  - `persistence.accessibility_backdoor` (an accessibility program replaced by
+    a shell, by its bytes or its version resource), `network.portproxy_rule`
+    (registry and command line), `cred.dsrm_network_logon`.
+  - Command lines: `defense.powershell_downgrade` (also from Windows
+    PowerShell's event 400), `cred.browser_remote_debugging`.
+  - Sysmon: remote threads (8) as `memory.remote_thread_unbacked` and
+    `memory.remote_thread_loadlibrary`; process tampering (25) as
+    `memory.process_tampering`.
+- **Covert channels.** `network.dns_tunnel` (many long, random-looking names
+  under one domain: Sysmon's DNS events per program, aggregated across the log,
+  and the DNS client cache), `network.direct_dns` (DNS sent straight to a
+  public resolver: Sysmon's network events and live TCP connections, Windows
+  and Linux), `network.quic_outbound` (QUIC from programs that aren't
+  browsers), and `network.lolbin_outbound` from Sysmon's network events.
+- **Beacon configurations in the memory scan.** `memory.cobalt_strike_config`
+  (the packed settings, XOR-encoded or decoded, and a running beacon's
+  settings table, 64- or 32-bit) and `memory.havoc_config` (a Havoc Demon
+  payload still whole in executable memory), decoded: C2 hosts and URIs,
+  ports, sleep and jitter, watermark, user agent, spawn-to, pipe names. The
+  values ride in a new `extracted` field of the sidecar's hits; the memory
+  record keeps them and the IOC export takes their C2 hosts.
+- **More call-stack spoofing.** `defense.stack_jmp_gadget` (a return address
+  on a `jmp [rbx]`-style gadget: SilentMoonwalk's desync),
+  `defense.stack_truncated` (a stack that ends where no thread begins),
+  `defense.stack_fake_thread_start` (BaseThreadInitThunk appearing to call a
+  Windows API in a module the thread didn't start in).
+- **`aiagents` collector (Windows and Linux, on by default).** Every AI
+  client's MCP servers and Claude Code's hooks, credentials redacted:
+  `ai.mcp_server_unusual_path`, `ai.mcp_server_remote_code`,
+  `ai.mcp_server_url`, `ai.agent_hook_unusual_path`, and the command-line
+  rules on each command. Agent instruction files and project configuration
+  in the users' homes are checked for hidden text: `ai.hidden_instructions`
+  (Unicode tag characters and variation-selector smuggling decoded,
+  bidirectional controls, zero-width characters). The network collectors
+  add `ai.local_llm_client` (a program that isn't an AI client talking to a
+  local Ollama, LM Studio, GPT4All or Jan server, checked against the process
+  listening) and `ai.remote_llm_server`.
+- **`rootkit` collector (Linux, on by default)** and three more persistence
+  surfaces. `defense.hidden_process` (answers at `/proc/<pid>`, missing from
+  the listing), `defense.hidden_socket` (in netlink's socket table, missing
+  from `/proc/net`); PAM (`persistence.pam_module`,
+  `persistence.pam_module_modified` against dpkg's md5sums,
+  `persistence.pam_module_unowned`, `persistence.pam_exec`), sudo
+  (`persistence.sudo_nopasswd`) and udev (`persistence.udev_run`).
 
 ### Changed
 - **The system-call checks re-read before reporting.** A call is reported
@@ -191,6 +288,15 @@ rules only).
 - `lateral` lists pipes with `FindFirstFile`, which opens none of them, and
   `defenses` only reads registry values. Event data (hashes, names, task XML)
   is attacker-influenced text: it is matched, never executed or followed.
+- **`processes` asks for one new right on Windows**: it opens each process
+  (LSASS excepted) with `PROCESS_VM_READ` to read its environment block, and
+  keeps only the .NET runtime's variables. `kerberos` reads ticket metadata,
+  never a ticket or a key; as SYSTEM it registers a logon process, which
+  Windows can log (4611). `aiagents` never records environment values, and
+  redacts credential-shaped arguments, URL parameters and hook text.
+- Beacon configurations are attacker-controlled bytes: every length and
+  pointer is bounds-checked, a candidate is reported only if it parses whole,
+  and Havoc proxy credentials are never reported.
 - Driver files and `drivers.json` are hostile input: the Authenticode reader
   bounds-checks every offset (fuzzed), and the dataset parser rejects any
   malformed line.
@@ -221,11 +327,29 @@ rules only).
   - poses one with a return address that follows no call.
 
   Each must be reported (or, as JIT code, not).
-- The live scans of a 64-bit and a 32-bit PowerShell gate all sixteen new
-  memory rules against false positives. The 64-bit one must also find .NET's
-  registered JIT ranges.
+- The thread self-test also poses a return onto a `jmp [rbx]` gadget found
+  in kernelbase, a stack that ends after `WaitForSingleObjectEx`, and a copy
+  of the stack of a thread really started at `SleepEx` under a thread that
+  started in the test's own code (the real one must not be reported).
+- A live test runs the sidecar's test binary as a target holding a packed
+  Cobalt Strike configuration and a running beacon's settings table on its
+  heap (and, on Windows, a Havoc payload in executable memory), and requires
+  every C2 host back out of a scan.
+- The live scans of a 64-bit and a 32-bit PowerShell gate the new memory rules
+  against false positives (twenty-one in all). The 64-bit one must also find
+  .NET's registered JIT ranges.
+- On the Windows runner: a child started with `COMPlus_ETWEnabled=0` and a
+  profiler in its environment has them read back out of its memory (and a
+  secret beside them isn't); the accessibility programs' version resources are
+  read (Windows' own names for Magnify and Narrator came from there), AMSI's
+  Defender provider must be found and judged ordinary, LSA must list the logon
+  sessions, and the AI-agent sweep must run.
+- On Linux: PAM modules on a real Debian-family system match their packages'
+  md5s, every PID is accounted for, and a listener opened by the test is in
+  both netlink's and `/proc/net`'s socket tables.
 - The Windows smoke test requires `lateral` to list the host's pipes and
-  `defenses` to return both records.
+  `defenses` to return its records, AMSI's among them, with no finding on the
+  clean runner.
 
 ### Third-party data
 - LOLDrivers (Apache License 2.0). Its license ships beside the data and in

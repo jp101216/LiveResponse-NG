@@ -1002,8 +1002,13 @@ mod tests {
         let mut copy = vec![0u8; 0x400];
         let n = p_read(sc_ctx.0.Rsp as usize, &mut copy);
         assert!(n >= 0x100, "read {n} bytes of the sleeping thread's stack");
-        let forged = data + 0x400 + (sc_ctx.0.Rsp as usize & 0xF);
-        unsafe { core::ptr::copy_nonoverlapping(copy.as_ptr(), forged as *mut u8, n.min(0x5F0)) };
+        // The data page holds four stacks that mustn't overlap: this copy at
+        // the bottom (at most 0x40F bytes in), then the posed stacks at 0x800
+        // (no call), 0xA00 (truncated) and 0xC00 (gadget), each with zeros
+        // above it where its walk ends.
+        let forged = data + (sc_ctx.0.Rsp as usize & 0xF);
+        assert!(forged + n <= data + 0x800);
+        unsafe { core::ptr::copy_nonoverlapping(copy.as_ptr(), forged as *mut u8, n) };
         let forged_pose = Posed::new(delay + dsc + 2, forged);
 
         let planted = me.thread_checks(soon()).unwrap().threads;

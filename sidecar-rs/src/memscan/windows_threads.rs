@@ -572,20 +572,27 @@ mod tests {
         out
     }
 
-    /// Wait until the thread `h` is blocked in a system call.
-    fn until_blocked(h: HANDLE) -> AlignedContext {
-        for _ in 0..200 {
+    /// Wait until the thread `h` is blocked in the system call whose stub
+    /// starts at `stub`: just past that stub's `syscall`, at the same place on
+    /// two reads 20 ms apart. (A thread caught in a short call on its way
+    /// there, such as the wake-up a channel send makes, has moved on by the
+    /// time its stack is read.)
+    fn until_blocked(h: HANDLE, stub: usize) -> AlignedContext {
+        let mut last = None;
+        for _ in 0..300 {
             let c = context(h);
-            let pre =
-                c.0.Rip
-                    .checked_sub(2)
-                    .map(|a| unsafe { *(a as *const [u8; 2]) });
-            if pre.is_some_and(is_syscall_insn) {
+            let rip = c.0.Rip as usize;
+            let pre = rip
+                .checked_sub(2)
+                .map(|a| unsafe { *(a as *const [u8; 2]) });
+            let here = pre.is_some_and(is_syscall_insn) && rip > stub && rip < stub + 0x20;
+            if here && last == Some((c.0.Rip, c.0.Rsp)) {
                 return c;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            last = here.then_some((c.0.Rip, c.0.Rsp));
+            std::thread::sleep(Duration::from_millis(20));
         }
-        panic!("the thread never blocked");
+        panic!("the thread never blocked in the stub at 0x{stub:x}");
     }
 
     /// A thread created suspended at `start`, never run from there: its start
@@ -651,7 +658,8 @@ mod tests {
         let tid = tid_rx.recv().unwrap();
         // SAFETY: a handle to our own thread, closed below.
         let th = unsafe { OpenThread(THREAD_GET_CONTEXT, 0, tid) };
-        let c = until_blocked(th);
+        let wait = export("ntdll.dll", c"NtWaitForSingleObject");
+        let c = until_blocked(th, wait);
         let theirs = windows_frames(&c.0);
         let p = WinProcess {
             h: unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() },
@@ -720,7 +728,7 @@ mod tests {
             CreateThread(null(), 0, Some(start), null(), 0, null_mut())
         };
         assert!(!sleeper.is_null());
-        until_blocked(sleeper);
+        until_blocked(sleeper, wait);
 
         let loadlibrary = export("kernel32.dll", c"LoadLibraryW");
         let rtl_start = export("ntdll.dll", c"RtlUserThreadStart");
@@ -745,7 +753,6 @@ mod tests {
         .map(|n| export("ntdll.dll", n))
         .find(|&a| !unwind::follows_call(unsafe { &*((a - 15) as *const [u8; 15]) }))
         .expect("an export not preceded by a call");
-        let wait = export("ntdll.dll", c"NtWaitForSingleObject");
         let sc = (0..0x20)
             .find(|&k| unsafe { *((wait + k) as *const [u8; 2]) } == [0x0F, 0x05])
             .expect("syscall");

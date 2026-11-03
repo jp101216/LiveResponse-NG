@@ -105,6 +105,8 @@ jobs:
         run: |
           npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright@1.63.0
           "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install chromium
+      - name: report loader regressions (no browser needed)
+        run: node --test viewer/browsertest/parse_test.cjs
       - name: walk every view; nothing from a report may execute or load
         env:
           NODE_PATH: ${{ runner.temp }}/pw/node_modules

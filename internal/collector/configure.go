@@ -2,7 +2,6 @@ package collector
 
 import (
 	"os"
-	"strings"
 	"time"
 )
 
@@ -56,18 +55,13 @@ func (o RunOptions) isSelf(pid uint32, imagePath string) bool {
 	if imagePath == "" {
 		return false
 	}
-	for _, p := range o.SelfPaths {
-		if p != "" && strings.EqualFold(p, imagePath) {
-			return true
-		}
-	}
-	return false
+	return samePath(imagePath, o.SelfPaths)
 }
 
 // MemoryOptions configures the memory collector.
 type MemoryOptions struct {
-	// YaraRules is a .yar/.yara file or a directory of them. Empty runs the
-	// module-B prompt scan only.
+	// YaraRules is a .yar/.yara file or a directory of them. Empty disables
+	// YARA; prompt scanning, memory heuristics and image integrity still run.
 	YaraRules string
 	// PIDs restricts the scan to these processes; empty means all.
 	PIDs []int

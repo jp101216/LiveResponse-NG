@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-0jhU1u6kqE0VmaIKll6Wyu3GCTaXdkeDSSkBKY24+Vs='; style-src 'sha256-Wc4NmCupTVhifFhPynu7lj87HqfxS67UPc0crnq8tvs='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-23KWa4CZTOw49hkDDb9h4gedeIN2ZdNwDO9hReWEaRo='; style-src 'sha256-Wc4NmCupTVhifFhPynu7lj87HqfxS67UPc0crnq8tvs='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>lrng report viewer</title>
 <style>
@@ -476,16 +476,26 @@ tr.detail-row td { max-width: none; background: var(--paper); }
       const lines = text.split(/\r?\n/);
       const results = [];
       const byName = new Map();
+      let recordSlots = 0;
       for (const line of lines) {
         if (!line.trim()) continue;
         let ev;
         try { ev = JSON.parse(line); } catch { skipped++; continue; }
         if (!isObj(ev)) { skipped++; continue; }
         if (ev.type === "run") {
+          if (rep) throw new Error("the JSONL file contains multiple runs; open one run at a time");
           rep = Object.assign({}, ev);
           delete rep.type;
           rep.results = results;
-        } else if (ev.type === "collector" && typeof ev.collector === "string") {
+          continue;
+        }
+        if (!rep && ["collector", "record", "finding"].includes(ev.type)) {
+          throw new Error("a JSONL event precedes its run header; open a complete run");
+        }
+        if (rep && rep.run_id !== undefined && ev.run_id !== undefined && ev.run_id !== rep.run_id) {
+          throw new Error("a JSONL event belongs to a different run; open one run at a time");
+        }
+        if (ev.type === "collector" && typeof ev.collector === "string") {
           const r = { collector: ev.collector, started_at: ev.started_at, duration_ns: ev.duration_ns, records: [], meta: ev.meta, errors: ev.errors };
           results.push(r);
           byName.set(ev.collector, r);
@@ -493,8 +503,15 @@ tr.detail-row td { max-width: none; background: var(--paper); }
           const r = byName.get(ev.collector);
           if (!r) { skipped++; continue; }
           const rec = { fields: ev.fields, findings: ev.findings };
-          if (Number.isInteger(ev.record) && ev.record >= 0 && ev.record < 1e7) r.records[ev.record] = rec;
-          else r.records.push(rec);
+          const i = Number.isInteger(ev.record) && ev.record >= 0 ? ev.record : r.records.length;
+          // Bound the total array slots, including holes, by the input's
+          // line count. A tiny file must not expand into millions of rows.
+          const growth = Math.max(0, i + 1 - r.records.length);
+          if (recordSlots + growth > lines.length) {
+            throw new Error("the JSONL record indices are too sparse; open a complete run");
+          }
+          recordSlots += growth;
+          r.records[i] = rec;
         }
       }
       if (!rep) {

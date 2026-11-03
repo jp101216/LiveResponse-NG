@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -10,6 +13,55 @@ import (
 	"github.com/jp101216/liveresponse-ng/internal/config"
 	"github.com/jp101216/liveresponse-ng/internal/output"
 )
+
+// The test binary doubles as a portable sidecar fixture: the client launches
+// it with no arguments, including on Windows where a shell script won't run.
+func TestMain(m *testing.M) {
+	if mode := os.Getenv("LRNG_TEST_MEMSCAN_SIDECAR"); mode != "" {
+		if mode != "empty" {
+			fmt.Println(`{"op":"scan_memory","ok":true,"meta":{"pid":4242,"status":"scanned"}}`)
+		}
+		switch mode {
+		case "exit":
+			os.Exit(7)
+		case "malformed":
+			fmt.Println("not JSON")
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func TestMemScanPropagatesStreamErrors(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		mode string
+		want string
+	}{
+		{"valid", ""},
+		{"exit", "exit status 7"},
+		{"malformed", "decode response"},
+		{"empty", "no result"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			t.Setenv("LRNG_TEST_MEMSCAN_SIDECAR", tc.mode)
+			cfg := config.Default()
+			cfg.SidecarPath = exe
+			cfg.MemBudget = time.Second
+			err := doMemScan(context.Background(), cfg, 4242)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
 
 func TestValidate(t *testing.T) {
 	ok := config.Default()

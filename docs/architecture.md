@@ -629,6 +629,14 @@ hashes are stale; `go test ./viewer -update` rewrites them.
 plus real Windows and Linux reports, and walks every view. In CI it runs
 against the reports the Windows and Linux runners produce.
 
+JSONL loading accepts one run only and checks any event `run_id` against its
+run header. Multiple headers or mismatched IDs are errors, rather than merging
+records from different hosts. Missing record slots may be filled to preserve
+back-pointers, but the total slots across collectors cannot exceed the input's
+line count. `node --test viewer/browsertest/parse_test.cjs` exercises the page's
+actual parser without a browser, including these bounds and legacy events
+without IDs.
+
 ## Go <-> Rust sidecar contract
 
 Newline-delimited JSON over stdin/stdout. Go writes one `Request`; Rust writes

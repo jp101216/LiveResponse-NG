@@ -279,7 +279,20 @@ func WriteFile(path string, rep Report, format string, pretty, overwrite bool) (
 
 	sum := hex.EncodeToString(h.Sum(nil))
 	line := sum + "  " + filepath.Base(path) + "\n"
-	if err := os.WriteFile(path+".sha256", []byte(line), 0o600); err != nil {
+	// The checksum is evidence too: use the same overwrite policy as the
+	// report, including refusing an existing symlink when -force is absent.
+	checksum, err := os.OpenFile(path+".sha256", flags, 0o600)
+	if err != nil {
+		return sum, fmt.Errorf("report written, but checksum file failed: %w", err)
+	}
+	_, err = checksum.WriteString(line)
+	if err == nil {
+		err = checksum.Sync()
+	}
+	if cerr := checksum.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
 		return sum, fmt.Errorf("report written, but checksum file failed: %w", err)
 	}
 	return sum, nil

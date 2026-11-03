@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Preserve Linux path case when excluding lrng components from detection and
+  deduplicating AI-agent configuration files. Distinct case-sensitive paths
+  must not suppress findings or skip a configuration.
+- A single-PID `-mem-scan` keeps any received result but now returns a sidecar
+  stream or exit error, instead of incorrectly exiting successfully.
+- The report viewer rejects concatenated JSONL runs and mismatched event run
+  IDs. Bound sparse record-array expansion across collectors by the input's
+  line count, so a tiny malformed report cannot allocate millions of rows.
+- Report checksum files now follow the report's overwrite policy: an existing
+  checksum is preserved unless `-force` was requested. Checksum writes are also
+  synced and checked on close.
+
+### Changed
+
+- Add regression tests for path case, memory-scan errors, checksum collisions
+  and the viewer's JSONL loader; the loader tests run in CI without a browser.
+- Align the README and architecture notes with report-loading and overwrite
+  behavior; correct comments about scanning without YARA and optional ATT&CK
+  mappings. Mark the generated endpoint dataset as such in GitHub diffs.
+
 ## 0.14.0
 
 Adds detection of NIK C2, the AI-enabled Go remote-access tool Cisco Talos

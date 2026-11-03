@@ -92,7 +92,7 @@ func collectAIAgents(ctx context.Context, homes []string, configs []aiClientConf
 	seen := map[string]bool{}
 	servers, hooks := 0, 0
 	readConfig := func(client, path string, toml bool) {
-		key := strings.ToLower(filepath.Clean(path))
+		key := pathKey(filepath.Clean(path))
 		if seen[key] {
 			return
 		}

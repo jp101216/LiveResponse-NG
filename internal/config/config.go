@@ -14,9 +14,9 @@ type Config struct {
 	Workers int
 	// Timeout per collector; 0 disables.
 	Timeout time.Duration
-	// Output path for the JSON report; empty means stdout.
+	// Output path for the report; empty means stdout.
 	Output string
-	// Force allows Output to replace an existing file.
+	// Force allows Output to replace an existing report or checksum file.
 	Force bool
 	// Pretty indents the JSON for human reading.
 	Pretty bool

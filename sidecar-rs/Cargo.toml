@@ -13,7 +13,8 @@ path = "src/main.rs"
 [features]
 default = ["yara"]
 # YARA-X (pure-Rust YARA) for scan_memory rules. Without it, scan_memory
-# still runs the module-B prompt scan but rejects rules_path.
+# still runs prompt scanning, memory heuristics and image integrity, but
+# rejects rules_path.
 yara = ["dep:yara-x"]
 # 32-bit x86 has no Cranelift JIT backend; use wasmtime's portable Pulley
 # interpreter there instead (slower rule evaluation, same results).

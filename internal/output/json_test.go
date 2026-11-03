@@ -63,6 +63,30 @@ func TestWriteFileRefusesOverwriteAndWritesChecksum(t *testing.T) {
 	}
 }
 
+func TestWriteFilePreservesExistingChecksum(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "host.json")
+	const oldChecksum = "previous evidence checksum\n"
+	if err := os.WriteFile(path+".sha256", []byte(oldChecksum), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep := Report{Schema: SchemaVersion, Results: []collector.Result{}}
+	sum, err := WriteFile(path, rep, FormatJSON, false, false)
+	if err == nil || sum == "" || !strings.Contains(err.Error(), "report written, but checksum file failed") {
+		t.Fatalf("want a checksum collision with the written report's hash, got %q %v", sum, err)
+	}
+	data, err := os.ReadFile(path + ".sha256")
+	if err != nil || string(data) != oldChecksum {
+		t.Fatalf("existing checksum changed: %q %v", data, err)
+	}
+	if _, err := WriteFile(path, rep, FormatJSON, false, true); err != nil {
+		t.Fatalf("-force should replace the report and checksum: %v", err)
+	}
+	data, _ = os.ReadFile(path + ".sha256")
+	if string(data) == oldChecksum {
+		t.Fatal("-force did not replace the checksum")
+	}
+}
+
 func TestSummarise(t *testing.T) {
 	s := Summarise(sampleResults())
 	if s.Records != 3 || s.Findings != 4 || s.Errors != 1 || s.BySeverity[collector.SevSuspect] != 2 ||

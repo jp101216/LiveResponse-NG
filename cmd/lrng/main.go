@@ -728,7 +728,9 @@ func doMemScan(ctx context.Context, cfg config.Config, pid int) error {
 		fmt.Printf("  [%-8s] %-28s 0x%-14x%s conf=%d  %s\n",
 			h.Severity, h.Rule, uint64(h.Offset), where, h.Confidence, h.Context)
 	}
-	return nil
+	// Keep the result already received, but do not turn a broken stream or a
+	// sidecar that failed on exit into a successful scan.
+	return err
 }
 
 func parsePIDs(s string) ([]int, error) {

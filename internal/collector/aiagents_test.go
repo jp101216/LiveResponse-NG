@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -249,6 +250,27 @@ func TestCollectAIAgents(t *testing.T) {
 	}
 	if res.Meta["mcp_servers"] != 2 || res.Meta["instruction_files"] != 2 {
 		t.Errorf("meta: %v", res.Meta)
+	}
+}
+
+func TestAIAgentConfigsWithDifferentPathCase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("case-distinct files require a case-sensitive file system")
+	}
+	dir := t.TempDir()
+	paths := []string{filepath.Join(dir, "config.json"), filepath.Join(dir, "CONFIG.json")}
+	for _, p := range paths {
+		if err := os.WriteFile(p, []byte(`{"mcpServers":{"server":{"command":"node"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res := collectAIAgents(context.Background(), nil, nil, []aiClientConfig{
+		{Client: "lower", Path: paths[0]},
+		{Client: "upper", Path: paths[1]},
+		{Client: "duplicate", Path: paths[0]},
+	})
+	if len(res.Errors) != 0 || res.Meta["mcp_servers"] != 2 {
+		t.Fatalf("both distinct configurations must be read once: %+v", res)
 	}
 }
 

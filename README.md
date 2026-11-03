@@ -523,9 +523,11 @@ zstd or xz (only payloads over its 512-byte threshold) are counted, not decoded.
 
 ## Detections
 
-Every finding has a rule id, a severity (`notable` → `suspect` →
-`critical`), a confidence (0–100), a MITRE ATT&CK technique and a sentence
-saying what was seen. Rules are deliberately specific — they match a
+Every finding has a rule id, a severity (`info` → `notable` → `suspect` →
+`critical`), a confidence (0–100) and a sentence saying what was seen. Findings
+also carry a MITRE ATT&CK technique where one applies; a generic prompt
+artifact or a Sigma rule without an ATT&CK tag can leave it unset.
+Rules are deliberately specific — they match a
 technique's mechanics, not a program's name — and each one is unit-tested
 against both malicious and ordinary examples.
 
@@ -1353,8 +1355,10 @@ leaves behind, so you can account for it in your notes:
   create Prefetch entries (on by default on client Windows) and process-creation
   events in whatever logging the host has.
 - **Disk.** Run from external media or a read-only share where possible, and
-  point `-out` off-host. `-out` refuses to overwrite an existing file unless
-  you pass `-force`.
+  point `-out` off-host. `-out` refuses to overwrite an existing report or
+  checksum file unless you pass `-force`. If only the checksum path already
+  exists, the report is written, the earlier checksum is preserved, and the
+  command reports an error; use a fresh output path or explicitly pass `-force`.
 - **Integrity.** Each report is written with a `<report>.sha256` file, the
   report records the SHA-256 of the `lrng` binary that produced it and a
   `run_id`, and `make release` writes `dist/SHA256SUMS`. Record these in your
@@ -1508,7 +1512,7 @@ lrng -evtx Security.evtx -fail-on critical       # offline triage of one exporte
 | `-collectors` | `default` | comma-separated collectors; `default` is the default set |
 | `-out` | stdout | report path; also writes `<path>.sha256` |
 | `-format` | `json` | `json` (one envelope), `jsonl` (one event per line) or `html` (the [report viewer](#report-viewer) with the report inside) |
-| `-force` | off | let `-out` overwrite an existing file |
+| `-force` | off | let `-out` overwrite an existing report or checksum file |
 | `-quiet` | off | don't print the findings summary to stderr |
 | `-fail-on` | — | exit with status 3 if any finding is at or above this severity |
 | `-no-dns` | off | skip module A's provider lookups |
@@ -1569,6 +1573,11 @@ analyst's own machine, in `viewer/lrng-viewer.html` (also in every release
 archive): a single offline HTML page with nothing to install. Drop a `.json` or
 `.jsonl` report onto it, or open the `.html` that `-format html` wrote.
 
+Open one run at a time. A JSONL file containing multiple run headers or events
+with a different `run_id` is rejected, so another host's records cannot be
+shown under the current host. Sparse record indices are bounded by the input's
+line count to prevent a small malformed file from allocating a huge table.
+
 - **The run at a glance**: the host, when and how it was collected (elevated
   or not, interrupted or not, collector errors), the report's SHA-256 to check
   against the `.sha256` lrng wrote, and a strip of ATT&CK tactics in kill-chain
@@ -1598,7 +1607,9 @@ deep) embedded, as JSON and as JSONL, plus real reports from Windows and Linux
 runners, walks every view in Chromium, and fails if anything executes, any
 report markup becomes an element, any request leaves the page, or the console
 logs an error (`viewer/browsertest`). A Go test keeps the policy's hashes in
-step with the page (`go test ./viewer -update` after editing it).
+step with the page (`go test ./viewer -update` after editing it). The loader's
+run-isolation and sparse-index regressions can also be checked without a
+browser: `node --test viewer/browsertest/parse_test.cjs`.
 
 ---
 

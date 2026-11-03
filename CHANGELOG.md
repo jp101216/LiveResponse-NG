@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.14.1
+
+Maintenance release for evidence attribution, memory-scan error reporting, and
+report integrity. No dependency changes; report schema remains 1.2.
 
 ### Fixed
 

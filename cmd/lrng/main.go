@@ -80,6 +80,12 @@ func main() {
 	flag.BoolVar(&cfg.IOCs, "iocs", false, "add a deduplicated, ranked set of indicators (IPs, domains, hashes, paths) from detection-linked records (an 'iocs' result)")
 	flag.BoolVar(&cfg.Intel, "intel", false, "attribute public remote addresses offline (ASN, country, cloud/CDN/hosting/DNS/Tor) against the bundled dataset (an 'intel' result)")
 	flag.StringVar(&cfg.IntelDB, "intel-db", "", "use this endpoint-intelligence dataset file instead of the bundled one (from cmd/intelgen); implies -intel")
+	flag.BoolVar(&cfg.Graph, "graph", false, "add an evidence graph with source references and observed/inferred relationships")
+	flag.StringVar(&cfg.AgentTrace, "agent-trace", "", "import existing agent telemetry files (normalized JSONL or OTLP JSON; comma-separated); implies -graph")
+	flag.BoolVar(&cfg.TraceOnly, "trace-only", false, "with -agent-trace, import telemetry offline without collecting this host")
+	flag.BoolVar(&cfg.Adaptive, "adaptive", false, "follow suspect/critical live findings with bounded local file metadata and hashing; implies -graph")
+	flag.DurationVar(&cfg.AdaptiveBudget, "adaptive-budget", cfg.AdaptiveBudget, "time limit for the adaptive follow-up pass")
+	flag.IntVar(&cfg.AdaptiveMaxFiles, "adaptive-max-files", cfg.AdaptiveMaxFiles, "maximum files in the adaptive follow-up pass (1-200)")
 	flag.DurationVar(&cfg.MemBudget, "mem-budget", cfg.MemBudget, "memory scan: time budget per process")
 	flag.DurationVar(&cfg.MemTimeout, "mem-timeout", cfg.MemTimeout, "memory scan: time limit for the whole memory collector")
 	flag.IntVar(&cfg.MemWorkers, "mem-workers", cfg.MemWorkers, "memory scan: processes scanned in parallel")
@@ -88,7 +94,12 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	usageErrorOn(validate(cfg, flag.Args(), *memScan))
+	if *evtxOffline != "" && (cfg.Adaptive || cfg.TraceOnly) {
+		usageErrorOn(errors.New("-evtx cannot be combined with -adaptive or -trace-only"))
+	}
+	if cfg.AgentTrace != "" || cfg.Adaptive {
+		cfg.Graph = true
+	}
 	if cfg.IntelDB != "" {
 		cfg.Intel = true // naming a dataset means you want attribution
 	}
@@ -97,6 +108,7 @@ func main() {
 	pids, err := parsePIDs(*memPIDs)
 	usageErrorOn(err)
 	cfg.MemPIDs = pids
+	usageErrorOn(validate(cfg, flag.Args(), *memScan))
 
 	// Ctrl+C — or SIGTERM, which `timeout`, systemd and a plain `kill` send —
 	// cancels collection, and whatever was gathered is still written. A second
@@ -131,7 +143,7 @@ func main() {
 	case *memScan != 0:
 		exitOn(doMemScan(ctx, cfg, *memScan))
 		return
-	case *evtxOffline != "":
+	case *evtxOffline != "" || cfg.TraceOnly:
 		rep, err := doEvtxOffline(ctx, cfg, *evtxOffline)
 		exitOn(err)
 		if failOnMet(rep.Summary, cfg.FailOn) {
@@ -165,6 +177,16 @@ func validate(cfg config.Config, args []string, memScan int) error {
 		return errors.New("-mem-scan needs a positive PID")
 	case cfg.FailOn != "" && collector.SeverityRank(collector.Severity(cfg.FailOn)) == 0:
 		return fmt.Errorf("-fail-on must be one of info, notable, suspect, critical")
+	case cfg.TraceOnly && cfg.AgentTrace == "":
+		return errors.New("-trace-only requires -agent-trace")
+	case cfg.TraceOnly && cfg.Adaptive:
+		return errors.New("-adaptive requires a live run; imported telemetry cannot supply local file-read targets")
+	case cfg.TraceOnly && (memScan != 0 || cfg.YaraRules != "" || len(cfg.MemPIDs) > 0 || len(cfg.Collectors) > 0 || cfg.SigmaRules != ""):
+		return errors.New("-trace-only cannot be combined with live collector, memory-scan or Sigma options")
+	case cfg.AdaptiveBudget <= 0:
+		return errors.New("-adaptive-budget must be positive")
+	case cfg.AdaptiveMaxFiles < 1 || cfg.AdaptiveMaxFiles > 200:
+		return errors.New("-adaptive-max-files must be between 1 and 200")
 	}
 	return nil
 }
@@ -197,6 +219,9 @@ Usage: lrng [flags]
   lrng -timeline -out host.json        add a unified super-timeline of timestamped artifacts
   lrng -iocs -out host.json            add a deduplicated indicator set (IPs, domains, hashes, paths)
   lrng -intel -iocs -out host.json     attribute remote IPs offline (ASN/country/cloud/Tor); enriches the IOC set
+  lrng -graph -format html -out case.html   explore the evidence graph offline
+  lrng -agent-trace spans.jsonl -trace-only -out trace.json   import existing agent telemetry only
+  lrng -adaptive -adaptive-budget 15s -out host.json   bounded follow-up of suspect local executables
   lrng -list                           collectors available on this OS
 
 Exit status: 0 done, 1 error, 2 bad usage, 3 -fail-on threshold met.
@@ -282,6 +307,11 @@ func selectCollectors(cfg config.Config) ([]collector.Collector, error) {
 
 func doRun(ctx context.Context, cfg config.Config) (output.Report, error) {
 	started := time.Now().UTC()
+	cfg.Graph = cfg.Graph || cfg.AgentTrace != "" || cfg.Adaptive
+	traceFiles, err := expandAgentTracePaths(cfg.AgentTrace)
+	if err != nil {
+		return output.Report{}, err
+	}
 	selected, err := selectCollectors(cfg)
 	if err != nil {
 		return output.Report{}, err
@@ -294,17 +324,24 @@ func doRun(ctx context.Context, cfg config.Config) (output.Report, error) {
 	}
 
 	run := output.RunInfo{
-		StartedAt:      started,
-		PID:            os.Getpid(),
-		Args:           os.Args[1:],
-		Collectors:     names,
-		Workers:        cfg.Workers,
-		Timeout:        cfg.Timeout.String(),
-		DNSLookups:     !cfg.NoDNS,
-		DNSCorrelation: dnsCache,
-		Hashing:        !cfg.NoHash,
-		YaraRules:      cfg.YaraRules,
-		Intel:          cfg.Intel,
+		StartedAt:       started,
+		PID:             os.Getpid(),
+		Args:            os.Args[1:],
+		Collectors:      names,
+		Workers:         cfg.Workers,
+		Timeout:         cfg.Timeout.String(),
+		DNSLookups:      !cfg.NoDNS,
+		DNSCorrelation:  dnsCache,
+		Hashing:         !cfg.NoHash,
+		YaraRules:       cfg.YaraRules,
+		Intel:           cfg.Intel,
+		Graph:           cfg.Graph,
+		AgentTraceFiles: traceFiles,
+		Adaptive:        cfg.Adaptive,
+	}
+	if cfg.Adaptive {
+		run.AdaptiveBudget = cfg.AdaptiveBudget.String()
+		run.AdaptiveMaxFiles = cfg.AdaptiveMaxFiles
 	}
 	if elev, err := hostinfo.Elevated(); err == nil {
 		run.Elevated = &elev
@@ -361,7 +398,15 @@ func doRun(ctx context.Context, cfg config.Config) (output.Report, error) {
 
 	d := &collector.Dispatcher{Workers: cfg.Workers, Timeout: cfg.Timeout}
 	results := d.Run(ctx, selected)
+	if len(traceFiles) > 0 {
+		results = append(results, collector.ParseAgentTraceFiles(ctx, traceFiles))
+	}
 	collector.Correlate(results) // cross-reference the event log against the live state
+	if cfg.Adaptive {
+		results = append(results, collector.RunAdaptive(ctx, results, collector.AdaptiveOptions{
+			MaxFiles: cfg.AdaptiveMaxFiles, Budget: cfg.AdaptiveBudget, NoHash: cfg.NoHash, NoSign: cfg.NoSign,
+		}))
+	}
 	if cfg.Timeline {
 		results = append(results, collector.BuildTimeline(results))
 	}
@@ -372,13 +417,16 @@ func doRun(ctx context.Context, cfg config.Config) (output.Report, error) {
 		results = append(results, collector.AnnotateIntel(results, intelDB))
 	}
 
-	run.FinishedAt = time.Now().UTC()
 	run.Interrupted = ctx.Err() != nil
 
 	host := cfg.Host
 	if host == "" {
 		host, _ = os.Hostname()
 	}
+	if cfg.Graph {
+		results = append(results, collector.BuildEvidenceGraph(results, host))
+	}
+	run.FinishedAt = time.Now().UTC()
 	hi := hostinfo.Gather()
 	rep := output.Report{
 		Schema:    output.SchemaVersion,
@@ -419,12 +467,21 @@ func doRun(ctx context.Context, cfg config.Config) (output.Report, error) {
 // It runs on any OS: only reading a host's live logs needs Windows.
 func doEvtxOffline(ctx context.Context, cfg config.Config, spec string) (output.Report, error) {
 	started := time.Now().UTC()
-	files, err := expandEvtxPaths(spec)
+	cfg.Graph = cfg.Graph || cfg.AgentTrace != ""
+	var files []string
+	var err error
+	if !cfg.TraceOnly {
+		files, err = expandEvtxPaths(spec)
+		if err != nil {
+			return output.Report{}, err
+		}
+		if len(files) == 0 {
+			return output.Report{}, fmt.Errorf("-evtx %q matched no .evtx files", spec)
+		}
+	}
+	traceFiles, err := expandAgentTracePaths(cfg.AgentTrace)
 	if err != nil {
 		return output.Report{}, err
-	}
-	if len(files) == 0 {
-		return output.Report{}, fmt.Errorf("-evtx %q matched no .evtx files", spec)
 	}
 
 	sigmaRS, err := loadSigma(cfg)
@@ -442,7 +499,16 @@ func doEvtxOffline(ctx context.Context, cfg config.Config, spec string) (output.
 		}
 		intelProv = intelProvenance(intelDB, cfg)
 	}
-	results := []collector.Result{collector.ParseEventLogFiles(ctx, files, sigmaRS)}
+	var results []collector.Result
+	var names []string
+	if len(files) > 0 {
+		results = append(results, collector.ParseEventLogFiles(ctx, files, sigmaRS))
+		names = append(names, "eventlog")
+	}
+	if len(traceFiles) > 0 {
+		results = append(results, collector.ParseAgentTraceFiles(ctx, traceFiles))
+		names = append(names, "agenttrace")
+	}
 	collector.Correlate(results) // e.g. measure a 1102 clear against the surviving records
 	if cfg.Timeline {
 		results = append(results, collector.BuildTimeline(results))
@@ -453,18 +519,23 @@ func doEvtxOffline(ctx context.Context, cfg config.Config, spec string) (output.
 	if cfg.Intel {
 		results = append(results, collector.AnnotateIntel(results, intelDB))
 	}
+	if cfg.Graph {
+		results = append(results, collector.BuildEvidenceGraph(results, ""))
+	}
 
 	run := output.RunInfo{
-		StartedAt:    started,
-		FinishedAt:   time.Now().UTC(),
-		PID:          os.Getpid(),
-		Args:         os.Args[1:],
-		Collectors:   []string{"eventlog"},
-		Workers:      1,
-		Timeout:      "0s",
-		Intel:        cfg.Intel,
-		IntelDataset: intelProv,
-		Interrupted:  ctx.Err() != nil,
+		StartedAt:       started,
+		FinishedAt:      time.Now().UTC(),
+		PID:             os.Getpid(),
+		Args:            os.Args[1:],
+		Collectors:      names,
+		Workers:         1,
+		Timeout:         "0s",
+		Intel:           cfg.Intel,
+		IntelDataset:    intelProv,
+		Interrupted:     ctx.Err() != nil,
+		Graph:           cfg.Graph,
+		AgentTraceFiles: traceFiles,
 	}
 	if exe, err := os.Executable(); err == nil {
 		run.ExePath = exe
@@ -502,6 +573,35 @@ func doEvtxOffline(ctx context.Context, cfg config.Config, spec string) (output.
 		output.WriteConsoleSummary(os.Stderr, rep, 10)
 	}
 	return rep, nil
+}
+
+// Trace paths are explicit files: no home-directory sweep and no network
+// fetches. Reject directories and oversize lists before live collection starts.
+func expandAgentTracePaths(spec string) ([]string, error) {
+	var files []string
+	seen := map[string]bool{}
+	for _, p := range splitCSV(spec) {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return nil, fmt.Errorf("-agent-trace: %w", err)
+		}
+		if seen[abs] {
+			continue
+		}
+		seen[abs] = true
+		info, err := os.Stat(abs)
+		if err != nil {
+			return nil, fmt.Errorf("-agent-trace %q: %w", p, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("-agent-trace %q is not a regular file", p)
+		}
+		files = append(files, abs)
+		if len(files) > 16 {
+			return nil, errors.New("-agent-trace accepts at most 16 files")
+		}
+	}
+	return files, nil
 }
 
 // expandEvtxPaths turns the -evtx value (comma-separated files and/or

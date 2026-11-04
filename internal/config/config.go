@@ -62,6 +62,15 @@ type Config struct {
 	// Intel. Empty uses the bundled dataset.
 	IntelDB string
 
+	// Investigation features are opt-in. AgentTrace names existing telemetry
+	// files; TraceOnly imports them without collecting this machine.
+	Graph            bool
+	AgentTrace       string
+	TraceOnly        bool
+	Adaptive         bool
+	AdaptiveBudget   time.Duration
+	AdaptiveMaxFiles int
+
 	// Memory scanning (the opt-in "memory" collector and -mem-scan).
 	YaraRules       string        // .yar/.yara file or directory
 	MemPIDs         []int         // restrict to these PIDs (empty = all)
@@ -75,12 +84,14 @@ type Config struct {
 // Default returns baseline settings.
 func Default() Config {
 	return Config{
-		Workers:    6,
-		Timeout:    60 * time.Second,
-		Pretty:     true,
-		Format:     "json",
-		MemBudget:  60 * time.Second,
-		MemTimeout: 15 * time.Minute,
-		MemWorkers: 2,
+		Workers:          6,
+		Timeout:          60 * time.Second,
+		Pretty:           true,
+		Format:           "json",
+		MemBudget:        60 * time.Second,
+		MemTimeout:       15 * time.Minute,
+		MemWorkers:       2,
+		AdaptiveBudget:   15 * time.Second,
+		AdaptiveMaxFiles: 20,
 	}
 }

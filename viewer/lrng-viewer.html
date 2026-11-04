@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-23KWa4CZTOw49hkDDb9h4gedeIN2ZdNwDO9hReWEaRo='; style-src 'sha256-Wc4NmCupTVhifFhPynu7lj87HqfxS67UPc0crnq8tvs='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-PIORoW4UYrHrhgIw+55xxtxrjeqmGvl9oWofXP3/htA='; style-src 'sha256-Op/HuC2j7jtPx7vnLRbpGzohnl4qXDO171RZ8d8TSRY='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>lrng report viewer</title>
 <style>
@@ -251,6 +251,20 @@ td { max-width: 46ch; }
 td .ev { display: block; max-height: 7.2em; overflow: hidden; }
 tr.detail-row td { max-width: none; background: var(--paper); }
 .row-btn { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; font-size: 12.5px; }
+
+/* Evidence graph: bounded neighborhood, with keyboard-accessible nodes. */
+.graph-workspace { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; align-items: start; }
+.graph-picker { max-height: 700px; overflow: auto; }
+.graph-pick { width: 100%; text-align: left; white-space: normal; margin-bottom: 5px; overflow-wrap: anywhere; }
+.graph-pick[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent); }
+.graph-stage { position: relative; height: 480px; background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+.graph-stage canvas { width: 100%; height: 100%; display: block; }
+.graph-node { position: absolute; transform: translate(-50%, -50%); width: 132px; padding: 8px; font-size: 12px; white-space: normal; overflow-wrap: anywhere; max-height: 96px; overflow: hidden; }
+.graph-node.center { border: 2px solid var(--accent); font-weight: 600; }
+.graph-detail { margin-top: 12px; }
+.graph-legend { font-size: 12.5px; color: var(--muted); }
+@media (max-width: 1100px) { .graph-workspace { grid-template-columns: 1fr; } .graph-picker { max-height: 190px; } }
+@media (max-width: 650px) { .graph-stage { display: none; } }
 
 /* Run */
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
@@ -529,7 +543,8 @@ tr.detail-row td { max-width: none; background: var(--paper); }
   // ---- The model -----------------------------------------------------------
   let model = null;
   function buildModel(rep, source) {
-    const results = rep.results.filter(isObj).map((r) => ({
+    const results = rep.results.map((r, sourceIndex) => isObj(r) ? ({
+      sourceIndex,
       name: typeof r.collector === "string" ? r.collector : "(unnamed)",
       started: r.started_at,
       duration: r.duration_ns,
@@ -541,7 +556,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
       })) : [],
       meta: isObj(r.meta) ? r.meta : null,
       errors: Array.isArray(r.errors) ? r.errors.map(plain) : [],
-    }));
+    }) : null).filter(Boolean);
     const byName = new Map();
     for (const r of results) if (!byName.has(r.name)) byName.set(r.name, r);
 
@@ -641,6 +656,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
   const VIEWS = [
     ["findings", "Findings", () => model.findings.length],
     ["processes", "Process tree", () => (model.byName.get("processes") || { records: [] }).records.length],
+    ["graph", "Evidence graph", () => evidenceGraph().nodes.size],
     ["timeline", "Timeline", () => timeline().events.length],
     ["indicators", "Indicators", () => (model.byName.get("iocs") || { records: [] }).records.length],
     ["run", "Run and errors", () => model.results.reduce((n, r) => n + r.errors.length, 0)],
@@ -691,6 +707,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     processes: { q: "", onlyHits: false, open: null, detail: new Set() },
     timeline: { q: "", source: "", onlyHits: false, newest: false, shown: 500 },
     indicators: { q: "", type: "" },
+    graph: { q: "", selected: "", basis: "all", shown: PAGE },
     tables: new Map(),
   };
   let pendingFocus = null; // { kind, key } to scroll to after the next render
@@ -704,7 +721,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     const y = window.scrollY;
     renderNav();
     const main = clear($("main"));
-    const v = { findings: viewFindings, processes: viewProcesses, timeline: viewTimeline, indicators: viewIndicators, run: viewRun, collector: viewCollector }[view];
+    const v = { findings: viewFindings, processes: viewProcesses, graph: viewGraph, timeline: viewTimeline, indicators: viewIndicators, run: viewRun, collector: viewCollector }[view];
     main.append(v(arg));
     if (pendingFocus) {
       const el = pendingFocus.el;
@@ -822,6 +839,8 @@ tr.detail-row td { max-width: none; background: var(--paper); }
       actions.append(h("button", { class: "btn", type: "button", onclick: () => showProcess(rec.fields.pid) }, "Show in the process tree"));
     }
     actions.append(h("button", { class: "btn", type: "button", onclick: () => showRecord(f.ri, f.i) }, `Show in ${f.collector} data`));
+    const graphNode = evidenceGraph().bySource.get(f.ri + ":" + f.i);
+    if (graphNode) actions.append(h("button", { class: "btn", type: "button", onclick: () => focusGraph(graphNode.id) }, "Explore evidence graph"));
     box.append(actions);
     return box;
   }
@@ -831,6 +850,107 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     if (!list.length) return h("p", { class: "faint" }, "No fields.");
     for (const [k, v] of list) dl.append(h("dt", null, k), h("dd", null, valueNode(v)));
     return dl;
+  }
+
+  // ---- Evidence graph ------------------------------------------------------------
+  function evidenceGraph() {
+    if (model.graph) return model.graph;
+    const nodes = new Map(), bySource = new Map(), edges = [], adjacent = new Map();
+    const r = model.byName.get("evidence_graph");
+    let rejected = 0;
+    if (r) {
+      for (const rec of r.records) {
+        const f = rec.fields;
+        if (f.kind !== "node") continue;
+        const ref = f.source_ref;
+        const ri = isObj(ref) ? model.results.findIndex((x) => x.sourceIndex === ref.result) : -1;
+        const source = model.results[ri];
+        if (nodes.size >= 5000 || typeof f.id !== "string" || f.id.length > 100 || nodes.has(f.id) ||
+          !source || source.name !== f.source_collector || !Number.isInteger(ref.record) || ref.record < 0 || !source.records[ref.record]) { rejected++; continue; }
+        const n = { id: f.id, label: plain(f.label).slice(0, 180), type: source.name, ri, i: ref.record, rec: source.records[ref.record] };
+        nodes.set(n.id, n); bySource.set(ri + ":" + n.i, n); adjacent.set(n.id, []);
+      }
+      for (const rec of r.records) {
+        const f = rec.fields;
+        if (f.kind !== "edge") continue;
+        if (edges.length >= 15000 || !nodes.has(f.from) || !nodes.has(f.to) || f.from === f.to || !["observed", "inferred"].includes(f.basis)) { rejected++; continue; }
+        const edge = { from: f.from, to: f.to, basis: f.basis, relation: plain(f.relation).slice(0, 100), explanation: plain(f.explanation).slice(0, 1500) };
+        edges.push(edge); adjacent.get(edge.from).push(edge); adjacent.get(edge.to).push(edge);
+      }
+    }
+    model.graph = { nodes, bySource, edges, adjacent, rejected, meta: r && r.meta };
+    return model.graph;
+  }
+  function focusGraph(id) { state.graph.selected = id; go("graph"); }
+  function viewGraph() {
+    const g = evidenceGraph(), st = state.graph;
+    const wrap = h("section", null, h("h2", { class: "view-title" }, "Evidence graph"),
+      h("p", { class: "view-sub" }, "Follow relationships between source observations. Observed means explicitly reported by a source; it does not mean independently verified. Relationships do not prove causation."));
+    if (!g.nodes.size) {
+      wrap.append(h("p", { class: "empty" }, "This report has no evidence graph. Collect with -graph, -agent-trace or -adaptive to include one.")); return wrap;
+    }
+    if (g.rejected || g.meta && g.meta.truncated) wrap.append(h("p", { class: "warn" }, "Graph coverage is partial: a collection limit was reached or invalid graph entries were omitted."));
+    if (g.meta && g.meta.missing_trace_parents) wrap.append(h("p", { class: "warn" }, plain(g.meta.missing_trace_parents) + " imported span(s) have missing or ambiguous parents. Their earlier activity is unknown."));
+    const sorted = [...g.nodes.values()].sort((a,b) => worstOf(b.rec)-worstOf(a.rec) || a.label.localeCompare(b.label));
+    if (!g.nodes.has(st.selected)) st.selected = sorted[0].id;
+    const selected = g.nodes.get(st.selected);
+    const q = st.q.trim().toLowerCase();
+    const matches = sorted.filter((n) => !q || (n.label+" "+n.type+" "+n.id).toLowerCase().includes(q));
+    const basis = h("select", { class: "pick", "aria-label": "Relationship basis", onchange: (e) => { st.basis = e.target.value; render(); } },
+      ["all", "observed", "inferred"].map((b) => h("option", { value: b, selected: st.basis === b || null }, b === "all" ? "All relationships" : b)));
+    wrap.append(h("div", { class: "filters" }, searchBox(st.q, "Search graph observations", (v) => { st.q = v; st.shown = PAGE; rerenderKeepingFocus(); }), basis));
+    wrap.append(h("p", { class: "count-line" }, `${fmtNum(g.nodes.size)} observations · ${fmtNum(g.edges.length)} relationships · ${fmtNum(matches.length)} search matches`));
+    const picker = h("div", { class: "graph-picker", "aria-label": "Graph observations" });
+    for (const n of matches.slice(0, st.shown)) picker.append(h("button", {
+      class: "btn graph-pick", type: "button", "aria-pressed": n.id === selected.id ? "true" : "false", onclick: () => focusGraph(n.id),
+    }, sevTag(sevName(worstOf(n.rec))), " ", n.label));
+    if (matches.length>st.shown) picker.append(h("button", { class: "btn", type: "button", onclick: () => { st.shown += PAGE; render(); } }, "Show more observations"));
+    const connected = g.adjacent.get(selected.id).filter((e) => st.basis === "all" || e.basis === st.basis);
+    const right = h("div");
+    right.append(graphNeighborhood(g, selected, connected));
+    right.append(h("p", { class: "graph-legend" }, "Solid line: source-reported. Dashed line: inferred. Arrows follow relationship direction. Select any node to explore its neighbors."));
+    const source = h("div", { class: "panel graph-detail" }, h("h3", null, selected.label),
+      h("p", { class: "muted" }, `Source: ${selected.type}, record ${selected.i + 1}.`),
+      h("button", { class: "btn", type: "button", onclick: () => showRecord(selected.ri, selected.i) }, "Open source record"));
+    if (selected.rec.findings.length) source.append(h("ul", { class: "errors" }, selected.rec.findings.map((f) => h("li", null, sevTag(f.severity), " ", plain(f.rule), ": ", plain(f.detail)))));
+    right.append(source);
+    const rows = connected.slice(0, 200).map((e) => h("tr", null,
+      h("td", null, h("button", { class: "row-btn", type: "button", onclick: () => focusGraph(e.from) }, g.nodes.get(e.from).label)),
+      h("td", null, h("strong", null, e.relation), h("div", { class: "muted" }, e.basis)),
+      h("td", null, h("button", { class: "row-btn", type: "button", onclick: () => focusGraph(e.to) }, g.nodes.get(e.to).label)),
+      h("td", null, e.explanation)));
+    right.append(h("h3", null, `Relationships (${fmtNum(connected.length)})`));
+    right.append(rows.length ? h("div", { class: "table-wrap" }, h("table", null,
+      h("thead", null, h("tr", null, ["From", "Relationship", "To", "Evidence and limits"].map((x) => h("th", { scope: "col" }, x)))), h("tbody", null, rows))) : h("p", { class: "empty" }, "No relationships under this filter. An isolated observation does not establish absence of related activity."));
+    if (connected.length > 200) right.append(h("p", { class: "muted" }, "Showing the first 200 relationships for this observation."));
+    wrap.append(h("div", { class: "graph-workspace" }, picker, right)); return wrap;
+  }
+  function graphNeighborhood(g, selected, edges) {
+    const others = new Map();
+    for (const e of edges) { const id = e.from === selected.id ? e.to : e.from; if (!others.has(id) && others.size < 10) others.set(id, g.nodes.get(id)); }
+    const stage = h("div", { class: "graph-stage", "aria-label": "Selected observation and up to ten neighbors" });
+    const canvas = h("canvas", { width: "900", height: "480", "aria-hidden": "true" }); stage.append(canvas);
+    const positions = new Map([[selected.id, { x: 450, y: 240 }]]);
+    let index = 0;
+    for (const [id] of others) { const angle = -Math.PI/2 + index++*2*Math.PI/Math.max(others.size,1); positions.set(id, { x:450+325*Math.cos(angle), y:240+178*Math.sin(angle) }); }
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--muted").trim(); ctx.lineWidth = 1.5;
+      for (const e of edges) {
+        const a = positions.get(e.from), b = positions.get(e.to); if (!a || !b) continue;
+        const angle = Math.atan2(b.y-a.y,b.x-a.x), ex = b.x-70*Math.cos(angle), ey = b.y-45*Math.sin(angle);
+        ctx.setLineDash(e.basis === "inferred" ? [6,5] : []); ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(ex,ey); ctx.stroke();
+        ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(ex-9*Math.cos(angle-0.45),ey-9*Math.sin(angle-0.45)); ctx.lineTo(ex,ey); ctx.lineTo(ex-9*Math.cos(angle+0.45),ey-9*Math.sin(angle+0.45)); ctx.stroke();
+      }
+    }
+    for (const n of [selected, ...others.values()]) {
+      const p = positions.get(n.id);
+      const btn = h("button", { class: "btn graph-node" + (n===selected ? " center" : ""), type: "button", title: n.label,
+        "aria-label": "Focus " + n.label, onclick: () => focusGraph(n.id),
+      }, n.label.slice(0,65), h("div", null, sevTag(sevName(worstOf(n.rec)))));
+      btn.style.left = (p.x/9)+"%"; btn.style.top = (p.y/4.8)+"%"; stage.append(btn);
+    }
+    return stage;
   }
 
   // ---- Process tree --------------------------------------------------------------
@@ -1318,6 +1438,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     state.processes = { q: "", onlyHits: false, open: null, detail: new Set() };
     state.timeline = { q: "", source: "", onlyHits: false, newest: false, shown: 500 };
     state.indicators = { q: "", type: "" };
+    state.graph = { q: "", selected: "", basis: "all", shown: PAGE };
     state.tables = new Map();
     document.title = (plain(parsed.rep.host) || "Report") + " – lrng report";
     renderCase();

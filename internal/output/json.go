@@ -69,21 +69,26 @@ type RunInfo struct {
 	FinishedAt time.Time `json:"finished_at"`
 	PID        int       `json:"pid"`
 	// Elevated is null when it couldn't be determined.
-	Elevated       *bool    `json:"elevated"`
-	Args           []string `json:"args"`
-	Collectors     []string `json:"collectors"`
-	Workers        int      `json:"workers"`
-	Timeout        string   `json:"timeout"`
-	DNSLookups     bool     `json:"dns_lookups"`
-	DNSCorrelation bool     `json:"dns_correlation"`
-	Hashing        bool     `json:"hashing"`
-	YaraRules      string   `json:"yara_rules,omitempty"`
-	Intel          bool     `json:"intel,omitempty"`
-	IntelDataset   string   `json:"intel_dataset,omitempty"`
-	Interrupted    bool     `json:"interrupted,omitempty"`
-	ExeSHA256      string   `json:"exe_sha256,omitempty"`
-	ExePath        string   `json:"exe_path,omitempty"`
-	ElevationErr   string   `json:"elevation_error,omitempty"`
+	Elevated         *bool    `json:"elevated"`
+	Args             []string `json:"args"`
+	Collectors       []string `json:"collectors"`
+	Workers          int      `json:"workers"`
+	Timeout          string   `json:"timeout"`
+	DNSLookups       bool     `json:"dns_lookups"`
+	DNSCorrelation   bool     `json:"dns_correlation"`
+	Hashing          bool     `json:"hashing"`
+	YaraRules        string   `json:"yara_rules,omitempty"`
+	Intel            bool     `json:"intel,omitempty"`
+	IntelDataset     string   `json:"intel_dataset,omitempty"`
+	Interrupted      bool     `json:"interrupted,omitempty"`
+	ExeSHA256        string   `json:"exe_sha256,omitempty"`
+	ExePath          string   `json:"exe_path,omitempty"`
+	ElevationErr     string   `json:"elevation_error,omitempty"`
+	Graph            bool     `json:"evidence_graph,omitempty"`
+	AgentTraceFiles  []string `json:"agent_trace_files,omitempty"`
+	Adaptive         bool     `json:"adaptive,omitempty"`
+	AdaptiveBudget   string   `json:"adaptive_budget,omitempty"`
+	AdaptiveMaxFiles int      `json:"adaptive_max_files,omitempty"`
 }
 
 // Summary rolls up findings so an analyst sees the headline before

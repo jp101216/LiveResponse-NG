@@ -1,5 +1,9 @@
 # Architecture
 
+The opt-in graph, agent telemetry import and adaptive follow-up contracts are
+documented in [investigations.md](investigations.md). They use ordinary
+synthetic results and original-record references within the existing schema.
+
 ## Layout
 
 ```

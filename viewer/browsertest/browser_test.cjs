@@ -78,6 +78,14 @@ function hostileReport() {
       ] },
       { collector: "iocs", records: [{ fields: { type: pick(0), value: pick(1), max_severity: pick(2), rules: [pick(3), pick(4)], source_count: pick(5), intel_org: pick(6), intel_asn: pick(7), intel_country: pick(8), intel_categories: [pick(9)] } }] },
       { collector: "network", records: Array.from({ length: 450 }, (_, i) => ({ fields: { remote: pick(i), pid: i, state: pick(i + 3) }, findings: i % 7 ? [] : [{ rule: pick(i), severity: ["critical", "suspect", "notable", "info"][i % 4], technique: "T1071.001", confidence: i % 100, detail: pick(i + 1) }] })) },
+      { collector: "evidence_graph", records: [
+        { fields: { kind: "node", id: "a", label: pick(0), source_collector: "processes", source_ref: { result: 3, record: 0 } } },
+        { fields: { kind: "node", id: "b", label: pick(1), source_collector: "network", source_ref: { result: 7, record: 0 } } },
+        { fields: { kind: "node", id: "invalid", label: pick(2), source_ref: { result: 99999, record: -1 } } },
+        { fields: { kind: "edge", from: "a", to: "b", basis: "inferred", relation: pick(3), explanation: pick(4) } },
+        { fields: { kind: "edge", from: "b", to: "a", basis: "observed", relation: pick(5), explanation: pick(6) } },
+        { fields: { kind: "edge", from: "missing", to: "b", basis: pick(7) } },
+      ], meta: { truncated: true, missing_trace_parents: 2 } },
     ],
     summary: { findings: pick(0), by_rule: { [pick(1)]: 1 } },
   };
@@ -110,7 +118,7 @@ const CLICK = { timeout: 8000 };
 
 async function exercise(page, where) {
   // Every view, then every collector's data; open everything that opens.
-  const views = ["findings", "processes", "timeline", "indicators", "run"];
+  const views = ["findings", "processes", "graph", "timeline", "indicators", "run"];
   for (const v of views) {
     await page.evaluate((x) => { location.hash = "#" + x; }, v);
     await page.waitForTimeout(60);
@@ -131,6 +139,17 @@ async function exercise(page, where) {
           await search.fill("deep2999", CLICK); await page.waitForTimeout(250); await search.fill("", CLICK); await page.waitForTimeout(250);
         });
       }
+    }
+    if (v === "graph") {
+      const nodes = page.locator(".graph-node");
+      if (await nodes.count()) await act(where, "focus graph neighbor", () => nodes.last().click(CLICK));
+      const basis = page.getByLabel("Relationship basis");
+      if (await basis.count()) { await basis.selectOption("observed"); await basis.selectOption("inferred"); await basis.selectOption("all"); }
+      const source = page.getByRole("button", { name: "Open source record", exact: true });
+      if (await source.count()) await act(where, "open graph source record", async () => {
+        await source.click(CLICK);
+        if (!(await page.evaluate(() => location.hash)).startsWith("#collector/")) throw new Error("source record navigation failed");
+      });
     }
   }
   const navs = await page.locator("nav .nav-item").evaluateAll((els) => els.map((e) => e.textContent));

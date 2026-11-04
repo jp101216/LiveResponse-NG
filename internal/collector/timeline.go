@@ -144,6 +144,7 @@ func collectTimes(v any, key string, add func(time.Time, string)) {
 // timelineDetailKeys are the identifying fields used to label a timeline entry,
 // in priority order; the first couple present are joined.
 var timelineDetailKeys = []string{
+	"tool", "agent", "operation",
 	"name", "executable", "image", "image_path", "path", "file",
 	"command_line", "command", "service_name", "provider", "channel",
 	"event_id", "target_user_name", "user", "account",

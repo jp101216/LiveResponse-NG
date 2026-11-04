@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `-graph`: a bounded evidence graph with original-record references,
+  explicitly observed/inferred relationships, and an interactive offline
+  viewer with search, neighbor navigation and source-record links.
+- `-agent-trace`: existing normalized JSONL or OTLP/JSON agent telemetry
+  import, with source hashes, span lineage and metadata-only content handling.
+  `-trace-only` imports offline without collecting this machine. Missing spans
+  and ambiguous process identities are left unknown.
+- `-adaptive`: one deterministic follow-up pass for executable paths on
+  suspect/critical live records, with file/time/hash budgets, trigger
+  references and per-file statuses. Existing no-hash/no-sign settings apply.
+- Harmless agent-trace demo, investigation format documentation, attribution
+  and resource-limit regressions, and hostile graph data in viewer tests.
+
+No agent dependencies added; report schema remains 1.2. These additions are
+opt-in and do not execute recorded tool actions or perform remediation.
+
 ## 0.14.1
 
 Maintenance release for evidence attribution, memory-scan error reporting, and

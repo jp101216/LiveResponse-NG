@@ -67,6 +67,9 @@ type Config struct {
 	Graph            bool
 	AgentTrace       string
 	TraceOnly        bool
+	CloudAudit       string
+	CloudOnly        bool
+	LLMBurst         int
 	Adaptive         bool
 	AdaptiveBudget   time.Duration
 	AdaptiveMaxFiles int
@@ -93,5 +96,6 @@ func Default() Config {
 		MemWorkers:       2,
 		AdaptiveBudget:   15 * time.Second,
 		AdaptiveMaxFiles: 20,
+		LLMBurst:         100,
 	}
 }

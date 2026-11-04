@@ -1,5 +1,19 @@
 # Demo
 
+## `cloud-audit.jsonl`
+
+Four synthetic audit events demonstrate offline LLM resource-abuse analysis.
+No cloud account is accessed and no depicted action is executed:
+
+```sh
+lrng -cloud-audit demo/cloud-audit.jsonl -cloud-only -llm-burst 3 -format html -out cloud-demo.html
+```
+
+The deliberately small threshold produces `llm.logging_disabled`,
+`llm.invocation_burst` and `llm.possible_resource_hijack`. The offline graph
+links the analysis to its source events. See
+[the format and limits](../docs/modern-detections.md).
+
 ## `linux-detection-demo.sh`
 
 A safe, self-cleaning demonstration of what `lrng` flags on a compromised Linux

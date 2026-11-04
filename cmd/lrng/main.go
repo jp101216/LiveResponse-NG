@@ -83,6 +83,9 @@ func main() {
 	flag.BoolVar(&cfg.Graph, "graph", false, "add an evidence graph with source references and observed/inferred relationships")
 	flag.StringVar(&cfg.AgentTrace, "agent-trace", "", "import existing agent telemetry files (normalized JSONL or OTLP JSON; comma-separated); implies -graph")
 	flag.BoolVar(&cfg.TraceOnly, "trace-only", false, "with -agent-trace, import telemetry offline without collecting this host")
+	flag.StringVar(&cfg.CloudAudit, "cloud-audit", "", "import model-service cloud audit files (native AWS/GCP/Azure JSON or normalized JSONL; comma-separated); implies -graph")
+	flag.BoolVar(&cfg.CloudOnly, "cloud-only", false, "with -cloud-audit, analyze supplied logs offline without collecting this host")
+	flag.IntVar(&cfg.LLMBurst, "llm-burst", cfg.LLMBurst, "cloud analysis: successful model calls in 5 minutes that constitute a volume finding (1-100000; not a learned baseline)")
 	flag.BoolVar(&cfg.Adaptive, "adaptive", false, "follow suspect/critical live findings with bounded local file metadata and hashing; implies -graph")
 	flag.DurationVar(&cfg.AdaptiveBudget, "adaptive-budget", cfg.AdaptiveBudget, "time limit for the adaptive follow-up pass")
 	flag.IntVar(&cfg.AdaptiveMaxFiles, "adaptive-max-files", cfg.AdaptiveMaxFiles, "maximum files in the adaptive follow-up pass (1-200)")
@@ -94,10 +97,10 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	if *evtxOffline != "" && (cfg.Adaptive || cfg.TraceOnly) {
-		usageErrorOn(errors.New("-evtx cannot be combined with -adaptive or -trace-only"))
+	if *evtxOffline != "" && (cfg.Adaptive || cfg.TraceOnly || cfg.CloudOnly) {
+		usageErrorOn(errors.New("-evtx cannot be combined with -adaptive, -trace-only or -cloud-only"))
 	}
-	if cfg.AgentTrace != "" || cfg.Adaptive {
+	if cfg.AgentTrace != "" || cfg.Adaptive || cfg.CloudAudit != "" {
 		cfg.Graph = true
 	}
 	if cfg.IntelDB != "" {
@@ -143,7 +146,7 @@ func main() {
 	case *memScan != 0:
 		exitOn(doMemScan(ctx, cfg, *memScan))
 		return
-	case *evtxOffline != "" || cfg.TraceOnly:
+	case *evtxOffline != "" || cfg.TraceOnly || cfg.CloudOnly:
 		rep, err := doEvtxOffline(ctx, cfg, *evtxOffline)
 		exitOn(err)
 		if failOnMet(rep.Summary, cfg.FailOn) {
@@ -179,6 +182,16 @@ func validate(cfg config.Config, args []string, memScan int) error {
 		return fmt.Errorf("-fail-on must be one of info, notable, suspect, critical")
 	case cfg.TraceOnly && cfg.AgentTrace == "":
 		return errors.New("-trace-only requires -agent-trace")
+	case cfg.CloudOnly && cfg.CloudAudit == "":
+		return errors.New("-cloud-only requires -cloud-audit")
+	case cfg.CloudOnly && cfg.TraceOnly:
+		return errors.New("choose one offline mode: -cloud-only or -trace-only")
+	case cfg.CloudOnly && cfg.Adaptive:
+		return errors.New("-adaptive requires a live run; imported cloud events cannot select host file reads")
+	case cfg.CloudOnly && (memScan != 0 || cfg.YaraRules != "" || len(cfg.MemPIDs) > 0 || len(cfg.Collectors) > 0 || cfg.SigmaRules != ""):
+		return errors.New("-cloud-only cannot be combined with live collector, memory-scan or Sigma options")
+	case cfg.LLMBurst < 1 || cfg.LLMBurst > 100000:
+		return errors.New("-llm-burst must be between 1 and 100000")
 	case cfg.TraceOnly && cfg.Adaptive:
 		return errors.New("-adaptive requires a live run; imported telemetry cannot supply local file-read targets")
 	case cfg.TraceOnly && (memScan != 0 || cfg.YaraRules != "" || len(cfg.MemPIDs) > 0 || len(cfg.Collectors) > 0 || cfg.SigmaRules != ""):
@@ -221,6 +234,7 @@ Usage: lrng [flags]
   lrng -intel -iocs -out host.json     attribute remote IPs offline (ASN/country/cloud/Tor); enriches the IOC set
   lrng -graph -format html -out case.html   explore the evidence graph offline
   lrng -agent-trace spans.jsonl -trace-only -out trace.json   import existing agent telemetry only
+	  lrng -cloud-audit audit.json -cloud-only -out cloud.html -format html   offline LLMjacking heuristics
   lrng -adaptive -adaptive-budget 15s -out host.json   bounded follow-up of suspect local executables
   lrng -list                           collectors available on this OS
 
@@ -307,8 +321,12 @@ func selectCollectors(cfg config.Config) ([]collector.Collector, error) {
 
 func doRun(ctx context.Context, cfg config.Config) (output.Report, error) {
 	started := time.Now().UTC()
-	cfg.Graph = cfg.Graph || cfg.AgentTrace != "" || cfg.Adaptive
+	cfg.Graph = cfg.Graph || cfg.AgentTrace != "" || cfg.Adaptive || cfg.CloudAudit != ""
 	traceFiles, err := expandAgentTracePaths(cfg.AgentTrace)
+	if err != nil {
+		return output.Report{}, err
+	}
+	cloudFiles, err := expandEvidencePaths(cfg.CloudAudit, "-cloud-audit")
 	if err != nil {
 		return output.Report{}, err
 	}
@@ -337,6 +355,7 @@ func doRun(ctx context.Context, cfg config.Config) (output.Report, error) {
 		Intel:           cfg.Intel,
 		Graph:           cfg.Graph,
 		AgentTraceFiles: traceFiles,
+		CloudAuditFiles: cloudFiles,
 		Adaptive:        cfg.Adaptive,
 	}
 	if cfg.Adaptive {
@@ -400,6 +419,11 @@ func doRun(ctx context.Context, cfg config.Config) (output.Report, error) {
 	results := d.Run(ctx, selected)
 	if len(traceFiles) > 0 {
 		results = append(results, collector.ParseAgentTraceFiles(ctx, traceFiles))
+		run.Collectors = append(run.Collectors, "agenttrace")
+	}
+	if len(cloudFiles) > 0 {
+		results = append(results, collector.ParseCloudAuditFiles(ctx, cloudFiles, collector.CloudAuditOptions{BurstThreshold: cfg.LLMBurst}))
+		run.Collectors = append(run.Collectors, "cloudaudit")
 	}
 	collector.Correlate(results) // cross-reference the event log against the live state
 	if cfg.Adaptive {
@@ -467,10 +491,10 @@ func doRun(ctx context.Context, cfg config.Config) (output.Report, error) {
 // It runs on any OS: only reading a host's live logs needs Windows.
 func doEvtxOffline(ctx context.Context, cfg config.Config, spec string) (output.Report, error) {
 	started := time.Now().UTC()
-	cfg.Graph = cfg.Graph || cfg.AgentTrace != ""
+	cfg.Graph = cfg.Graph || cfg.AgentTrace != "" || cfg.CloudAudit != ""
 	var files []string
 	var err error
-	if !cfg.TraceOnly {
+	if !cfg.TraceOnly && !cfg.CloudOnly {
 		files, err = expandEvtxPaths(spec)
 		if err != nil {
 			return output.Report{}, err
@@ -480,6 +504,10 @@ func doEvtxOffline(ctx context.Context, cfg config.Config, spec string) (output.
 		}
 	}
 	traceFiles, err := expandAgentTracePaths(cfg.AgentTrace)
+	if err != nil {
+		return output.Report{}, err
+	}
+	cloudFiles, err := expandEvidencePaths(cfg.CloudAudit, "-cloud-audit")
 	if err != nil {
 		return output.Report{}, err
 	}
@@ -509,6 +537,10 @@ func doEvtxOffline(ctx context.Context, cfg config.Config, spec string) (output.
 		results = append(results, collector.ParseAgentTraceFiles(ctx, traceFiles))
 		names = append(names, "agenttrace")
 	}
+	if len(cloudFiles) > 0 {
+		results = append(results, collector.ParseCloudAuditFiles(ctx, cloudFiles, collector.CloudAuditOptions{BurstThreshold: cfg.LLMBurst}))
+		names = append(names, "cloudaudit")
+	}
 	collector.Correlate(results) // e.g. measure a 1102 clear against the surviving records
 	if cfg.Timeline {
 		results = append(results, collector.BuildTimeline(results))
@@ -536,6 +568,7 @@ func doEvtxOffline(ctx context.Context, cfg config.Config, spec string) (output.
 		Interrupted:     ctx.Err() != nil,
 		Graph:           cfg.Graph,
 		AgentTraceFiles: traceFiles,
+		CloudAuditFiles: cloudFiles,
 	}
 	if exe, err := os.Executable(); err == nil {
 		run.ExePath = exe
@@ -578,12 +611,16 @@ func doEvtxOffline(ctx context.Context, cfg config.Config, spec string) (output.
 // Trace paths are explicit files: no home-directory sweep and no network
 // fetches. Reject directories and oversize lists before live collection starts.
 func expandAgentTracePaths(spec string) ([]string, error) {
+	return expandEvidencePaths(spec, "-agent-trace")
+}
+
+func expandEvidencePaths(spec, option string) ([]string, error) {
 	var files []string
 	seen := map[string]bool{}
 	for _, p := range splitCSV(spec) {
 		abs, err := filepath.Abs(p)
 		if err != nil {
-			return nil, fmt.Errorf("-agent-trace: %w", err)
+			return nil, fmt.Errorf("%s: %w", option, err)
 		}
 		if seen[abs] {
 			continue
@@ -591,14 +628,14 @@ func expandAgentTracePaths(spec string) ([]string, error) {
 		seen[abs] = true
 		info, err := os.Stat(abs)
 		if err != nil {
-			return nil, fmt.Errorf("-agent-trace %q: %w", p, err)
+			return nil, fmt.Errorf("%s %q: %w", option, p, err)
 		}
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("-agent-trace %q is not a regular file", p)
+			return nil, fmt.Errorf("%s %q is not a regular file", option, p)
 		}
 		files = append(files, abs)
 		if len(files) > 16 {
-			return nil, errors.New("-agent-trace accepts at most 16 files")
+			return nil, fmt.Errorf("%s accepts at most 16 files", option)
 		}
 	}
 	return files, nil

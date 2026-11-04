@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"syscall"
 	"time"
@@ -53,7 +54,7 @@ func collectModules(ctx context.Context, opts RunOptions) (Result, error) {
 		res.Fail(err.Error())
 	}
 
-	scanned, inaccessible := 0, 0
+	scanned, inaccessible, signatureChecks := 0, 0, 0
 	for _, p := range procs {
 		if err := ctx.Err(); err != nil {
 			res.Fail("cancelled: " + err.Error())
@@ -62,6 +63,7 @@ func collectModules(ctx context.Context, opts RunOptions) (Result, error) {
 		if p.pid == 0 || p.pid == 4 { // Idle / System have no user-mode modules
 			continue
 		}
+		image, created := moduleProcessIdentity(p.pid)
 		mods, err := processModules(p.pid)
 		if err != nil {
 			inaccessible++ // access denied, protected, or a 64-bit target from a 32-bit lrng
@@ -94,10 +96,48 @@ func collectModules(ctx context.Context, opts RunOptions) (Result, error) {
 			"module_count": len(list),
 			"modules":      list,
 		}
+		imageAfter, createdAfter := moduleProcessIdentity(p.pid)
+		identityOK := image != "" && !created.IsZero() && created.Equal(createdAfter) && strings.EqualFold(image, imageAfter)
+		if identityOK {
+			fields["image_path"], fields["process_created_at"] = image, created
+		}
+		var candidates []map[string]any
+		var sideFindings []Finding
+		if identityOK && !self {
+			hostSig := SignatureResult{}
+			checked := 0
+			for _, m := range mods {
+				if !sideLoadCandidate(image, m.Path) {
+					continue
+				}
+				if checked >= 8 || signatureChecks >= 128 || ctx.Err() != nil {
+					fields["sideload_checks_partial"] = true
+					break
+				}
+				checked++
+				dllSig := SignatureResult{}
+				if opts.Signer != nil {
+					if checked == 1 && boundedSignatureFile(image) {
+						hostSig = opts.Signer.Verify(ctx, image)
+						signatureChecks++
+					}
+					if signatureChecks < 128 && boundedSignatureFile(m.Path) {
+						dllSig = opts.Signer.Verify(ctx, m.Path)
+						signatureChecks++
+					}
+				}
+				candidates = append(candidates, map[string]any{"path": m.Path, "host_signature_state": hostSig.State.String(), "module_signature_state": dllSig.State.String(), "module_signer": dllSig.Signer})
+				sideFindings = mergeFindings(sideFindings, sideLoadFinding(image, m.Path, hostSig, dllSig)...)
+			}
+		}
+		if len(candidates) > 0 {
+			fields["side_load_candidates"] = candidates
+		}
 		if self {
 			fields["lrng_component"] = true
 		}
 		var findings []Finding
+		findings = append(findings, sideFindings...)
 		for _, set := range []struct {
 			mods []flagged
 			sev  Severity
@@ -125,7 +165,31 @@ func collectModules(ctx context.Context, opts RunOptions) (Result, error) {
 	}
 	res.SetMeta("processes_scanned", scanned)
 	res.SetMeta("processes_inaccessible", inaccessible)
+	res.SetMeta("sideload_signature_checks", signatureChecks)
+	res.SetMeta("sideload_limits", "up to 8 adjacent system-DLL candidates per process; 128 signature checks per run; regular files up to 8 MiB; -no-sign leaves signature evidence unknown")
 	return res.Finish(), nil
+}
+
+func boundedSignatureFile(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular() && st.Size() <= 8<<20
+}
+
+func moduleProcessIdentity(pid uint32) (string, time.Time) {
+	h, err := syscall.OpenProcess(processQueryLimitedInformation, false, pid)
+	if err != nil {
+		return "", time.Time{}
+	}
+	defer syscall.CloseHandle(h)
+	path, err := queryImagePath(h)
+	if err != nil {
+		return "", time.Time{}
+	}
+	var c, e, k, u syscall.Filetime
+	if syscall.GetProcessTimes(h, &c, &e, &k, &u) != nil || e.HighDateTime != 0 || e.LowDateTime != 0 {
+		return "", time.Time{}
+	}
+	return path, time.Unix(0, c.Nanoseconds()).UTC()
 }
 
 func asStrings(v any) []string {

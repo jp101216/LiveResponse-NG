@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- ClickFix-family lure analytics and account-scoped Run-dialog command
+  correlation. Windows `runhistory` reads loaded user hives and distinguishes
+  key timestamps from execution times.
+- IDE tunnel observations and contextual findings using verified ancestry,
+  including bounded original-filename inspection for renamed Windows files.
+- Windows `wfp`: bounded, read-only native enumeration of enabled app-specific
+  BLOCK filters, provider/condition metadata and security-agent targeting
+  findings. Effective communication loss is left unverified.
+- Signed-host/adjacent-DLL sideloading candidates with bounded signature
+  checks honoring `-no-sign`, plus suspicious-child correlation gated on
+  exact process identity.
+- `-cloud-audit`, `-cloud-only` and `-llm-burst`: offline model-resource-abuse
+  heuristics over AWS/GCP/Azure audit metadata and normalized JSONL, including
+  credential/permission-change context without credential values. Preserve
+  source hashes/positions, bound inputs and deduplicate exports. Stream completions,
+  failed calls and unknown outcomes do not inflate invocation rates. No cloud
+  calls or request/response content collection.
+- Evidence graph source references, harmless cloud demo and regressions for
+  identity scoping, thresholds, native layouts, limits and benign activity.
+
+No dependency changes; report schema remains 1.2.
+
+### Fixed
+
+- Linux live-process test fixtures use their own test executables and explicit
+  readiness signals instead of renamed system utilities, which can exit
+  immediately on newer multicall coreutils installations. Production hashing
+  and sensitive-process exclusion behavior is unchanged.
+
 ## 0.15.0
 
 ### Added

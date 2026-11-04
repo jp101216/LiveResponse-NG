@@ -3,9 +3,11 @@
 package collector
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,16 +15,16 @@ import (
 	"time"
 )
 
-// TestHashProcessImageOfDeletedBinary runs a copy of sleep, deletes the copy,
+// TestHashProcessImageOfDeletedBinary runs a copy of our test helper, deletes it,
 // and checks the process collector's hashing still reaches the binary through
 // /proc/<pid>/exe — the hash of a self-deleting payload is exactly what an
 // analyst needs, and the path text alone ("… (deleted)") can't provide it.
 func TestHashProcessImageOfDeletedBinary(t *testing.T) {
-	sleep, err := exec.LookPath("sleep")
+	self, err := os.Executable()
 	if err != nil {
-		t.Skip("no sleep binary")
+		t.Fatal(err)
 	}
-	data, err := os.ReadFile(sleep)
+	data, err := os.ReadFile(self)
 	if err != nil {
 		t.Skip(err)
 	}
@@ -32,18 +34,23 @@ func TestHashProcessImageOfDeletedBinary(t *testing.T) {
 	if err := os.WriteFile(payload, data, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(payload, "30")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, payload, "-test.run=^TestProcessImageHelper$")
+	cmd.Env = append(os.Environ(), "LRNG_PROCEXE_HELPER=1")
+	ready, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Start(); err != nil {
-		t.Skipf("can't run a copied binary here: %v", err)
+		t.Fatalf("can't run the process-image fixture: %v", err)
 	}
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 	pid := cmd.Process.Pid
-	// Wait for the exec to land, then delete the file out from under it.
-	for i := 0; i < 50; i++ {
-		if exe, _ := os.Readlink(procExePath(pid)); exe == payload {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// A ready message proves the helper reached Go code. A renamed system
+	// utility may be a multicall wrapper that immediately exits on argv[0].
+	if line, err := bufio.NewReader(ready).ReadString('\n'); err != nil || line != "lrng-procexe-ready\n" {
+		t.Fatalf("process-image fixture not ready: %q, %v", line, err)
 	}
 	if err := os.Remove(payload); err != nil {
 		t.Fatal(err)
@@ -75,6 +82,15 @@ func TestHashProcessImageOfDeletedBinary(t *testing.T) {
 	if key1 == "" || key1 != key2 {
 		t.Fatalf("exe identity unstable: %q vs %q", key1, key2)
 	}
+}
+
+func TestProcessImageHelper(t *testing.T) {
+	if os.Getenv("LRNG_PROCEXE_HELPER") != "1" {
+		return
+	}
+	fmt.Println("lrng-procexe-ready")
+	time.Sleep(time.Minute)
+	os.Exit(0)
 }
 
 func TestHashProcessImageSelf(t *testing.T) {

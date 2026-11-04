@@ -239,6 +239,23 @@ is given. A collector implementing `Timeout()`
 gets that budget instead of the dispatcher-wide `-timeout` (memory scanning
 takes minutes, not seconds).
 
+### Contextual detections and cloud audit import
+
+`runhistory_windows.go` reads bounded RunMRU values from loaded user hives;
+`wfp_windows.go` enumerates enabled app-specific BLOCK filters with native
+read-only APIs. Neither writes host configuration. `modernrules.go` provides
+portable command, module-candidate and WFP classification logic.
+`moderncorrelate.go` enriches original observations and retains evidence
+references, checking creation times before process/module joins.
+
+`cloudaudit.go` imports allowlisted metadata from explicit files. It bounds
+input, preserves source hashes/positions, deduplicates request identities and
+analyzes successful model-call windows within cloud identity scopes. It never
+executes input actions or turns imported resources into local file-read
+targets. `-cloud-only` uses the existing offline report pipeline. Graph
+relationships link contextual findings and cloud windows to their sources.
+See [Modern detections](modern-detections.md) for schemas and evidence limits.
+
 ### Memory collector
 
 1. List processes (Toolhelp + image paths on Windows, `/proc` on Linux).

@@ -73,6 +73,32 @@ lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 
 ---
 
+## Evidence graphs and guided investigation
+
+Use `-graph` to connect source observations in an interactive offline evidence
+graph. Each relationship says whether the source explicitly reported it or it
+was inferred, explains its limits, and links back to the original records.
+
+`-agent-trace spans.jsonl` imports existing normalized JSONL or OpenTelemetry
+JSON agent spans and enables the graph. `-trace-only` imports them without
+collecting this machine. Raw prompts, responses and tool arguments are omitted;
+source-file hashes and span relationships are retained.
+
+`-adaptive` adds one bounded follow-up pass over executable paths attached to
+suspect/critical live findings: file metadata, capped hashing and Windows
+signature checks. It records why each target was selected and respects
+`-no-hash` and `-no-sign`. It also enables the graph.
+
+```sh
+lrng -no-dns -graph -format html -out case.html
+lrng -agent-trace demo/agent-trace.jsonl -trace-only -format html -out trace.html
+lrng -no-dns -adaptive -adaptive-budget 15s -adaptive-max-files 20 -out host.json
+```
+
+See [Investigation features](docs/investigations.md) for formats, budgets,
+evidence semantics and current scope. These are opt-in additions to the
+existing schema 1.2 report; existing report readers keep working.
+
 ## Why
 
 Classic endpoint triage dumps artifacts; signatures then try to match known

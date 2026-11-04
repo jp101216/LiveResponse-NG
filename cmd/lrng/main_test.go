@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -81,6 +82,11 @@ func TestValidate(t *testing.T) {
 		{func(c *config.Config) { c.Format = "xml" }, nil, 0, "-format"},
 		{func(c *config.Config) {}, nil, -4, "-mem-scan"},
 		{func(c *config.Config) { c.FailOn = "high" }, nil, 0, "-fail-on"},
+		{func(c *config.Config) { c.TraceOnly = true }, nil, 0, "requires -agent-trace"},
+		{func(c *config.Config) { c.TraceOnly = true; c.AgentTrace = "trace.jsonl"; c.Adaptive = true }, nil, 0, "live run"},
+		{func(c *config.Config) { c.AdaptiveBudget = 0 }, nil, 0, "-adaptive-budget"},
+		{func(c *config.Config) { c.AdaptiveMaxFiles = 201 }, nil, 0, "-adaptive-max-files"},
+		{func(c *config.Config) { c.TraceOnly = true; c.AgentTrace = "trace.jsonl" }, nil, 42, "cannot be combined"},
 	}
 	for _, b := range bad {
 		c := config.Default()
@@ -88,6 +94,34 @@ func TestValidate(t *testing.T) {
 		if err := validate(c, b.args, b.pid); err == nil || !strings.Contains(err.Error(), b.want) {
 			t.Errorf("want error containing %q, got %v", b.want, err)
 		}
+	}
+}
+
+func TestAgentTraceOfflineIncludesGraphWithoutHostCollection(t *testing.T) {
+	dir := t.TempDir()
+	trace := filepath.Join(dir, "trace.jsonl")
+	data := `{"trace_id":"11111111111111111111111111111111","span_id":"1111111111111111","operation":"execute_tool","tool":"read_file"}`
+	if err := os.WriteFile(trace, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.AgentTrace = trace
+	cfg.TraceOnly = true
+	cfg.Quiet = true
+	cfg.Format = output.FormatHTML
+	cfg.Output = filepath.Join(dir, "case.html")
+	rep, err := doEvtxOffline(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Host != "(offline)" || rep.HostInfo != nil || !rep.Run.Graph || rep.Run.DNSLookups || len(rep.Results) != 2 || rep.Results[0].Collector != "agenttrace" || rep.Results[1].Collector != "evidence_graph" {
+		t.Fatalf("offline mode collected host state: %+v", rep)
+	}
+	if _, err = os.Stat(cfg.Output + ".sha256"); err != nil {
+		t.Fatal("report checksum missing", err)
+	}
+	if rep.Summary.Findings != 0 {
+		t.Fatal("imported telemetry must not itself imply a malicious finding")
 	}
 }
 

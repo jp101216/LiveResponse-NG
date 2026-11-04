@@ -1,0 +1,82 @@
+{
+  "schema_version": "1.2",
+  "tool": "liveresponse-ng",
+  "tool_version": "demo",
+  "run_id": "demo-after",
+  "host": "LAB-01",
+  "os": "windows",
+  "arch": "amd64",
+  "collected_at": "2026-11-02T10:00:00Z",
+  "run": {
+    "started_at": "2026-11-02T10:00:00Z",
+    "finished_at": "2026-11-02T10:00:00Z",
+    "elevated": true,
+    "collectors": [
+      "services",
+      "autoruns",
+      "processes"
+    ]
+  },
+  "results": [
+    {
+      "collector": "services",
+      "started_at": "2026-11-01T10:00:00Z",
+      "duration_ns": 1,
+      "records": [
+        {
+          "fields": {
+            "name": "ExampleService",
+            "image_path": "C:\\Example\\v2\\service.exe",
+            "start": "automatic"
+          },
+          "findings": [
+            {
+              "rule": "demo.service_change",
+              "severity": "notable",
+              "confidence": 50,
+              "detail": "Synthetic fixture: review the changed ExampleService image path. No payload or malicious action."
+            }
+          ]
+        },
+        {
+          "fields": {
+            "name": "AfterOnly",
+            "image_path": "C:\\Example\\new.exe",
+            "start": "manual"
+          }
+        }
+      ]
+    },
+    {
+      "collector": "autoruns",
+      "started_at": "2026-11-01T10:00:00Z",
+      "duration_ns": 1,
+      "records": [
+        {
+          "fields": {
+            "kind": "run",
+            "location": "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "name": "Example",
+            "command": "C:\\Example\\v2\\tray.exe"
+          }
+        }
+      ]
+    },
+    {
+      "collector": "processes",
+      "started_at": "2026-11-01T10:00:00Z",
+      "duration_ns": 1,
+      "records": [
+        {
+          "fields": {
+            "pid": 4242,
+            "name": "other-example.exe",
+            "image_path": "C:\\Example\\v2\\other-example.exe",
+            "created_at": "2026-11-02T09:30:00Z"
+          }
+        }
+      ]
+    }
+  ],
+  "summary": {}
+}

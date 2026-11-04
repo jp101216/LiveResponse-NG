@@ -61,3 +61,13 @@ LRNG=/path/to/lrng REPORT=/tmp/demo.html ./demo/linux-detection-demo.sh
 Run as root to see processes, sockets and persistence across all users (the way a
 responder would); unprivileged, it still catches everything the demo stages under
 your own account.
+
+## Case workspace fixtures
+
+`case-before.json` and `case-after.json` are harmless synthetic reports from
+LAB-01. The service image and autorun command change, one service is observed
+only before and another only after. A reused process PID is deliberately not
+compared. `case-other-host.json` keeps a second host and its coverage gap
+separate. There are no executable payloads or collection actions in these files.
+
+See [offline case commands and comparison semantics](../docs/cases.md).

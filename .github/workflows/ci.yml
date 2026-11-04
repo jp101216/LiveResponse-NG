@@ -104,12 +104,20 @@ jobs:
           ./lrng -cloud-audit demo/cloud-audit.jsonl -cloud-only -llm-burst 3 -quiet -out cloud.json
           ./lrng -cloud-audit demo/cloud-audit.jsonl -cloud-only -llm-burst 3 -quiet -format jsonl -out cloud.jsonl
           ./lrng -cloud-audit demo/cloud-audit.jsonl -cloud-only -llm-burst 3 -quiet -format html -out cloud.html
+          ./lrng -case-report demo/case-before.json -case-report demo/case-after.json -case-report demo/case-other-host.json -case-name IR-DEMO -quiet -out case.json
+          ./lrng -case-report demo/case-before.json -case-report demo/case-after.json -case-report demo/case-other-host.json -case-name IR-DEMO -quiet -format html -out case.html
+          ./lrng -case-report demo/case-before.json -case-report demo/case-after.json -compare -same-host -quiet -out comparison.json
+          ./lrng -case-report demo/case-before.json -case-report demo/case-after.json -compare -same-host -quiet -format html -out comparison.html
       - name: Playwright and Chromium
         run: |
           npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright@1.63.0
           "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install chromium
       - name: report loader regressions (no browser needed)
-        run: node --test viewer/browsertest/parse_test.cjs viewer/browsertest/graph_test.cjs
+        run: node --test viewer/browsertest/parse_test.cjs viewer/browsertest/graph_test.cjs viewer/browsertest/case_test.cjs
+      - name: case workspace and comparison source navigation
+        env:
+          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+        run: node viewer/browsertest/case_browser_test.cjs case.json case.html comparison.json comparison.html
       - name: walk every view; nothing from a report may execute or load
         env:
           NODE_PATH: ${{ runner.temp }}/pw/node_modules

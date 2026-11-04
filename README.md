@@ -1663,6 +1663,27 @@ browser: `node --test viewer/browsertest/parse_test.cjs`.
 
 ---
 
+## Offline case workspaces
+
+Combine existing JSON reports from multiple hosts or runs into one offline
+case, search their findings and open the exact original source record. Compare
+two operator-confirmed snapshots of the same machine for selected persistent
+configuration changes, with missing collectors, partial reads and ambiguous
+keys shown explicitly. Original host/run boundaries and source-file digests
+are retained; no host collection or server is involved.
+
+```sh
+lrng -case-report HOST01.json -case-report HOST02.json -case-name IR-42 -format html -out case.html
+lrng -case-report before.json -case-report after.json -compare -same-host -format html -out comparison.html
+```
+
+Cases accept schema 1.2 JSON reports (not JSONL/HTML), with 1–16 sources,
+16 MiB per source and 64 MiB total. A hostname alone does not establish machine
+identity; `-same-host` records the operator's attestation. A one-sided
+observation does not prove installation or removal. See [case format,
+comparison scope and limits](docs/cases.md) and the [core product
+priorities](docs/product-roadmap.md). Harmless fixtures are in `demo/case-*.json`.
+
 ## Roadmap
 
 What's still to come. Everything already shipped is in
@@ -1670,8 +1691,9 @@ What's still to come. Everything already shipped is in
 
 - [ ] **zstd decoding for journal fields** above journald's compression
       threshold (they are counted, not read, today).
-- [ ] **Report viewer: compare two reports** of the same host (what appeared
-      and disappeared between runs), and a printable findings summary.
+- [ ] **Printable findings summary**, with source references and coverage gaps.
+- [ ] Broader, labeled detection-validation corpus and reproducible analyst
+      workflow comparisons; see [core product priorities](docs/product-roadmap.md).
 
 ---
 

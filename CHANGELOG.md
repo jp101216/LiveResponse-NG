@@ -26,6 +26,13 @@
 
 No dependency changes; report schema remains 1.2.
 
+### Fixed
+
+- Linux live-process test fixtures use their own test executables and explicit
+  readiness signals instead of renamed system utilities, which can exit
+  immediately on newer multicall coreutils installations. Production hashing
+  and sensitive-process exclusion behavior is unchanged.
+
 ## 0.15.0
 
 ### Added

@@ -156,14 +156,29 @@ fn byte_cap_stops_early_and_says_so() {
 
 #[test]
 fn sensitive_process_is_skipped_unless_asked() {
-    // A copy of sleep named lsass.exe stands in for LSASS.
+    // Use our own test executable: system sleep may be a multicall utility
+    // that refuses to run under a different executable name.
     let dir = std::env::temp_dir().join(unique("lsass"));
     std::fs::create_dir_all(&dir).unwrap();
     let fake = dir.join("lsass.exe");
-    let sleep =
-        String::from_utf8(Command::new("which").arg("sleep").output().unwrap().stdout).unwrap();
-    std::fs::copy(sleep.trim(), &fake).unwrap();
-    let child = spawn(fake.to_str().unwrap(), &[]);
+    std::fs::copy(std::env::current_exe().unwrap(), &fake).unwrap();
+    let ready = dir.join("ready");
+    let mut child = Target(
+        Command::new(&fake)
+            .args(["--exact", "memscan::tests::sensitive_process_fixture"])
+            .env("LRNG_SENSITIVE_READY", &ready)
+            .spawn()
+            .expect("spawn sensitive-process fixture"),
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !ready.is_file() {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "sensitive-process fixture exited before readiness"
+        );
+        assert!(std::time::Instant::now() < deadline, "fixture not ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
     let skipped = run(Request {
         op: "scan_memory".into(),
@@ -182,6 +197,15 @@ fn sensitive_process_is_skipped_unless_asked() {
     assert!(scanned[0].ok, "{:?}", scanned[0]);
     drop(child);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sensitive_process_fixture() {
+    let Some(ready) = std::env::var_os("LRNG_SENSITIVE_READY") else {
+        return;
+    };
+    std::fs::write(ready, b"ready").unwrap();
+    std::thread::sleep(Duration::from_secs(30));
 }
 
 #[test]

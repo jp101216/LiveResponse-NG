@@ -259,6 +259,12 @@ func writeJSONL(w io.Writer, rep Report) error {
 // can't clobber an earlier report. It also syncs and checks Close: on USB
 // media or a network share, Close is where a failed write shows up.
 func WriteFile(path string, rep Report, format string, pretty, overwrite bool) (string, error) {
+	return WriteArtifact(path, overwrite, func(w io.Writer) error { return Write(w, rep, format, pretty) })
+}
+
+// WriteArtifact applies the report's permissions, overwrite policy and checksum
+// handling to another evidence artifact, such as an offline case workspace.
+func WriteArtifact(path string, overwrite bool, write func(io.Writer) error) (string, error) {
 	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
 	if overwrite {
 		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
@@ -272,7 +278,7 @@ func WriteFile(path string, rep Report, format string, pretty, overwrite bool) (
 	}
 
 	h := sha256.New()
-	werr := Write(io.MultiWriter(f, h), rep, format, pretty)
+	werr := write(io.MultiWriter(f, h))
 	if werr == nil {
 		werr = f.Sync()
 	}

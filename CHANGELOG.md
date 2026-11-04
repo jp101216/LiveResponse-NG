@@ -4,6 +4,16 @@
 
 ### Added
 
+- Offline multi-report case workspaces (`-case-report`, repeatable,
+  `-case-name`) with source-file digests, original host/run boundaries,
+  cross-report finding search and exact source-record navigation in the viewer.
+- `-compare -same-host`: operator-attested, chronological persistence snapshot
+  comparison for selected services/tasks/autoruns/drivers fields. Missing,
+  partial, unkeyed and duplicate-key observations remain explicit; one-sided
+  observations do not assert installation or removal. Case schema 1.0 is
+  separate from unchanged report schema 1.2. Inputs and UI are bounded.
+- Case fixtures, source/identity/coverage regressions, hostile-case Chromium
+  checks and a repeatable 10,000-service comparison performance fixture.
 - ClickFix-family lure analytics and account-scoped Run-dialog command
   correlation. Windows `runhistory` reads loaded user hives and distinguishes
   key timestamps from execution times.

@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.2",
+  "tool": "liveresponse-ng",
+  "tool_version": "demo",
+  "run_id": "demo-other-host",
+  "host": "LAB-02",
+  "os": "windows",
+  "arch": "amd64",
+  "collected_at": "2026-11-02T10:30:00Z",
+  "run": {
+    "started_at": "2026-11-02T10:30:00Z",
+    "finished_at": "2026-11-02T10:30:00Z",
+    "elevated": true,
+    "collectors": [
+      "services",
+      "autoruns",
+      "processes"
+    ]
+  },
+  "results": [
+    {
+      "collector": "services",
+      "started_at": "2026-11-01T10:00:00Z",
+      "duration_ns": 1,
+      "records": [
+        {
+          "fields": {
+            "name": "ExampleService",
+            "image_path": "C:\\Example\\service.exe",
+            "start": "manual"
+          }
+        }
+      ],
+      "errors": [
+        "Synthetic fixture: one service key was unreadable"
+      ]
+    }
+  ],
+  "summary": {}
+}

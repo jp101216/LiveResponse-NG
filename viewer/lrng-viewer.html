@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-PIORoW4UYrHrhgIw+55xxtxrjeqmGvl9oWofXP3/htA='; style-src 'sha256-Op/HuC2j7jtPx7vnLRbpGzohnl4qXDO171RZ8d8TSRY='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-3LNDzxRQuf9SFsdGH+A5FqcFrY2PXf6L5qzPk6NLNRQ='; style-src 'sha256-/I6/W1QKlVYQ1Y+BG35vRHAU3sjXU9UUgYbNmiYFQ6Y='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>lrng report viewer</title>
 <style>
@@ -147,6 +147,11 @@ nav.views h2 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 1
 .nav-item .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 main { padding: 20px 28px 64px; min-width: 0; }
 main h2.view-title { font-size: 20px; margin: 0 0 4px; font-weight: 650; }
+.workspace-list { display: grid; gap: 12px; margin: 12px 0; }
+.workspace-card { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 12px; overflow-wrap: anywhere; }
+.workspace-card h3 { margin: 0 0 6px; font-size: 16px; }
+.workspace-card .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.comparison-values { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
 .view-sub { margin: 0 0 16px; color: var(--muted); max-width: 78ch; }
 
 /* Filters */
@@ -318,8 +323,8 @@ tr.detail-row td { max-width: none; background: var(--paper); }
 <nav class="views" id="nav" aria-label="Report views" hidden></nav>
 <main id="main">
 <section class="intake" id="intake">
-<h1>Open a report</h1>
-<p>Drop a report from <span class="ev">lrng</span> (.json or .jsonl) anywhere on this page, or choose one.</p>
+<h1>Open a report or case</h1>
+<p>Drop an <span class="ev">lrng</span> report (.json or .jsonl) or an offline case (.json) anywhere on this page, or choose one.</p>
 <button class="btn primary" id="choose" type="button">Choose a report</button>
 <p class="error" id="load-error" hidden></p>
 <p class="fine">The report stays on this computer. This page has no network access: its content security policy blocks every connection, and everything in the report is shown as plain text.</p>
@@ -536,12 +541,70 @@ tr.detail-row td { max-width: none; background: var(--paper); }
       for (const r of results) r.records = Array.from(r.records, (x) => x || { fields: {} });
     }
     if (!isObj(rep)) throw new Error("its top level isn't an object");
+    if (rep.kind === "lrng_case") return { workspace: parseCase(rep), skipped: 0 };
     if (!Array.isArray(rep.results)) throw new Error("it has no results list");
     return { rep, skipped };
   }
 
+  function parseCase(rep) {
+    if (rep.case_schema_version !== "1.0" || typeof rep.name !== "string" || rep.name.length > 256 || !Array.isArray(rep.sources) || !rep.sources.length || rep.sources.length > 16) throw new Error("unsupported or oversized case");
+    const ids = new Set(), runs = new Set();
+    let bytes = 0, records = 0, findings = 0;
+    for (const s of rep.sources) {
+      if (!isObj(s) || typeof s.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(s.sha256) || s.id !== "sha256:" + s.sha256 || ids.has(s.id)) throw new Error("invalid or duplicate case source ID");
+      if (typeof s.name !== "string" || s.name.length > 1024) throw new Error("invalid case source name");
+      if (!Number.isSafeInteger(s.bytes) || s.bytes < 1 || s.bytes > 16 * 1024 * 1024) throw new Error("invalid case source size");
+      bytes += s.bytes;
+      const r = s.report;
+      if (!isObj(r) || r.tool !== "liveresponse-ng" || r.schema_version !== "1.2" || typeof r.run_id !== "string" || !r.run_id || r.run_id.length > 256 || runs.has(r.run_id) || typeof r.host !== "string" || !r.host || !isObj(r.run) || !Array.isArray(r.results) || r.results.length > 256) throw new Error("invalid case report or duplicate run ID");
+      const collectors = new Set();
+      for (const c of r.results) {
+        if (!isObj(c) || typeof c.collector !== "string" || !c.collector || !(c.records === null || Array.isArray(c.records))) throw new Error("invalid case collector");
+        if (collectors.has(c.collector)) throw new Error("duplicate collector names make case references ambiguous");
+        collectors.add(c.collector);
+        for (const rec of c.records || []) {
+          if (!isObj(rec) || !isObj(rec.fields) || rec.findings !== undefined && !Array.isArray(rec.findings)) throw new Error("invalid case record");
+          records++;
+          findings += (rec.findings || []).length;
+          if ((rec.findings || []).some((f) => !isObj(f))) throw new Error("invalid case finding");
+        }
+      }
+      ids.add(s.id); runs.add(r.run_id);
+    }
+    if (bytes > 64 * 1024 * 1024 || records > 100000 || findings > 200000) throw new Error("case exceeds byte, record or finding budget");
+    if (rep.comparison !== undefined) {
+      const c = rep.comparison;
+      if (!isObj(c) || c.before_source === c.after_source || !ids.has(c.before_source) || !ids.has(c.after_source) || !Array.isArray(c.collectors) || c.collectors.length > 4 || c.identity_basis !== "operator_attested_same_machine") throw new Error("invalid case comparison scope");
+      let changes = 0, refs = 0;
+      const names = new Set();
+      for (const group of c.collectors) {
+        if (!isObj(group) || !["services", "scheduledtasks", "autoruns", "drivers"].includes(group.collector) || names.has(group.collector) || !Array.isArray(group.changes)) throw new Error("invalid comparison collector");
+        names.add(group.collector);
+        changes += group.changes.length;
+        for (const change of group.changes) {
+          if (!isObj(change) || typeof change.key !== "string" || typeof change.kind !== "string" || !Array.isArray(change.before) || !Array.isArray(change.after)) throw new Error("invalid comparison change");
+          if (change.key.length > 32768 || !["changed", "field_coverage", "only_before", "only_after", "unresolved_before", "unresolved_after", "ambiguous"].includes(change.kind)) throw new Error("invalid comparison kind or key");
+          for (const fields of [change.changed_fields, change.unavailable_fields]) {
+            if (fields !== undefined && (!Array.isArray(fields) || fields.length > 32 || fields.some((f) => typeof f !== "string" || f.length > 128))) throw new Error("oversized comparison field list");
+          }
+          for (const [side, id] of [[change.before, c.before_source], [change.after, c.after_source]]) {
+            refs += side.length;
+            for (const ref of side) {
+              const s = rep.sources.find((x) => x.id === id);
+              const r = isObj(ref) && Number.isInteger(ref.result) && ref.result >= 0 ? s.report.results[ref.result] : null;
+              if (!r || ref.source_id !== id || r.collector !== group.collector || !Number.isInteger(ref.record) || ref.record < 0 || !r.records || !r.records[ref.record]) throw new Error("comparison reference leaves its source scope");
+            }
+          }
+        }
+      }
+      if (changes > 100000 || refs > 100000) throw new Error("oversized comparison");
+    }
+    return rep;
+  }
+
   // ---- The model -----------------------------------------------------------
   let model = null;
+  let workspace = null;
   function buildModel(rep, source) {
     const results = rep.results.map((r, sourceIndex) => isObj(r) ? ({
       sourceIndex,
@@ -601,10 +664,14 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     const took = Number.isFinite(started) && Number.isFinite(finished) && finished >= started ? fmtDuration((finished - started) * 1e6) : "";
     const field = (label, ...v) => h("div", null, h("dt", null, label), h("dd", null, ...v));
     const src = model.source;
-    const reportField = src.embedded
+    const reportField = src.caseSource
+      ? field("Source file", h("span", { class: "ev" }, src.name), ` (${fmtBytes(src.size)})`)
+      : src.embedded
       ? field("Report", "embedded in this page")
       : field("Report", h("span", { class: "ev" }, src.name), src.size ? ` (${fmtBytes(src.size)})` : "");
-    const hash = src.sha256
+    const hash = src.caseSource
+      ? field("Recorded original file SHA-256", h("span", { class: "ev" }, src.caseSource.sha256))
+      : src.sha256
       ? field("Report SHA-256", h("span", { class: "ev", title: "Compare with the .sha256 file lrng wrote beside the report" }, src.sha256))
       : null;
     const warns = [];
@@ -613,7 +680,9 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     const errs = model.results.reduce((n, r) => n + r.errors.length, 0);
     if (errs) warns.push(`${fmtNum(errs)} collector error${errs === 1 ? "" : "s"}: coverage has gaps`);
     if (src.skipped) warns.push(`${fmtNum(src.skipped)} unreadable line${src.skipped === 1 ? "" : "s"} skipped`);
-    const open = h("button", { class: "btn", type: "button", onclick: () => $("file").click() }, "Open another report");
+    const open = h("div", { class: "actions" },
+      workspace ? h("button", { class: "btn", type: "button", onclick: () => go("case") }, "Case overview") : null,
+      h("button", { class: "btn", type: "button", onclick: () => $("file").click() }, "Open another report or case"));
     add(clear($("case")),
       h("div", { class: "case-top" },
         h("div", null, h("h1", null, plain(rep.host) || "Unnamed host"),
@@ -664,6 +733,17 @@ tr.detail-row td { max-width: none; background: var(--paper); }
   function renderNav() {
     const nav = clear($("nav"));
     const cur = route();
+    if (workspace) {
+      for (const [id, label] of [["case", "Case overview"], ...(workspace.rep.comparison ? [["compare", "Report comparison"]] : [])]) {
+        nav.append(h("button", { class: "nav-item", type: "button", "aria-current": cur.view === id ? "page" : null, onclick: () => go(id) }, label));
+      }
+      nav.append(h("h2", null, "Source reports"));
+      const pick = h("select", { class: "pick", "aria-label": "Source report", onchange: (e) => { selectCaseSource(e.target.value); go("findings"); } });
+      for (const s of workspace.rep.sources) pick.append(h("option", { value: s.id, selected: s.id === workspace.selected }, `${s.report.host} · ${s.report.run_id}`));
+      nav.append(pick);
+      nav.append(h("button", { class: "nav-item", type: "button", onclick: () => go("findings") }, "Open selected report"));
+      nav.append(h("h2", null, "Selected report"));
+    }
     for (const [id, label, count] of VIEWS) {
       const n = count();
       nav.append(h("button", {
@@ -692,6 +772,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     let arg = "";
     try { arg = decodeURIComponent(rest.join("/")); } catch { arg = ""; }
     if (view === "collector" && model && model.byName.has(arg)) return { view, arg };
+    if (workspace && (view === "case" || view === "compare" && workspace.rep.comparison)) return { view, arg: "" };
     if (VIEWS.some(([id]) => id === view)) return { view, arg: "" };
     return { view: model && model.findings.length ? "findings" : "run", arg: "" };
   }
@@ -708,6 +789,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     timeline: { q: "", source: "", onlyHits: false, newest: false, shown: 500 },
     indicators: { q: "", type: "" },
     graph: { q: "", selected: "", basis: "all", shown: PAGE },
+    workspace: { q: "", shown: PAGE, compareQ: "", compareShown: PAGE },
     tables: new Map(),
   };
   let pendingFocus = null; // { kind, key } to scroll to after the next render
@@ -721,6 +803,14 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     const y = window.scrollY;
     renderNav();
     const main = clear($("main"));
+    if (workspace && (view === "case" || view === "compare")) {
+      renderWorkspaceHeader();
+      $("tactics").hidden = true;
+      main.append(view === "case" ? viewWorkspace() : viewComparison());
+      return;
+    }
+    renderCase();
+    renderTactics();
     const v = { findings: viewFindings, processes: viewProcesses, graph: viewGraph, timeline: viewTimeline, indicators: viewIndicators, run: viewRun, collector: viewCollector }[view];
     main.append(v(arg));
     if (pendingFocus) {
@@ -1411,6 +1501,125 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     go("collector", r.name);
   }
 
+  // ---- Offline case workspace ---------------------------------------------
+  function selectCaseSource(id) {
+    const s = workspace.rep.sources.find((x) => x.id === id);
+    if (!s) return;
+    workspace.selected = id;
+    // The digest describes the original input file. It is a recorded claim
+    // inside a case, not a verification of these re-serialized JSON bytes.
+    useReport(s.report, { name: plain(s.name), size: s.bytes, sha256: "", embedded: true, caseSource: s });
+  }
+  function caseRecord(ref) {
+    if (!isObj(ref) || !Number.isInteger(ref.result) || ref.result < 0 || !Number.isInteger(ref.record) || ref.record < 0) return null;
+    const s = workspace.rep.sources.find((x) => x.id === ref.source_id);
+    const r = s && s.report.results[ref.result];
+    const rec = r && Array.isArray(r.records) && r.records[ref.record];
+    return rec && isObj(rec.fields) ? { source: s, result: r, record: rec } : null;
+  }
+  function openCaseRecord(ref) {
+    if (!caseRecord(ref)) return;
+    selectCaseSource(ref.source_id);
+    const ri = model.results.findIndex((x) => x.sourceIndex === ref.result);
+    if (ri >= 0) showRecord(ri, ref.record);
+  }
+  function renderWorkspaceHeader() {
+    const c = workspace.rep, src = workspace.source;
+    document.title = (plain(c.name) || "Investigation") + " – lrng case";
+    add(clear($("case")), h("div", { class: "case-top" },
+      h("div", null, h("h1", null, plain(c.name) || "Investigation"), h("p", { class: "os" }, `${c.sources.length} source reports · original host and run boundaries retained`)),
+      h("button", { class: "btn", type: "button", onclick: () => $("file").click() }, "Open another report or case")),
+      h("p", { class: "ev" }, "Case: " + plain(c.case_id)),
+      h("p", { class: "muted" }, "Source digests identify the original input files. Digests and comparison metadata in an imported case are recorded claims; retain the original reports and verify them separately."),
+      src.sha256 ? h("p", { class: "ev" }, "Opened case SHA-256: " + src.sha256) : null);
+    $("case").hidden = false;
+  }
+  function workspaceFindings() {
+    if (workspace.findings) return workspace.findings;
+    const out = [];
+    for (const s of workspace.rep.sources) s.report.results.forEach((r, ri) => (r.records || []).forEach((rec, i) => (rec.findings || []).filter(isObj).forEach((f) => {
+      out.push({ source: s, collector: r.collector, finding: f, ref: { source_id: s.id, result: ri, record: i } });
+    })));
+    out.sort((a, b) => rank(b.finding.severity) - rank(a.finding.severity));
+    workspace.findings = out;
+    return out;
+  }
+  function viewWorkspace() {
+    const st = state.workspace;
+    const wrap = h("section", null, h("h2", { class: "view-title" }, "Case overview"),
+      h("p", { class: "view-sub" }, "Review findings across supplied reports, then open the exact source record. Reports sharing a hostname stay separate. This case does not infer cross-host causation."));
+    const sources = h("div", { class: "workspace-list" });
+    for (const s of workspace.rep.sources) {
+      const r = s.report, n = r.results.reduce((sum, x) => sum + (x.records || []).length, 0);
+      const errors = r.results.reduce((sum, x) => sum + (Array.isArray(x.errors) ? x.errors.length : 0), 0);
+      sources.append(h("article", { class: "workspace-card case-source" },
+        h("h3", null, r.host), h("p", { class: "ev" }, `${r.run_id} · ${fmtTime(r.collected_at)}`),
+        h("p", null, `${fmtNum(n)} records · ${fmtNum(errors)} collector errors` + (r.run.interrupted ? " · interrupted" : "") + (r.run.elevated === false ? " · not elevated" : "")),
+        h("p", { class: "ev" }, `${plain(s.name)} · original file SHA-256: ${s.sha256}`),
+        h("button", { class: "btn", type: "button", onclick: () => { selectCaseSource(s.id); go("findings"); } }, "Open report " + r.run_id)));
+    }
+    wrap.append(sources, h("h3", null, "Findings across reports"), searchBox(st.q, "Search case findings, hosts and runs", (q) => { st.q = q; st.shown = PAGE; rerenderKeepingFocus(); }));
+    const q = st.q.toLowerCase();
+    const rows = workspaceFindings().filter((x) => [x.source.report.host, x.source.report.run_id, x.collector, x.finding.rule, x.finding.detail].some((v) => plain(v).toLowerCase().includes(q)));
+    wrap.append(h("p", { class: "count-line" }, `${fmtNum(rows.length)} matching findings; showing ${fmtNum(Math.min(st.shown, rows.length))}`));
+    const list = h("div", { class: "workspace-list" });
+    for (const x of rows.slice(0, st.shown)) list.append(h("article", { class: "workspace-card case-finding" },
+      h("h3", null, sevTag(x.finding.severity), " ", plain(x.finding.rule)),
+      h("p", { class: "ev" }, `${x.source.report.host} · ${x.source.report.run_id} · ${x.collector} [${x.ref.record}]`),
+      longText(plain(x.finding.detail), 600, "ev"),
+      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onclick: () => openCaseRecord(x.ref) }, "Open source record"))));
+    wrap.append(list);
+    if (rows.length > st.shown) wrap.append(h("button", { class: "btn", type: "button", onclick: () => { st.shown += PAGE; render(); } }, "Show more case findings"));
+    return wrap;
+  }
+  function viewComparison() {
+    const c = workspace.rep.comparison, st = state.workspace;
+    const wrap = h("section", null, h("h2", { class: "view-title" }, "Report comparison"),
+      h("p", { class: "view-sub" }, "Same-machine scope was attested by the operator. Only-before and only-after describe supplied observations, not proven installation or removal. Missing collectors, partial reads and ambiguous keys remain visible."));
+    for (const note of Array.isArray(c.notes) ? c.notes : []) wrap.append(h("p", { class: "muted" }, plain(note)));
+    wrap.append(searchBox(st.compareQ, "Search comparison keys, kinds and fields", (q) => { st.compareQ = q; st.compareShown = PAGE; rerenderKeepingFocus(); }));
+    let budget = st.compareShown, total = 0;
+    for (const group of c.collectors) {
+      const q = st.compareQ.toLowerCase();
+      const changes = group.changes.filter((x) => [x.key, x.kind, plain(x.changed_fields), plain(x.unavailable_fields)].some((v) => v.toLowerCase().includes(q)));
+      total += changes.length;
+      const box = h("section", { class: "workspace-card comparison-group" },
+        h("h3", null, group.collector + " · " + plain(group.coverage)),
+        h("p", { class: "muted" }, `Before: ${plain(group.before_records)} records · after: ${plain(group.after_records)} · unchanged observed fields: ${plain(group.unchanged)} · no comparable fields: ${plain(group.uncompared)} · unkeyed: ${plain(group.unkeyed_before)} / ${plain(group.unkeyed_after)}`));
+      for (const reason of Array.isArray(group.reasons) ? group.reasons : []) box.append(h("p", { class: "warn" }, plain(reason)));
+      for (const x of changes.slice(0, Math.max(0, budget))) {
+        budget--;
+        const item = h("details", { class: "workspace-card comparison-change" }, h("summary", null, plain(x.kind), " · ", longText(x.key, 220, "ev")));
+        if (Array.isArray(x.changed_fields) && x.changed_fields.length) item.append(h("p", null, "Different observed values: " + x.changed_fields.map(plain).join(", ")));
+        if (Array.isArray(x.unavailable_fields) && x.unavailable_fields.length) item.append(h("p", { class: "muted" }, "Field availability differs (no default value assumed): " + x.unavailable_fields.map(plain).join(", ")));
+        const values = h("div", { class: "comparison-values" });
+        for (const [label, refs] of [["Before", x.before], ["After", x.after]]) {
+          const side = h("div", null, h("h4", null, label));
+          if (!refs.length) side.append(h("p", { class: "muted" }, "No paired observation"));
+          // Large duplicate-key groups stay bounded in the DOM. Every source
+          // remains accessible through its report's collector table.
+          for (const ref of refs.slice(0, 20)) {
+            const rec = caseRecord(ref);
+            if (!rec) continue;
+            side.append(h("p", { class: "ev" }, `${rec.source.report.run_id} · ${rec.result.collector} [${ref.record}]`));
+            const fields = Object.create(null);
+            for (const key of [...(Array.isArray(x.changed_fields) ? x.changed_fields : []), ...(Array.isArray(x.unavailable_fields) ? x.unavailable_fields : [])]) {
+              if (typeof key === "string") fields[key] = Object.hasOwn(rec.record.fields, key) ? rec.record.fields[key] : "(not reported)";
+            }
+            side.append(kvList(fields), h("button", { class: "btn", type: "button", onclick: () => openCaseRecord(ref) }, "Open " + label.toLowerCase() + " source record"));
+          }
+          if (refs.length > 20) side.append(h("p", { class: "muted" }, `${refs.length - 20} further ambiguous records; open the source collector to review them.`));
+          values.append(side);
+        }
+        item.append(values); box.append(item);
+      }
+      wrap.append(box);
+    }
+    wrap.append(h("p", { class: "count-line" }, `${fmtNum(total)} matching comparisons; showing ${fmtNum(Math.min(total, st.compareShown))}`));
+    if (total > st.compareShown) wrap.append(h("button", { class: "btn", type: "button", onclick: () => { st.compareShown += PAGE; render(); } }, "Show more comparisons"));
+    return wrap;
+  }
+
   // ---- Startup ---------------------------------------------------------------------------
   async function sha256Hex(buf) {
     if (!(window.crypto && crypto.subtle && window.isSecureContext)) return "";
@@ -1432,18 +1641,29 @@ tr.detail-row td { max-width: none; background: var(--paper); }
       showError("This isn't an lrng report: " + err.message + ".");
       return;
     }
+    workspace = parsed.workspace ? { rep: parsed.workspace, source, selected: parsed.workspace.sources[0].id } : null;
     source.skipped = parsed.skipped;
-    model = buildModel(parsed.rep, source);
+    state.workspace = { q: "", shown: PAGE, compareQ: "", compareShown: PAGE };
+    if (workspace) {
+      selectCaseSource(workspace.selected);
+      go("case");
+      render();
+      return;
+    }
+    useReport(parsed.rep, source);
+    render();
+  }
+  function useReport(rep, source) {
+    model = buildModel(rep, source);
     state.findings = { sevs: new Set(SEVS.concat([""])), collector: "", tactic: "", q: "", shown: PAGE, open: new Set() };
     state.processes = { q: "", onlyHits: false, open: null, detail: new Set() };
     state.timeline = { q: "", source: "", onlyHits: false, newest: false, shown: 500 };
     state.indicators = { q: "", type: "" };
     state.graph = { q: "", selected: "", basis: "all", shown: PAGE };
     state.tables = new Map();
-    document.title = (plain(parsed.rep.host) || "Report") + " – lrng report";
-    renderCase();
-    renderTactics();
-    render();
+    pendingFocus = null;
+    lastRoute = "";
+    document.title = (plain(rep.host) || "Report") + " – lrng report";
   }
   function alertBar(msg) {
     const warnRow = document.querySelector(".case .warn-row") || $("case").appendChild(h("div", { class: "warn-row" }));
@@ -1451,10 +1671,16 @@ tr.detail-row td { max-width: none; background: var(--paper); }
   }
   async function openFile(file) {
     if (!file) return;
-    const buf = await file.arrayBuffer();
-    const text = new TextDecoder("utf-8").decode(buf);
-    const sha = await sha256Hex(buf);
-    open(text, { name: file.name, size: file.size, sha256: sha, embedded: false });
+    try {
+      if (file.size > 192 * 1024 * 1024) throw new Error("file exceeds the 192 MiB viewer limit");
+      const buf = await file.arrayBuffer();
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(buf);
+      const sha = await sha256Hex(buf);
+      open(text, { name: file.name, size: file.size, sha256: sha, embedded: false });
+    } catch (err) {
+      if (model) alertBar("Couldn't open file: " + err.message);
+      else showError("Couldn't open file: " + err.message);
+    }
   }
   $("file").addEventListener("change", (e) => { openFile(e.target.files[0]); e.target.value = ""; });
   const choose = $("choose");

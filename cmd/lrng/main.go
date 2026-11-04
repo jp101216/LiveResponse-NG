@@ -61,7 +61,18 @@ func main() {
 		memScan     = flag.Int("mem-scan", 0, "scan one process's memory (YARA via -yara, plus prompt scan), print results and exit")
 		memPIDs     = flag.String("mem-pids", "", "memory collector: only scan these comma-separated PIDs")
 		evtxOffline = flag.String("evtx", "", "offline mode: triage the given .evtx file(s) or directory (comma-separated) and exit; works on any OS")
+		caseName    = flag.String("case-name", "", "name for an offline case workspace")
+		compareCase = flag.Bool("compare", false, "compare two -case-report inputs in before/after order; requires -same-host")
+		sameHost    = flag.Bool("same-host", false, "attest that the two comparison reports describe the same machine (a hostname alone is insufficient)")
 	)
+	var caseReports []string
+	flag.Func("case-report", "import an existing LRNG JSON report into an offline case; repeat for each report (max 16)", func(path string) error {
+		if path == "" {
+			return errors.New("-case-report needs a file path")
+		}
+		caseReports = append(caseReports, path)
+		return nil
+	})
 	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "max collectors to run concurrently")
 	flag.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "per-collector timeout (0 = none)")
 	flag.StringVar(&cfg.Output, "out", "", "write the report to this path, plus <path>.sha256 (default: stdout)")
@@ -96,6 +107,9 @@ func main() {
 	flag.BoolVar(&cfg.MemIncludeLsass, "mem-include-lsass", false, "memory scan: also scan lsass.exe (skipped by default; trips EDR credential-theft protection)")
 	flag.Usage = usage
 	flag.Parse()
+	var explicit []string
+	flag.Visit(func(f *flag.Flag) { explicit = append(explicit, f.Name) })
+	usageErrorOn(validateCaseOptions(cfg, caseReports, *caseName, *compareCase, *sameHost, explicit))
 
 	if *evtxOffline != "" && (cfg.Adaptive || cfg.TraceOnly || cfg.CloudOnly) {
 		usageErrorOn(errors.New("-evtx cannot be combined with -adaptive, -trace-only or -cloud-only"))
@@ -131,6 +145,13 @@ func main() {
 	}()
 
 	switch {
+	case len(caseReports) > 0:
+		summary, err := doCase(ctx, cfg, caseReports, *caseName, *compareCase, *sameHost)
+		exitOn(err)
+		if failOnMet(summary, cfg.FailOn) {
+			os.Exit(exitFindings)
+		}
+		return
 	case *showVer:
 		fmt.Println(versionString())
 		return
@@ -236,6 +257,8 @@ Usage: lrng [flags]
   lrng -agent-trace spans.jsonl -trace-only -out trace.json   import existing agent telemetry only
 	  lrng -cloud-audit audit.json -cloud-only -out cloud.html -format html   offline LLMjacking heuristics
   lrng -adaptive -adaptive-budget 15s -out host.json   bounded follow-up of suspect local executables
+  lrng -case-report host1.json -case-report host2.json -case-name IR-42 -format html -out case.html
+  lrng -case-report before.json -case-report after.json -compare -same-host -format html -out comparison.html
   lrng -list                           collectors available on this OS
 
 Exit status: 0 done, 1 error, 2 bad usage, 3 -fail-on threshold met.

@@ -1,0 +1,74 @@
+{
+  "schema_version": "1.2",
+  "tool": "liveresponse-ng",
+  "tool_version": "demo",
+  "run_id": "demo-before",
+  "host": "LAB-01",
+  "os": "windows",
+  "arch": "amd64",
+  "collected_at": "2026-11-01T10:00:00Z",
+  "run": {
+    "started_at": "2026-11-01T10:00:00Z",
+    "finished_at": "2026-11-01T10:00:00Z",
+    "elevated": true,
+    "collectors": [
+      "services",
+      "autoruns",
+      "processes"
+    ]
+  },
+  "results": [
+    {
+      "collector": "services",
+      "started_at": "2026-11-01T10:00:00Z",
+      "duration_ns": 1,
+      "records": [
+        {
+          "fields": {
+            "name": "ExampleService",
+            "image_path": "C:\\Example\\v1\\service.exe",
+            "start": "automatic"
+          }
+        },
+        {
+          "fields": {
+            "name": "BeforeOnly",
+            "image_path": "C:\\Example\\old.exe",
+            "start": "manual"
+          }
+        }
+      ]
+    },
+    {
+      "collector": "autoruns",
+      "started_at": "2026-11-01T10:00:00Z",
+      "duration_ns": 1,
+      "records": [
+        {
+          "fields": {
+            "kind": "run",
+            "location": "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "name": "Example",
+            "command": "C:\\Example\\v1\\tray.exe"
+          }
+        }
+      ]
+    },
+    {
+      "collector": "processes",
+      "started_at": "2026-11-01T10:00:00Z",
+      "duration_ns": 1,
+      "records": [
+        {
+          "fields": {
+            "pid": 4242,
+            "name": "example.exe",
+            "image_path": "C:\\Example\\v1\\example.exe",
+            "created_at": "2026-11-01T09:00:00Z"
+          }
+        }
+      ]
+    }
+  ],
+  "summary": {}
+}

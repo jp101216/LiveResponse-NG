@@ -239,6 +239,67 @@ func TestArtifactKeysRespectUserAndLinuxPathScope(t *testing.T) {
 	}
 }
 
+func TestTasksDriverBindingsAndLinuxPersistence(t *testing.T) {
+	a, z := sample("a", 1), sample("z", 2)
+	a.Results = []collector.Result{
+		{Collector: "scheduledtasks", Records: []collector.Record{rec(map[string]any{"task_path": `\Example`, "actions": []any{map[string]any{"command": "example.exe", "arguments": "--old"}}})}},
+		{Collector: "drivers", Records: []collector.Record{
+			rec(map[string]any{"kind": "driver", "path": `C:\Windows\example.sys`, "loaded": true, "services": []any{"ExampleA", "ExampleB"}, "start": "automatic"}),
+			rec(map[string]any{"kind": "driver", "path": `C:\Windows\unloaded.sys`, "loaded": true}),
+		}},
+	}
+	z.Results = []collector.Result{
+		{Collector: "scheduledtasks", Records: []collector.Record{rec(map[string]any{"task_path": `\EXAMPLE`, "actions": []any{map[string]any{"command": "example.exe", "arguments": "--new"}}})}},
+		{Collector: "drivers", Records: []collector.Record{
+			rec(map[string]any{"kind": "driver", "path": `C:\WINDOWS\EXAMPLE.SYS`, "loaded": true, "services": []any{"EXAMPLEB", "examplea"}, "start": "manual"}),
+			rec(map[string]any{"kind": "driver", "path": `C:\Windows\unloaded.sys`, "loaded": false}),
+		}},
+	}
+	c, err := compare(Source{ID: "before", decoded: a}, Source{ID: "after", decoded: z})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, drivers := c.Collectors[1], c.Collectors[3]
+	if len(tasks.Changes) != 1 || !reflect.DeepEqual(tasks.Changes[0].Fields, []string{"actions"}) || len(drivers.Changes) != 1 || drivers.Unchanged != 1 || !reflect.DeepEqual(drivers.Changes[0].Fields, []string{"loaded"}) {
+		t.Fatalf("task action or binding order semantics lost: %+v %+v", tasks, drivers)
+	}
+	// Do not mutate the original binding order while normalizing for comparison.
+	if !reflect.DeepEqual(a.Results[1].Records[0].Fields["services"], []any{"ExampleA", "ExampleB"}) {
+		t.Fatal("comparison mutated source fields")
+	}
+	a.OS, z.OS = "linux", "linux"
+	a.Results = []collector.Result{{Collector: "autoruns", Records: []collector.Record{
+		rec(map[string]any{"kind": "systemd_unit", "source": "/etc/systemd/system", "unit": "example.service", "exec_start": []any{"/usr/bin/example --old"}}),
+		rec(map[string]any{"kind": "cron", "source": "/etc/crontab", "command": "/usr/bin/example"}),
+	}}}
+	z.Results = []collector.Result{{Collector: "autoruns", Records: []collector.Record{
+		rec(map[string]any{"kind": "systemd_unit", "source": "/etc/systemd/system", "unit": "example.service", "exec_start": []any{"/usr/bin/example --new"}}),
+		rec(map[string]any{"kind": "cron", "source": "/etc/crontab", "command": "/usr/bin/example --new"}),
+	}}}
+	c, err = compare(Source{ID: "before", decoded: a}, Source{ID: "after", decoded: z})
+	if err != nil {
+		t.Fatal(err)
+	}
+	linux := c.Collectors[2]
+	if len(linux.Changes) != 1 || !reflect.DeepEqual(linux.Changes[0].Fields, []string{"exec_start"}) || linux.UnkeyedBefore != 1 || linux.UnkeyedAfter != 1 {
+		t.Fatalf("unsupported Linux artifacts were silently paired: %+v", linux)
+	}
+}
+
+func TestCaseRecordBudget(t *testing.T) {
+	rep := sample("large", 1)
+	records := make([]collector.Record, MaxRecords+1)
+	for i := range records {
+		records[i] = rec(map[string]any{})
+	}
+	rep.Results = []collector.Result{{Collector: "services", Records: records}}
+	path := filepath.Join(t.TempDir(), "large.json")
+	writeSample(t, path, rep)
+	if _, err := Build(context.Background(), []string{path}, Options{}); err == nil || !strings.Contains(err.Error(), "records") {
+		t.Fatalf("record budget not enforced: %v", err)
+	}
+}
+
 func BenchmarkComparePersistence(b *testing.B) {
 	// Repeatable scale fixture, not a claim of accuracy against a vendor.
 	a, z := sample("before", 1), sample("after", 2)

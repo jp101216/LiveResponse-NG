@@ -56,7 +56,7 @@ var comparedFields = map[string][]string{
 	"services":       {"display_name", "image_path", "image_path_raw", "start", "delayed_autostart", "type", "account", "service_dll", "failure_command"},
 	"scheduledtasks": {"enabled", "hidden", "author", "description", "run_as", "logon_type", "run_level", "triggers", "com_handlers", "actions"},
 	"autoruns":       {"command", "command_raw", "exec", "exec_start", "masked", "library", "md5"},
-	"drivers":        {"loaded", "start", "service_type", "image_path", "services"},
+	"drivers":        {"loaded", "services"},
 }
 
 func compare(before, after Source) (Comparison, error) {
@@ -173,6 +173,7 @@ func compareCollector(before, after Source, name string) CollectorComparison {
 			for _, field := range comparedFields[name] {
 				av, aok := a.Records[x[0].Record].Fields[field]
 				bv, bok := b.Records[y[0].Record].Fields[field]
+				av, bv = comparisonValue(name, field, av), comparisonValue(name, field, bv)
 				if aok && bok && av != nil && bv != nil {
 					observed++
 				}
@@ -197,6 +198,33 @@ func compareCollector(before, after Source, name string) CollectorComparison {
 		c.Changes = append(c.Changes, change)
 	}
 	return c
+}
+
+func comparisonValue(name, field string, value any) any {
+	if name != "drivers" || field != "services" || value == nil {
+		return value
+	}
+	// Driver service bindings are a set. Registry enumeration order and case
+	// changes do not change the binding; action/trigger arrays retain order.
+	var names []string
+	switch values := value.(type) {
+	case []any:
+		for _, v := range values {
+			s, ok := v.(string)
+			if !ok {
+				return value
+			}
+			names = append(names, strings.ToLower(s))
+		}
+	case []string:
+		for _, s := range values {
+			names = append(names, strings.ToLower(s))
+		}
+	default:
+		return value
+	}
+	sort.Strings(names)
+	return names
 }
 
 func refs(in []Ref) []Ref {

@@ -68,7 +68,7 @@ fields:
 | Windows `services` | Service name | Image/command, start/type, account, service DLL, failure command and display name |
 | Windows `scheduledtasks` | Task path | Actions, triggers, enabled/hidden state, principal, logon/run level, author and description |
 | Windows `autoruns` | Kind + location + entry name + user SID | Command and raw command |
-| Windows `drivers` | Driver path, for `kind: driver` records | Loaded state, service bindings and registered start/type/image |
+| Windows `drivers` | Driver path, for `kind: driver` records | Loaded state and service bindings (an unordered set); per-service configuration is compared in `services` |
 | Linux `autoruns` | Systemd kind + source + unit + drop-in file; XDG source + name; PAM module path | ExecStart/exec, masking and module MD5 where reported |
 
 Windows keys compare without case; Linux keys preserve case. Unsupported or

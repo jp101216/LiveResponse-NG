@@ -22,6 +22,7 @@ import (
 // annotations. Safe to call on any result set; callers run it after collection
 // and before summarising, so the findings it adds roll up like any other.
 func Correlate(results []Result) {
+	correlateModern(results)
 	// Independent of the event log: lines up two live collectors.
 	correlateTaskComHandlers(results)
 

@@ -126,6 +126,20 @@ func BuildEvidenceGraph(results []Result, host string) Result {
 	}
 	for i, n := range nodes {
 		f := n.rec.Fields
+		if refs, ok := f["detection_source_refs"].([]EvidenceRef); ok {
+			for _, ref := range refs {
+				if source, ok := byRef[ref]; ok {
+					addEdge(source, i, "corroborates_detection", "inferred", "This source observation contributed to a contextual detection. The finding explains the match and its attribution limits.")
+				}
+			}
+		}
+		if indices, ok := f["supporting_events"].([]int); ok && n.collector == "cloudaudit" {
+			for _, idx := range indices {
+				if source, ok := byRef[EvidenceRef{n.ref.Result, idx}]; ok {
+					addEdge(source, i, "contributes_to_analysis", "inferred", "This supplied cloud event contributes to a bounded heuristic window. This does not authenticate the log or establish compromise.")
+				}
+			}
+		}
 		if n.collector == "eventlog" {
 			if name := eventDataField(&n.rec, "ServiceName"); name != "" {
 				if target, ok := services[strings.ToLower(name)]; ok {

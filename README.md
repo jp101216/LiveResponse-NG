@@ -99,6 +99,28 @@ See [Investigation features](docs/investigations.md) for formats, budgets,
 evidence semantics and current scope. These are opt-in additions to the
 existing schema 1.2 report; existing report readers keep working.
 
+## Modern intrusion detections and cloud audit analysis
+
+The Windows default sweep also reads loaded users' Run-dialog history
+(`runhistory`) and enabled app-specific WFP blocking filters (`wfp`). Shared
+analytics and correlation add ClickFix-family lure indicators, context for
+IDE tunnel abuse and signed-host/adjacent-DLL sideloading candidates. Findings
+retain corroborating record references and explain attribution limits.
+
+`-cloud-audit` imports supplied logs for LLMjacking investigation: model-service
+enablement, invocation-logging deletion and invocation bursts with related
+context. `-cloud-only` analyzes them without collecting this workstation.
+Cloud APIs are never contacted and model request/response content is omitted.
+
+```sh
+lrng -no-dns -graph -format html -out host.html
+lrng -cloud-audit audit.json -cloud-only -format html -out cloud.html
+lrng -cloud-audit demo/cloud-audit.jsonl -cloud-only -llm-burst 3 -out demo.json
+```
+
+See [Modern detections](docs/modern-detections.md) for rules, native
+AWS/GCP/Azure formats, normalized JSONL, budgets and coverage limits.
+
 ## Why
 
 Classic endpoint triage dumps artifacts; signatures then try to match known
@@ -1277,6 +1299,8 @@ set that compiles and runs is exactly the set `-list` shows on that host.
 | `localaccounts` | ✅ | ✅ | `/etc/passwd`, `/etc/group`, `/etc/shadow`, and each user's `authorized_keys` (via sshd's `AuthorizedKeysFile`) |
 | `autoruns` (persistence) | ✅ | ✅ | ld.so.preload, cron, systemd, rc.local, XDG autostart, shell profiles, `/etc/pam.d` and PAM modules (with dpkg's md5sums), `/etc/sudoers{,.d}`, `/etc/udev/rules.d` |
 | `aiagents` | ✅ | ✅ | AI clients' MCP and settings files under each home (`/etc/passwd` homes), and a bounded sweep of the homes for agent instruction files |
+| `runhistory`, `wfp` | ✅ | — | Loaded users' RunMRU entries and read-only native WFP app-specific BLOCK-filter enumeration |
+| `-cloud-audit`, `-cloud-only` | ✅ | ✅ | Offline model-service audit metadata analysis; native AWS/GCP/Azure formats and normalized JSONL |
 | `rootkit` | — | ✅ | `/proc` listing vs. `/proc/<pid>` probes; `sock_diag` netlink vs. `/proc/net/{tcp,udp}{,6}` |
 | AI module A (LLM callouts) | ✅ | ✅ | runs on the Linux `network` collector (OS-agnostic) |
 | `memory` (opt-in) | ✅ | ✅ | the Rust sidecar reads `/proc/<pid>/{maps,mem,map_files}` |

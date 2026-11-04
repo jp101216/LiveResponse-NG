@@ -86,6 +86,7 @@ type RunInfo struct {
 	ElevationErr     string   `json:"elevation_error,omitempty"`
 	Graph            bool     `json:"evidence_graph,omitempty"`
 	AgentTraceFiles  []string `json:"agent_trace_files,omitempty"`
+	CloudAuditFiles  []string `json:"cloud_audit_files,omitempty"`
 	Adaptive         bool     `json:"adaptive,omitempty"`
 	AdaptiveBudget   string   `json:"adaptive_budget,omitempty"`
 	AdaptiveMaxFiles int      `json:"adaptive_max_files,omitempty"`

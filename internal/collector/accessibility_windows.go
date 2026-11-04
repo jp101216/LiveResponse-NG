@@ -85,6 +85,9 @@ func originalFileName(path string) (string, error) {
 	if n == 0 {
 		return "", fmt.Errorf("no version resource: %v", e)
 	}
+	if n > 4<<20 {
+		return "", errors.New("version resource exceeds 4 MiB limit")
+	}
 	buf := make([]byte, n)
 	if ok, _, e := procGetFileVersionInfoExW.Call(fileVerGetNeutral, uintptr(unsafe.Pointer(p)), 0, n,
 		uintptr(unsafe.Pointer(&buf[0]))); ok == 0 {

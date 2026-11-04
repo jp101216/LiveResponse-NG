@@ -83,6 +83,15 @@ func TestValidate(t *testing.T) {
 		{func(c *config.Config) {}, nil, -4, "-mem-scan"},
 		{func(c *config.Config) { c.FailOn = "high" }, nil, 0, "-fail-on"},
 		{func(c *config.Config) { c.TraceOnly = true }, nil, 0, "requires -agent-trace"},
+		{func(c *config.Config) { c.CloudOnly = true }, nil, 0, "requires -cloud-audit"},
+		{func(c *config.Config) { c.CloudOnly = true; c.CloudAudit = "audit.json"; c.Adaptive = true }, nil, 0, "live run"},
+		{func(c *config.Config) {
+			c.CloudOnly = true
+			c.CloudAudit = "audit.json"
+			c.Collectors = []string{"processes"}
+		}, nil, 0, "cannot be combined"},
+		{func(c *config.Config) { c.LLMBurst = 0 }, nil, 0, "-llm-burst"},
+		{func(c *config.Config) { c.LLMBurst = 100001 }, nil, 0, "-llm-burst"},
 		{func(c *config.Config) { c.TraceOnly = true; c.AgentTrace = "trace.jsonl"; c.Adaptive = true }, nil, 0, "live run"},
 		{func(c *config.Config) { c.AdaptiveBudget = 0 }, nil, 0, "-adaptive-budget"},
 		{func(c *config.Config) { c.AdaptiveMaxFiles = 201 }, nil, 0, "-adaptive-max-files"},

@@ -97,6 +97,7 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 		names[e.pid] = e.name
 	}
 	created := make(map[uint32]time.Time, len(entries))
+	tunnelVersionChecks := 0
 	owners := sidCache{}
 	type row struct {
 		e      procEntry
@@ -123,6 +124,12 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 		}
 		if d.commandLine != "" {
 			fields["command_line"] = d.commandLine
+			if ideTunnelCommand.MatchString(d.commandLine) && d.imagePath != "" && tunnelVersionChecks < 128 {
+				tunnelVersionChecks++
+				if original, err := originalFileName(d.imagePath); err == nil {
+					fields["original_file_name"] = excerpt(redactSecrets(original), 256)
+				}
+			}
 		}
 		if !d.created.IsZero() {
 			fields["created_at"] = d.created
@@ -245,6 +252,8 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 		res.Add(r.fields, findings...)
 	}
 	res.SetMeta("system_root", systemRoot())
+	res.SetMeta("tunnel_version_checks", tunnelVersionChecks)
+	res.SetMeta("tunnel_version_check_limit", 128)
 	res.SetMeta("images_hashed", hashed)
 	res.SetMeta("environments_read", envRead)
 	res.SetMeta("environments_unreadable", envUnread)

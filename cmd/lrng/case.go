@@ -19,6 +19,11 @@ func validateCaseOptions(cfg config.Config, paths []string, name string, compare
 		if name != "" || compare || sameHost {
 			return errors.New("-case-name, -compare and -same-host require -case-report")
 		}
+		for _, flag := range explicit {
+			if flag == "case-name" || flag == "compare" || flag == "same-host" {
+				return errors.New("case options require -case-report, even when explicitly empty or false")
+			}
+		}
 		return nil
 	}
 	if cfg.Format == output.FormatJSONL {

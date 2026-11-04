@@ -35,7 +35,7 @@ async function check(browser, file, hostile = false) {
   await page.waitForSelector(".case-source");
   assert.ok(await page.locator(".case-source").count() >= 2, "case kept separate reports");
   await page.getByRole("button", { name: "Open source record", exact: true }).first().click();
-  await page.waitForFunction(() => location.hash === "#collector/services");
+  await page.waitForFunction(() => location.hash === "#collector/services" && document.querySelector("#case").textContent.includes("demo-after") && document.querySelector("main").textContent.includes("v2"));
   assert.match(await page.locator("#case").textContent(), /demo-after/);
   assert.match(await page.locator("#case").textContent(), /Recorded original file SHA-256/);
   assert.match(await page.locator("main").textContent(), /v2/);
@@ -54,7 +54,7 @@ async function check(browser, file, hostile = false) {
       const changed = service.locator(".comparison-change").filter({ has: page.locator("summary", { hasText: /^changed/ }) }).first();
       await changed.locator("summary").click();
       await changed.getByRole("button", { name: `Open ${side} source record`, exact: true }).click();
-      await page.waitForFunction(() => location.hash === "#collector/services");
+      await page.waitForFunction(({ run, version }) => location.hash === "#collector/services" && document.querySelector("#case").textContent.includes(run) && document.querySelector("main").textContent.includes(version), { run, version });
       assert.ok((await page.locator("#case").textContent()).includes(run), "comparison opened the correct source run");
       assert.ok((await page.locator("main").textContent()).includes(version), "comparison opened original source values");
     }
@@ -83,7 +83,11 @@ async function check(browser, file, hostile = false) {
       s.name = payload;
       for (const r of s.report.results) for (const rec of r.records || []) {
         rec.fields.__proto__x = payload;
-        for (const f of rec.findings || []) f.detail = payload;
+        for (const f of rec.findings || []) {
+          f.detail = payload;
+          // JSON objects with own coercion members must still render as text.
+          f.severity = { toString: "malformed", valueOf: "malformed" };
+        }
       }
     }
     const file = path.join(temp, "hostile-case.html");

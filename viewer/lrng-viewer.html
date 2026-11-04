@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-3LNDzxRQuf9SFsdGH+A5FqcFrY2PXf6L5qzPk6NLNRQ='; style-src 'sha256-/I6/W1QKlVYQ1Y+BG35vRHAU3sjXU9UUgYbNmiYFQ6Y='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-hkJ90800u6OejdQ0TunuEIcDxk57AoP61kGeGlNW1DA='; style-src 'sha256-/I6/W1QKlVYQ1Y+BG35vRHAU3sjXU9UUgYbNmiYFQ6Y='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>lrng report viewer</title>
 <style>
@@ -368,6 +368,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
   const SEVS = ["critical", "suspect", "notable", "info"];
   const rank = (s) => RANK.get(s) || 0;
   function sevTag(s) {
+    s = plain(s);
     const known = RANK.has(s);
     return h("span", { class: "sev " + (known ? "sev-" + s : "sev-unknown") }, known ? s : (s ? String(s) : "unrated"));
   }

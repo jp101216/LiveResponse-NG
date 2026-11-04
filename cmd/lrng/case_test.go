@@ -81,6 +81,11 @@ func TestCaseRejectsLiveFlagsAndIncompleteComparison(t *testing.T) {
 	if err := validateCaseOptions(cfg, nil, "IR-42", false, false, nil); err == nil {
 		t.Fatal("ignored case name without sources")
 	}
+	for _, name := range []string{"case-name", "compare", "same-host"} {
+		if err := validateCaseOptions(cfg, nil, "", false, false, []string{name}); err == nil {
+			t.Fatalf("explicit empty/false -%s fell through to live collection", name)
+		}
+	}
 	cfg.Format = "jsonl"
 	if err := validateCaseOptions(cfg, paths, "", false, false, nil); err == nil {
 		t.Fatal("accepted multiple runs in single-run JSONL format")

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.17.0
+
+### Added
+
+- Local guided analyst console (`-ui`) with Quick triage, Full triage and
+  Persistence review profiles, host/elevation/scope preflight, live progress,
+  cancellation with partial evidence, and direct HTML/JSON/checksum downloads.
+- Windows double-click and Linux desktop launchers, included with the analyst
+  quickstart in every platform archive.
+- Start here report workflow with priority signals, collection gaps,
+  rule-family review prompts, possible benign context, per-finding assessments
+  and notes, and copyable/downloadable analyst handoffs.
+- Same-tab draft recovery keyed by a SHA-256 of actual report contents, including
+  nested case sources. Unexported changes enable close/refresh warnings;
+  storage failures leave current notes available and show a recovery warning.
+- Bounded PID-specific process-memory follow-up commands for priority findings,
+  with original-host/process context and PID-reuse guidance. Commands write an
+  HTML report and checksum; copying never starts a scan. Default sensitive-process
+  exclusions remain enabled; YARA matching requires operator-supplied rules.
+- Labeled synthetic investigation, dark/small-screen layouts, and browser
+  regressions for recovery, source isolation, storage failures and command input.
+
+### Fixed
+
+- Construct fresh collector instances for every selection so an abandoned
+  collector cannot share mutable settings with a later console run.
+- Include every analyst annotation in handoffs, even beyond the limit for
+  additional unreviewed priority signals. Exporting one source does not clear
+  another source's unexported state.
+
+### Notes
+
+- Collection profiles leave live DNS, adaptive follow-up and memory scanning off.
+- Session-storage drafts end when the tab closes. Export the handoff for a
+  durable copy; browser warnings cannot protect every forced termination.
+- No new third-party dependencies. Report schema remains 1.2.
+
 ## 0.16.0
 
 ### Added

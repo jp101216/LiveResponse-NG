@@ -204,39 +204,51 @@ func TestServeUsesLoopbackAndCloses(t *testing.T) {
 	if !strings.HasPrefix(url, "http://127.0.0.1:") {
 		t.Fatal("not loopback", url)
 	}
-	closeWith := func(client *http.Client) int {
-		r, _ := http.NewRequest("POST", url+"api/close", strings.NewReader(`{}`))
-		r.Header.Set("Content-Type", "application/json")
+	// One connection per request, each read to the end. A pooled client can
+	// dial a connection it never uses (the request goes to a connection that
+	// came back to the pool first), and Shutdown waits up to five seconds for
+	// a connection that has not sent a request yet.
+	transport := &http.Transport{DisableKeepAlives: true}
+	defer transport.CloseIdleConnections()
+	jar, _ := cookiejar.New(nil)
+	stranger, browser := &http.Client{Transport: transport}, &http.Client{Transport: transport, Jar: jar}
+	send := func(client *http.Client, method, path string) int {
+		var body io.Reader
+		if method == http.MethodPost {
+			body = strings.NewReader(`{}`)
+		}
+		r, err := http.NewRequest(method, url+path, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if method == http.MethodPost {
+			r.Header.Set("Content-Type", "application/json")
+		}
 		response, err := client.Do(r)
 		if err != nil {
 			t.Fatal(err)
 		}
+		_, _ = io.Copy(io.Discard, response.Body)
 		response.Body.Close()
 		return response.StatusCode
 	}
 	// Knowing the address is not enough to drive the console.
-	if code := closeWith(http.DefaultClient); code != 403 {
+	if code := send(stranger, http.MethodPost, "api/close"); code != 403 {
 		t.Fatal("console closed by a client that never opened it", code)
 	}
-	jar, _ := cookiejar.New(nil)
-	browser := &http.Client{Jar: jar}
-	page, err := browser.Get(url)
-	if err != nil {
-		t.Fatal(err)
+	if code := send(browser, http.MethodGet, ""); code != 200 {
+		t.Fatal("console page refused its first browser", code)
 	}
-	page.Body.Close()
-	if page.StatusCode != 200 {
-		t.Fatal("console page refused its first browser", page.StatusCode)
-	}
-	if code := closeWith(browser); code != 200 {
+	if code := send(browser, http.MethodPost, "api/close"); code != 200 {
 		t.Fatal("close failed", code)
 	}
+	// Serve gives open connections a five-second shutdown grace, so allow for it.
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("console did not close")
 	}
 }

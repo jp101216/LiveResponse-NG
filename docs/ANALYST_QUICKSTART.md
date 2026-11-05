@@ -28,9 +28,21 @@ The report opens on **Start here**. Review priority signals, then collection cov
 
 Set a finding's **Review status** and add notes. **Expected behavior** records your assessment; it does not remove or change the detector finding. Review prompts describe a rule family and are not an automated verdict. A confidence score is a detector signal, not a probability of compromise. Zero findings does not establish that the host is clean.
 
-Write an analyst summary and use **Download analyst handoff** or **Copy handoff**. The handoff contains source identity and available file hash, severity counts, collection gaps, and priority or annotated findings with source references. It includes up to 200 gaps and 200 priority/annotated findings, and states when additional items remain.
+Write an analyst summary and use **Download analyst handoff** or **Copy handoff**. The handoff contains source identity and available file hash, severity counts, collection gaps, and priority or annotated findings with source references. It includes up to 200 gaps and 200 additional unreviewed priority signals, plus every annotated finding. It states when additional unreviewed signals remain.
 
-**Notes stay in the current tab. Download a handoff before closing or opening another file.** Switching between source reports inside one case keeps each source's review separate. The handoff is a separate analyst document; keep the original report and checksum intact.
+Unexported review changes enable the browser's close/refresh warning. Opening another report also asks before leaving an unexported review. Each source in a case keeps its own assessment, and exporting one source does not clear another source's unexported state.
+
+Drafts are cached in **sessionStorage** under a hash computed from the actual parsed report contents. No raw report is placed in the draft cache. A refresh can recover notes in the same tab; after refreshing the standalone viewer, reopen the same report or case. Changed report contents get a different draft. A browser that blocks storage, lacks report hashing, or runs out of space displays a recovery warning while retaining the current notes and close warning. Each cached review has a 1 MiB budget.
+
+**Closing the tab ends the session cache. Export a handoff for a durable record.** Browser prompts are best-effort and cannot protect against every browser or operating-system termination. The handoff is a separate analyst document; keep the original report and checksum intact.
+
+## Follow up on a priority process
+
+Start here and individual priority process findings offer **Copy memory-scan command** when a supported source report has a valid, unambiguous PID and process identity. The command scans that one PID with a 60-second process budget, a 90-second collector timeout and one memory worker, then writes a new HTML report and checksum. No scan starts in the browser.
+
+Run it from the extracted LRNG folder, on the **original host**, after verifying that the PID still belongs to the observed process. Use the displayed image path, name and creation time where available. Saved evidence cannot verify the current host or detect PID reuse. The platform comes from the report, and only a strictly validated numeric PID enters the command; report paths, hostnames and command lines never become shell arguments.
+
+The sidecar must be beside the agent and elevation may be needed. Built-in memory heuristics, image-integrity checks and prompt scanning do not need a YARA path. To add YARA matching, supply your own trusted rules with `-yara <path>`. Default sensitive-process exclusions remain enabled. Synthetic training reports label the command as an unverified example.
 
 ## Explore without collecting
 

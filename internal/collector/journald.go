@@ -26,7 +26,7 @@ func (journaldCollector) Collect(ctx context.Context) (Result, error) {
 	return scanJournald(ctx, "/"), nil
 }
 
-func init() { Register(journaldCollector{}) }
+func init() { Register(func() Collector { return journaldCollector{} }) }
 
 const (
 	journalFileMax       = 512 << 20 // a larger file is read up to this

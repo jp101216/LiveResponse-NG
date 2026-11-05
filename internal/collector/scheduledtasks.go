@@ -20,4 +20,4 @@ func (c *scheduledTasksCollector) Collect(ctx context.Context) (Result, error) {
 	return collectScheduledTasks(ctx, c.opts)
 }
 
-func init() { Register(&scheduledTasksCollector{}) }
+func init() { Register(func() Collector { return &scheduledTasksCollector{} }) }

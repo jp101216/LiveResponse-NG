@@ -16,4 +16,4 @@ func (shimcacheCollector) Collect(ctx context.Context) (Result, error) {
 	return collectShimcache(ctx)
 }
 
-func init() { Register(shimcacheCollector{}) }
+func init() { Register(func() Collector { return shimcacheCollector{} }) }

@@ -38,7 +38,7 @@ func (c *driversCollector) Collect(ctx context.Context) (Result, error) {
 	return collectDrivers(ctx, c.opts)
 }
 
-func init() { Register(&driversCollector{}) }
+func init() { Register(func() Collector { return &driversCollector{} }) }
 
 // kernelModule is one entry of the kernel's loaded-module list.
 type kernelModule struct {

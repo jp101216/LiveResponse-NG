@@ -29,7 +29,7 @@ func (c *dnsCacheCollector) Collect(ctx context.Context) (Result, error) {
 	return collectDNSCache(ctx, c.opts)
 }
 
-func init() { Register(&dnsCacheCollector{}) }
+func init() { Register(func() Collector { return &dnsCacheCollector{} }) }
 
 // moduleAResolveStarted records (unix nanoseconds) when module A began its
 // provider lookups this run, so the DNS-cache snapshot can say whether it was

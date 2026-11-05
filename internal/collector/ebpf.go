@@ -15,4 +15,4 @@ func (ebpfCollector) Collect(ctx context.Context) (Result, error) {
 	return collectEBPF(ctx)
 }
 
-func init() { Register(ebpfCollector{}) }
+func init() { Register(func() Collector { return ebpfCollector{} }) }

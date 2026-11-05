@@ -19,4 +19,4 @@ func (c *servicesCollector) Collect(ctx context.Context) (Result, error) {
 	return collectServices(ctx, c.opts)
 }
 
-func init() { Register(&servicesCollector{}) }
+func init() { Register(func() Collector { return &servicesCollector{} }) }

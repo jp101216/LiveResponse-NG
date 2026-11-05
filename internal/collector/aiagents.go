@@ -44,7 +44,7 @@ func (*aiAgentsCollector) Collect(ctx context.Context) (Result, error) {
 	return collectAIAgents(ctx, aiHomes(), aiClientConfigs, aiSystemConfigs), nil
 }
 
-func init() { Register(&aiAgentsCollector{}) }
+func init() { Register(func() Collector { return &aiAgentsCollector{} }) }
 
 // aiClientConfig is where an AI client keeps its MCP servers or hooks.
 type aiClientConfig struct {

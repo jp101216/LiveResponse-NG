@@ -21,4 +21,4 @@ func (c *comHijackCollector) Collect(ctx context.Context) (Result, error) {
 	return collectCOMHijack(ctx, c.opts)
 }
 
-func init() { Register(&comHijackCollector{}) }
+func init() { Register(func() Collector { return &comHijackCollector{} }) }

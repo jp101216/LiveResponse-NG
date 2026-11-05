@@ -233,4 +233,4 @@ func guidText(g syscall.GUID) string {
 	return fmt.Sprintf("%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x", g.Data1, g.Data2, g.Data3, g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3], g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7])
 }
 
-func init() { Register(&wfpCollector{}) }
+func init() { Register(func() Collector { return &wfpCollector{} }) }

@@ -18,4 +18,6 @@ func (c *netconnCollector) Collect(ctx context.Context) (Result, error) {
 	return collectConnections(ctx, c.opts)
 }
 
-func init() { Register(&netconnCollector{opts: RunOptions{ResolveLLMHosts: true}}) }
+func init() {
+	Register(func() Collector { return &netconnCollector{opts: RunOptions{ResolveLLMHosts: true}} })
+}

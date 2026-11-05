@@ -19,4 +19,4 @@ func (c *processCollector) Collect(ctx context.Context) (Result, error) {
 	return collectProcesses(ctx, c.opts)
 }
 
-func init() { Register(&processCollector{}) }
+func init() { Register(func() Collector { return &processCollector{} }) }

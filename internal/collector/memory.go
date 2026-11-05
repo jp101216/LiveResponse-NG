@@ -44,7 +44,7 @@ func (c *memoryCollector) Timeout() time.Duration {
 	return defaultMemTimeout
 }
 
-func init() { Register(&memoryCollector{}) }
+func init() { Register(func() Collector { return &memoryCollector{} }) }
 
 // procInfo is one process as seen by the platform process lister.
 type procInfo struct {

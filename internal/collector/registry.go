@@ -8,33 +8,41 @@ import (
 	"sync"
 )
 
-// registry holds every collector compiled into the binary. Platform-specific
-// files register their collectors from init(), so the set available at runtime
-// is exactly the set that compiled for this GOOS.
+// registry holds metadata prototypes; constructors make independent instances
+// for selection. Platform-specific init functions register the compiled set.
 var (
-	mu       sync.RWMutex
-	registry = map[string]Collector{}
+	mu           sync.RWMutex
+	registry     = map[string]Collector{}
+	constructors = map[string]func() Collector{}
 )
 
-// Register adds a collector to the global set. Called from init() in each
-// collector's source file. Panics on a duplicate name — that's a build-time
-// programming error, not a runtime condition.
-func Register(c Collector) {
+// Register adds a constructor to the global set. Each call must return a new
+// instance when the collector has mutable state. Collectors abandoned after a
+// timeout can then finish without sharing options with a later console run.
+// Called from init(); duplicate names are a programming error.
+func Register(makeCollector func() Collector) {
+	c := makeCollector()
 	mu.Lock()
 	defer mu.Unlock()
 	if _, dup := registry[c.Name()]; dup {
 		panic("collector: duplicate registration for " + c.Name())
 	}
 	registry[c.Name()] = c
+	constructors[c.Name()] = makeCollector
 }
 
 // Available returns the collectors that support the current GOOS, sorted by
 // name for stable output.
 func Available() []Collector {
 	mu.RLock()
-	defer mu.RUnlock()
+	factories := make([]func() Collector, 0, len(constructors))
+	for _, makeCollector := range constructors {
+		factories = append(factories, makeCollector)
+	}
+	mu.RUnlock()
 	var out []Collector
-	for _, c := range registry {
+	for _, makeCollector := range factories {
+		c := makeCollector()
 		if supports(c, runtime.GOOS) {
 			out = append(out, c)
 		}
@@ -71,9 +79,13 @@ func Defaults() []Collector {
 // Lookup returns a single collector by name if it exists and runs here.
 func Lookup(name string) (Collector, bool) {
 	mu.RLock()
-	defer mu.RUnlock()
-	c, ok := registry[name]
-	if !ok || !supports(c, runtime.GOOS) {
+	makeCollector, ok := constructors[name]
+	mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	c := makeCollector()
+	if !supports(c, runtime.GOOS) {
 		return nil, false
 	}
 	return c, true

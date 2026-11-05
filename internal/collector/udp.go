@@ -15,4 +15,4 @@ func (udpCollector) Collect(ctx context.Context) (Result, error) {
 	return collectUDP(ctx)
 }
 
-func init() { Register(udpCollector{}) }
+func init() { Register(func() Collector { return udpCollector{} }) }

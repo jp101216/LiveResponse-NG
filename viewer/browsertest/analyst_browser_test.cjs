@@ -67,7 +67,12 @@ const { chromium } = require("playwright");
     await offline.setInputFiles("#file",path.join(__dirname,"..","..","demo","case-after.json"));
     await offline.getByRole("heading",{name:"Start here",exact:true}).waitFor();assert.equal(await offline.getByLabel("Analyst handoff summary").inputValue(),"");
     if(process.env.LRNG_SHOTS){fs.mkdirSync(process.env.LRNG_SHOTS,{recursive:true});await page.screenshot({path:path.join(process.env.LRNG_SHOTS,"analyst-console.png"),fullPage:true});await offline.screenshot({path:path.join(process.env.LRNG_SHOTS,"guided-review.png"),fullPage:true});}
-    await offline.close();await page.getByRole("button",{name:"Close console",exact:true}).click();
+    await offline.close();
+    await page.locator("#case-label").fill("Second collection");await page.locator("#confirm").check();await page.getByRole("button",{name:"Start collection",exact:true}).click();
+    await page.waitForFunction(()=>[...document.querySelectorAll("#jobs a")].filter((a)=>a.textContent==="Review findings").length===2,null,{timeout:120000});
+    const history=await (await page.request.get(url+"api/jobs")).json();assert.equal(history.length,2);assert.notEqual(history[0].path,history[1].path);
+    const first=JSON.parse(fs.readFileSync(history[0].path,"utf8")),second=JSON.parse(fs.readFileSync(history[1].path,"utf8"));assert.notEqual(first.run_id,second.run_id);assert.equal(first.run_id,report.run_id);
+    await page.getByRole("button",{name:"Close console",exact:true}).click();
     await page.getByRole("alert").filter({hasText:/Console closed/}).waitFor();
     assert.deepEqual(errors,[]);
     console.log("Analyst browser workflow passed: sample, notes, handoff, local collection, report downloads, source isolation and close.");

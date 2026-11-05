@@ -18,4 +18,4 @@ func (c *wmiCollector) Collect(ctx context.Context) (Result, error) {
 	return collectWMI(ctx, c.opts)
 }
 
-func init() { Register(&wmiCollector{}) }
+func init() { Register(func() Collector { return &wmiCollector{} }) }

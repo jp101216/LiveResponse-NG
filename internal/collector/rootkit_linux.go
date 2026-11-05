@@ -31,7 +31,7 @@ func (rootkitCollector) Collect(ctx context.Context) (Result, error) {
 	return collectRootkit(ctx), nil
 }
 
-func init() { Register(rootkitCollector{}) }
+func init() { Register(func() Collector { return rootkitCollector{} }) }
 
 // pidProbeBudget bounds the PID-by-PID probe.
 const pidProbeBudget = 20 * time.Second

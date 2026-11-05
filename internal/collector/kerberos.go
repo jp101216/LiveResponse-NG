@@ -31,7 +31,7 @@ func (kerberosCollector) Collect(ctx context.Context) (Result, error) {
 	return collectKerberos(ctx)
 }
 
-func init() { Register(kerberosCollector{}) }
+func init() { Register(func() Collector { return kerberosCollector{} }) }
 
 // logonSession is a logon session as LSA describes it.
 type logonSession struct {

@@ -1,6 +1,54 @@
 package collector
 
-import "testing"
+import (
+	"context"
+	"reflect"
+	"testing"
+	"time"
+)
+
+func TestConfigurableCollectorsNeverShareRunInstances(t *testing.T) {
+	for _, c := range Available() {
+		if _, ok := c.(Configurable); !ok {
+			continue
+		}
+		other, ok := Lookup(c.Name())
+		if !ok || reflect.ValueOf(c).Pointer() == reflect.ValueOf(other).Pointer() {
+			t.Fatalf("%s shares mutable options between runs", c.Name())
+		}
+	}
+}
+
+func TestAbandonedCollectorCannotShareNextRunOptions(t *testing.T) {
+	first, ok := Lookup("processes")
+	if !ok {
+		t.Skip("process collection is unavailable on this OS")
+	}
+	first.(*processCollector).Configure(RunOptions{SelfPID: 42})
+	release := make(chan struct{})
+	observed := make(chan int, 1)
+	late := fakeCollector{"late", func(context.Context) (Result, error) {
+		<-release
+		observed <- first.(*processCollector).opts.SelfPID
+		return Result{}, nil
+	}}
+	results := (&Dispatcher{Timeout: time.Millisecond, Grace: time.Millisecond}).Run(context.Background(), []Collector{late})
+	if len(results[0].Errors) == 0 {
+		close(release)
+		t.Fatal("fixture did not outlive its run")
+	}
+	second, _ := Lookup("processes")
+	second.(*processCollector).Configure(RunOptions{SelfPID: 99})
+	close(release)
+	select {
+	case got := <-observed:
+		if got != 42 {
+			t.Fatalf("late collector inherited next run's options: %d", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late collector did not finish")
+	}
+}
 
 // TestExpectedCollectorsRegistered guards against a collector silently
 // dropping out of the build. The registry is populated from init() in each

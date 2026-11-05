@@ -15,4 +15,4 @@ func (localAccountsCollector) Collect(ctx context.Context) (Result, error) {
 	return collectLocalAccounts(ctx)
 }
 
-func init() { Register(localAccountsCollector{}) }
+func init() { Register(func() Collector { return localAccountsCollector{} }) }

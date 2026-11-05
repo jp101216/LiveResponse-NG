@@ -15,4 +15,4 @@ func (sessionsCollector) Collect(ctx context.Context) (Result, error) {
 	return collectSessions(ctx)
 }
 
-func init() { Register(sessionsCollector{}) }
+func init() { Register(func() Collector { return sessionsCollector{} }) }

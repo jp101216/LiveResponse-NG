@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-hkJ90800u6OejdQ0TunuEIcDxk57AoP61kGeGlNW1DA='; style-src 'sha256-/I6/W1QKlVYQ1Y+BG35vRHAU3sjXU9UUgYbNmiYFQ6Y='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-fTDWLck2n4dX7Kos76jGtKTcFhMTzfrIXFfiMbv781I='; style-src 'sha256-Xe2w0d4fdYwgu8xiYNoYWwR5pxF2+mvOyarmwqJxbS0='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>lrng report viewer</title>
 <style>
@@ -314,6 +314,14 @@ tr.detail-row td { max-width: none; background: var(--paper); }
   .layout { grid-template-columns: 1fr; }
   body { background: #fff; }
 }
+.review-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+.review-card { border: 1px solid var(--rule); border-radius: 8px; padding: 18px; margin-bottom: 16px; background: var(--panel); }
+.review-card p { line-height: 1.6; }
+.review-card label { display: block; margin: 12px 0; }
+.review-note { display: block; width: 100%; padding: 12px; border: 1px solid var(--rule); border-radius: 6px; background: var(--paper); color: var(--ink); font: inherit; resize: vertical; margin: 7px 0; }
+.review-note:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.scan-command { white-space: pre-wrap; overflow-wrap: anywhere; }
+.memory-followup { overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -326,6 +334,8 @@ tr.detail-row td { max-width: none; background: var(--paper); }
 <h1>Open a report or case</h1>
 <p>Drop an <span class="ev">lrng</span> report (.json or .jsonl) or an offline case (.json) anywhere on this page, or choose one.</p>
 <button class="btn primary" id="choose" type="button">Choose a report</button>
+<button class="btn" id="demo" type="button">Try a sample investigation</button>
+<p>New here? Start with the sample, then use <strong>Start here</strong> to review priorities, collection gaps, and your handoff.</p>
 <p class="error" id="load-error" hidden></p>
 <p class="fine">The report stays on this computer. This page has no network access: its content security policy blocks every connection, and everything in the report is shown as plain text.</p>
 </section>
@@ -625,14 +635,14 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     for (const r of results) if (!byName.has(r.name)) byName.set(r.name, r);
 
     const findings = [];
-    results.forEach((r, ri) => r.records.forEach((rec, i) => rec.findings.forEach((f) => {
+    results.forEach((r, ri) => r.records.forEach((rec, i) => rec.findings.forEach((f, fi) => {
       findings.push({
         sev: typeof f.severity === "string" ? f.severity : "",
         rule: plain(f.rule),
         technique: typeof f.technique === "string" ? f.technique : "",
         confidence: Number.isFinite(f.confidence) ? f.confidence : null,
         detail: plain(f.detail),
-        collector: r.name, ri, i,
+        collector: r.name, ri, i, fi,
       });
     })));
     findings.sort((a, b) => rank(b.sev) - rank(a.sev) || (b.confidence ?? -1) - (a.confidence ?? -1));
@@ -677,6 +687,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
       : null;
     const warns = [];
     if (run.elevated === false) warns.push("Not elevated: some artifacts were unreadable");
+    if (rep.synthetic_demo === true) warns.push("Synthetic training report: no host was collected");
     if (run.interrupted) warns.push("Run interrupted: results are partial");
     const errs = model.results.reduce((n, r) => n + r.errors.length, 0);
     if (errs) warns.push(`${fmtNum(errs)} collector error${errs === 1 ? "" : "s"}: coverage has gaps`);
@@ -724,6 +735,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
   }
 
   const VIEWS = [
+    ["review", "Start here", () => model.findings.length],
     ["findings", "Findings", () => model.findings.length],
     ["processes", "Process tree", () => (model.byName.get("processes") || { records: [] }).records.length],
     ["graph", "Evidence graph", () => evidenceGraph().nodes.size],
@@ -775,7 +787,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     if (view === "collector" && model && model.byName.has(arg)) return { view, arg };
     if (workspace && (view === "case" || view === "compare" && workspace.rep.comparison)) return { view, arg: "" };
     if (VIEWS.some(([id]) => id === view)) return { view, arg: "" };
-    return { view: model && model.findings.length ? "findings" : "run", arg: "" };
+    return { view: "review", arg: "" };
   }
   function go(view, arg) {
     const hash = "#" + view + (arg ? "/" + encodeURIComponent(arg) : "");
@@ -812,7 +824,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     }
     renderCase();
     renderTactics();
-    const v = { findings: viewFindings, processes: viewProcesses, graph: viewGraph, timeline: viewTimeline, indicators: viewIndicators, run: viewRun, collector: viewCollector }[view];
+    const v = { review: viewReview, findings: viewFindings, processes: viewProcesses, graph: viewGraph, timeline: viewTimeline, indicators: viewIndicators, run: viewRun, collector: viewCollector }[view];
     main.append(v(arg));
     if (pendingFocus) {
       const el = pendingFocus.el;
@@ -890,7 +902,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     }
     return wrap;
   }
-  const findingKey = (f) => f.ri + ":" + f.i + ":" + f.rule;
+  const findingKey = (f) => f.ri + ":" + f.i + ":" + f.fi + ":" + f.rule;
   function findingItem(f) {
     const st = state.findings;
     const key = findingKey(f);
@@ -903,7 +915,8 @@ tr.detail-row td { max-width: none; background: var(--paper); }
         f.technique ? h("span", { class: "tech" }, f.technique) : null,
         f.confidence !== null ? h("span", { class: "num", title: "Confidence" }, f.confidence + "%") : null,
         h("span", null, f.collector)),
-      h("span", { class: "f-detail" }, f.detail));
+      h("span", { class: "f-detail" }, f.detail),
+      reviewSession().findings.has(key) ? h("span", { class: "chip" }, reviewSession().findings.get(key).status) : null);
     row.addEventListener("click", () => {
       if (st.open.has(key)) st.open.delete(key); else st.open.add(key);
       const fresh = findingItem(f);
@@ -919,6 +932,9 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     const tl = techLink(f.technique);
     if (tl) box.append(h("p", { class: "muted" }, "ATT&CK ", tl,
       tacticsOf(f.technique).length ? ` (${tacticsOf(f.technique).map((t) => TACTIC_NAME.get(t)).join(", ")})` : ""));
+    box.append(findingGuide(f), reviewEditor(f));
+    const followup = memoryFollowup(f);
+    if (followup) box.append(followup);
     box.append(h("h3", null, `Record ${f.i + 1} of ${f.collector}`), kvList(rec.fields));
     const others = rec.findings.filter((x) => !(plain(x.rule) === f.rule && plain(x.detail) === f.detail));
     if (others.length) {
@@ -1341,8 +1357,8 @@ tr.detail-row td { max-width: none; background: var(--paper); }
       h("thead", null, h("tr", null, ["Type", "Value", "Severity", "Rules", "Seen in", "Intel"].map((x) => h("th", null, x)))), tbody)));
     return wrap;
   }
-  function copyText(text, btn) {
-    const done = (ok) => { const was = btn.textContent; btn.textContent = ok ? "Copied" : "Copy failed"; setTimeout(() => { btn.textContent = was; }, 1400); };
+  function copyText(text, btn, onCopied = () => {}) {
+    const done = (ok) => { if (ok) onCopied(); const was = btn.textContent; btn.textContent = ok ? "Copied" : "Copy failed"; setTimeout(() => { btn.textContent = was; }, 1400); };
     if (navigator.clipboard && window.isSecureContext) {
       navigator.clipboard.writeText(text).then(() => done(true), () => fallback());
     } else fallback();
@@ -1621,6 +1637,311 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     return wrap;
   }
 
+  // ---- Guided analyst review ------------------------------------------------------------
+  // Memory state belongs to the source object. Recovery keys are computed from
+  // the actual parsed report, never an unverified claimed hash inside a case.
+  const reviews = new WeakMap();
+  const reviewsByHash = new Map();
+  const activeReviews = new Set();
+  const EMPTY_REVIEW = JSON.stringify({ summary: "", findings: [] });
+  const REVIEW_CACHE_PREFIX = "lrng-review-v1:";
+  const REVIEW_CACHE_LIMIT = 1024 * 1024;
+  const REVIEW_PENDING_KEY = REVIEW_CACHE_PREFIX + "pending";
+  const pendingReviewKeys = new Set();
+  try {
+    const raw = sessionStorage.getItem(REVIEW_PENDING_KEY);
+    if (raw && raw.length < 24000) {
+      const keys = JSON.parse(raw);
+      if (Array.isArray(keys) && keys.length <= 256) for (const key of keys) {
+        if (typeof key === "string" && /^lrng-review-v1:[a-f0-9]{64}$/.test(key) && sessionStorage.getItem(key) !== null) pendingReviewKeys.add(key);
+      }
+    }
+  } catch { /* Storage can be disabled, especially on file URLs. */ }
+  let unloadGuard = false;
+  function reviewFor(rep) {
+    if (!reviews.has(rep)) reviews.set(rep, { summary: "", findings: new Map(), baseline: EMPTY_REVIEW, ready: false, prepared: false, key: "", cache: "loading", commands: new Map() });
+    return reviews.get(rep);
+  }
+  function reviewSession() {
+    return reviewFor(model.rep);
+  }
+  const REVIEW_STATUS = ["Unreviewed", "Needs follow-up", "Expected behavior", "Escalated"];
+  function reviewSnapshot(session) {
+    return JSON.stringify({ summary: session.summary, findings: [...session.findings].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) });
+  }
+  function hasUnexportedReviews() {
+    return pendingReviewKeys.size > 0 || [...activeReviews].some((s) => reviewSnapshot(s) !== s.baseline);
+  }
+  function beforeReviewUnload(event) {
+    if (!hasUnexportedReviews()) return;
+    event.preventDefault();
+    event.returnValue = "You have unexported review notes.";
+  }
+  function syncUnloadGuard() {
+    const needed = hasUnexportedReviews();
+    if (needed === unloadGuard) return;
+    unloadGuard = needed;
+    if (needed) window.addEventListener("beforeunload", beforeReviewUnload);
+    else window.removeEventListener("beforeunload", beforeReviewUnload);
+  }
+  function reviewSaveText(session) {
+    if (!session.ready) return "Preparing same-tab draft recovery…";
+    const dirty = reviewSnapshot(session) !== session.baseline;
+    const state = dirty ? "Unexported review notes. " : "No unexported changes in this source. " + (hasUnexportedReviews() ? "Other reports in this tab still have unexported reviews. " : "");
+    return state + (session.cache === "saved" ? "Draft cached for refresh recovery in this tab. Export before closing it."
+      : "Draft recovery is unavailable in this browser or its storage is full. Export before refreshing or closing.");
+  }
+  function reviewSaveStatus(session) {
+    return h("p", { class: "fine review-save-state", role: "status" }, reviewSaveText(session));
+  }
+  function refreshReviewStatus(session) {
+    if (!model || reviewSession() !== session) return;
+    for (const node of document.querySelectorAll(".review-save-state")) {
+      const text = reviewSaveText(session);
+      if (node.textContent !== text) node.textContent = text;
+    }
+  }
+  function persistReview(session) {
+    if (session.key) {
+      try {
+        const data = JSON.stringify({ version: 1, hash: session.key.slice(REVIEW_CACHE_PREFIX.length), review: JSON.parse(reviewSnapshot(session)), baseline: JSON.parse(session.baseline) });
+        if (data.length * 2 > REVIEW_CACHE_LIMIT) throw new Error("draft budget exceeded");
+        sessionStorage.setItem(session.key, data);
+        if (reviewSnapshot(session) !== session.baseline) pendingReviewKeys.add(session.key);
+        else pendingReviewKeys.delete(session.key);
+        if (pendingReviewKeys.size > 256) throw new Error("draft index budget exceeded");
+        sessionStorage.setItem(REVIEW_PENDING_KEY, JSON.stringify([...pendingReviewKeys]));
+        session.cache = "saved";
+      } catch {
+        session.cache = "unavailable";
+        pendingReviewKeys.delete(session.key);
+        try { sessionStorage.removeItem(session.key); sessionStorage.setItem(REVIEW_PENDING_KEY, JSON.stringify([...pendingReviewKeys])); } catch { /* The in-memory dirty guard still applies. */ }
+      }
+    }
+    syncUnloadGuard();
+    refreshReviewStatus(session);
+  }
+  function validateCachedReview(value, keys) {
+    if (!isObj(value) || typeof value.summary !== "string" || value.summary.length > 8000 || !Array.isArray(value.findings) || value.findings.length > keys.size) throw new Error("invalid review draft");
+    const findings = new Map();
+    for (const item of value.findings) {
+      if (!Array.isArray(item) || item.length !== 2 || typeof item[0] !== "string" || !keys.has(item[0]) || findings.has(item[0]) || !isObj(item[1]) || !REVIEW_STATUS.includes(item[1].status) || typeof item[1].note !== "string" || item[1].note.length > 4000) throw new Error("invalid review entry");
+      findings.set(item[0], { status: item[1].status, note: item[1].note });
+    }
+    return { summary: value.summary, findings };
+  }
+  async function prepareReview(m) {
+    const session = reviewFor(m.rep);
+    activeReviews.add(session);
+    if (session.prepared) return;
+    session.prepared = true;
+    try {
+      const hash = await sha256Hex(new TextEncoder().encode(JSON.stringify(m.rep)));
+      if (!hash) throw new Error("report hashing unavailable");
+      session.key = REVIEW_CACHE_PREFIX + hash;
+      if (reviewsByHash.has(session.key)) {
+        const previous = reviewsByHash.get(session.key);
+        reviews.set(m.rep, previous); activeReviews.delete(session); activeReviews.add(previous);
+        syncUnloadGuard();
+        if (model && model.rep === m.rep) render();
+        return;
+      }
+      reviewsByHash.set(session.key, session);
+      const raw = sessionStorage.getItem(session.key);
+      if (raw !== null) {
+        if (raw.length * 2 > REVIEW_CACHE_LIMIT) throw new Error("draft budget exceeded");
+        const cached = JSON.parse(raw);
+        if (!isObj(cached) || cached.version !== 1 || cached.hash !== hash) throw new Error("wrong report draft");
+        const keys = new Set(m.findings.map(findingKey));
+        const restored = validateCachedReview(cached.review, keys), baseline = validateCachedReview(cached.baseline, keys);
+        session.summary = restored.summary; session.findings = restored.findings;
+        session.baseline = reviewSnapshot(baseline);
+      }
+      session.cache = "saved";
+      if (reviewSnapshot(session) !== session.baseline) pendingReviewKeys.add(session.key);
+      else pendingReviewKeys.delete(session.key);
+    } catch { session.cache = "unavailable"; }
+    session.ready = true;
+    syncUnloadGuard();
+    if (model && model.rep === m.rep) render();
+  }
+  function guidance(f) {
+    const groups = [
+      ["cred.", "Possible access to credentials or sessions", "Check the process owner, parent, signer, command line and approved administrative activity. Corroborate with authentication and endpoint logs.", "Password recovery, debugging and authorized security tools can produce similar evidence."],
+      ["persistence.", "A way for code or access to survive a restart", "Check who created this entry, its target file and signer, its creation time, and whether it belongs to approved software.", "Installers, management agents and legitimate application updaters also create persistence."],
+      ["defense.", "A security control or logging setting needs review", "Compare the observed setting with the approved policy. Review change records and management policy before deciding whether it was tampered with.", "Troubleshooting, policy changes and approved exceptions can alter security controls."],
+      ["exec.", "A command or execution pattern needs context", "Read the full command and parent process. Check the file signature, hash, user and timing against an approved task or change.", "Administrative automation and software deployment can use the same utilities."],
+      ["lateral.", "Possible movement between systems", "Check the initiating account, source and destination, authentication events and approved remote administration.", "Help-desk tooling, deployment systems and administrator sessions can look similar."],
+      ["impact.", "A change could affect availability or recovery", "Verify the exact action and its timing against approved maintenance. Escalate corroborated destructive activity through your incident process.", "Backup maintenance and approved repair work may generate related commands."],
+      ["privesc.", "A possible path to greater privileges", "Inspect the referenced driver, executable or setting, its signer and version, and whether it is required and approved.", "Older legitimate software can expose risk without proving that the risk was exploited."],
+    ];
+    const match = groups.find(([prefix]) => f.rule.startsWith(prefix));
+    return match ? match.slice(1) : ["An observed artifact matched a detection rule", "Read the finding detail and source record. Check ownership, timing, related processes and trusted change records before deciding what it means.", "A heuristic match is a lead. Confirm it with independent evidence and expected activity on this host."];
+  }
+  function findingGuide(f) {
+    const [meaning, next, benign] = guidance(f);
+    return h("section", { class: "review-card" }, h("h3", null, "How to review this finding"),
+      h("p", null, h("strong", null, meaning), ". ", f.detail),
+      h("p", null, h("strong", null, "Check next: "), next),
+      h("p", { class: "muted" }, h("strong", null, "Possible benign context: "), benign),
+      h("p", { class: "fine" }, "These are review prompts for this rule family. Severity and confidence are detector signals, not a confirmed incident or a probability of compromise."));
+  }
+  function reviewEditor(f) {
+    const session = reviewSession(), key = findingKey(f);
+    const saved = session.findings.get(key) || { status: "Unreviewed", note: "" };
+    const pick = h("select", { class: "pick", "aria-label": "Review status", disabled: !session.ready }, REVIEW_STATUS.map((s) => h("option", { value: s, selected: s === saved.status }, s)));
+    const note = h("textarea", { class: "review-note", "aria-label": "Finding review notes", rows: "3", maxlength: "4000", disabled: !session.ready, placeholder: "What did you verify? Record the evidence, owner or escalation reference." }, saved.note);
+    function save() {
+      if (pick.value === "Unreviewed" && !note.value) session.findings.delete(key);
+      else session.findings.set(key, { status: pick.value, note: note.value });
+      persistReview(session);
+    }
+    pick.addEventListener("change", save); note.addEventListener("input", save);
+    return h("section", { class: "review-card" }, h("h3", null, "Your review"),
+      h("label", null, "Review status ", pick), h("label", null, "Notes ", note),
+      reviewSaveStatus(session));
+  }
+  function priorityFindings() {
+    state.findings.sevs = new Set(model.findings.some((f) => rank(f.sev) >= 3) ? ["critical", "suspect"] : SEVS.concat([""]));
+    state.findings.q = ""; state.findings.collector = ""; state.findings.tactic = ""; state.findings.shown = PAGE;
+    go("findings");
+  }
+  function coverageGaps() {
+    const run = isObj(model.rep.run) ? model.rep.run : {};
+    const gaps = model.results.flatMap((r) => r.errors.map((error) => r.name + ": " + error));
+    if (run.elevated === false) gaps.unshift("Run was not elevated; protected artifacts may be unavailable.");
+    if (run.interrupted) gaps.unshift("Collection was interrupted; results are partial.");
+    if (model.source.skipped) gaps.unshift(model.source.skipped + " unreadable input lines were skipped.");
+    if (!model.results.length) gaps.unshift("This report contains no collector results.");
+    return gaps;
+  }
+  function handoffText() {
+    const rep = model.rep, review = reviewSession(), gaps = coverageGaps();
+    const src = model.source;
+    const hash = src.caseSource ? src.caseSource.sha256 : src.sha256;
+    const lines = ["LIVERESPONSE NG · ANALYST HANDOFF", "Host: " + plain(rep.host), "Run: " + plain(rep.run_id), "Collected: " + plain(rep.collected_at),
+      "Report SHA-256: " + (hash || "not available for this embedded report"),
+      "Prepared: " + new Date().toISOString(), "", "DETECTOR SIGNALS", ...SEVS.map((s) => s + ": " + model.bySev.get(s)),
+      "Findings are leads requiring validation; zero findings does not establish a clean host.", "", "COLLECTION GAPS", ...(gaps.length ? gaps.slice(0,200) : ["No gaps reported by the supplied collectors. This does not measure every possible artifact."]),
+      ...(gaps.length>200 ? [`${gaps.length-200} more gaps in the source report.`] : []), "", "ANALYST SUMMARY", review.summary || "No analyst summary recorded.", "", "PRIORITY FINDINGS AND REVIEWED ITEMS"];
+    // Never truncate a human's annotations just because the detector generated
+    // many priority signals. Limit only the additional unreviewed signals.
+    const priorities = model.findings.filter((f) => rank(f.sev)>=3 && !review.findings.has(findingKey(f)));
+    const priorityKeys = new Set(priorities.slice(0,200).map(findingKey));
+    const selected = model.findings.filter((f) => priorityKeys.has(findingKey(f)) || review.findings.has(findingKey(f)));
+    for (const f of selected) {
+      const item = review.findings.get(findingKey(f));
+      lines.push(`[${f.sev}] ${f.rule} · ${f.collector}, source result ${model.results[f.ri].sourceIndex}, record ${f.i} (zero-based)`,
+        "Signal: " + f.detail, "Review: " + (item ? item.status : "Unreviewed"), "Notes: " + (item && item.note || "None"), "");
+    }
+    if (priorities.length>200) lines.push(`${priorities.length-200} additional unreviewed priority signals remain in the source report. All annotated findings are included above.`);
+    if (!selected.length) lines.push("No priority or reviewed findings. Review other findings and coverage before closing the investigation.");
+    if (rep.synthetic_demo === true) lines.unshift("SYNTHETIC TRAINING DATA · NOT A REAL INCIDENT", "");
+    return lines.join("\n");
+  }
+  function downloadHandoff() {
+    const session = reviewSession(), snapshot = reviewSnapshot(session);
+    const url = URL.createObjectURL(new Blob([handoffText()], { type: "text/plain;charset=utf-8" }));
+    const a = h("a", { href: url, download: "lrng-analyst-handoff.txt" });
+    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    session.baseline = snapshot; persistReview(session);
+  }
+  function copyHandoff(event) {
+    const session = reviewSession(), snapshot = reviewSnapshot(session);
+    copyText(handoffText(), event.currentTarget, () => { session.baseline = snapshot; persistReview(session); });
+  }
+  function memoryTarget(f) {
+    if (rank(f.sev) < 3 || !["processes", "memory", "modules", "network"].includes(f.collector) || !["windows", "linux"].includes(model.rep.os)) return null;
+    const fields = recordOf(f).fields, pid = fields.pid;
+    // A PID is the only report value that enters the shell command. Strings,
+    // fractions, parent PIDs, paths and detection text never become arguments.
+    if (!Number.isSafeInteger(pid) || pid < 1 || pid > 2147483647) return null;
+    if (!model.memoryProcesses) {
+      model.memoryProcesses = new Map();
+      for (const r of model.results) if (r.name === "processes") for (const rec of r.records) {
+        const id = rec.fields.pid;
+        model.memoryProcesses.set(id, model.memoryProcesses.has(id) ? null : rec.fields);
+      }
+    }
+    const observed = model.memoryProcesses.has(pid) ? model.memoryProcesses.get(pid) : f.collector === "memory" ? fields : null;
+    if (!observed || !(typeof observed.name === "string" && observed.name.trim() || typeof observed.image_path === "string" && observed.image_path.trim())) return null;
+    const equal = (a, b) => model.rep.os === "windows" ? a.toLowerCase() === b.toLowerCase() : a === b;
+    if (typeof fields.image_path === "string" && typeof observed.image_path === "string" && !equal(fields.image_path, observed.image_path)) return null;
+    return { pid, fields: observed };
+  }
+  function memoryCommand(target) {
+    const session = reviewSession();
+    if (!session.commands.has(target.pid)) {
+      const stamp = new Date().toISOString().replace(/[-:.]/g, "");
+      const exe = model.rep.os === "windows" ? ".\\lrng.exe" : "./lrng";
+      session.commands.set(target.pid, `${exe} -collectors memory -mem-pids ${target.pid} -mem-budget 60s -mem-timeout 90s -mem-workers 1 -no-dns -format html -out memory-pid-${target.pid}-${stamp}.html`);
+    }
+    return session.commands.get(target.pid);
+  }
+  function memoryFollowup(f) {
+    const target = memoryTarget(f);
+    if (!target) return null;
+    const command = memoryCommand(target), fields = target.fields;
+    return h("section", { class: "review-card memory-followup" }, h("h3", null, `Process-memory follow-up · PID ${target.pid}`),
+      h("p", null, `Original host: ${plain(model.rep.host)} · Report collected: ${plain(fmtTime(model.rep.collected_at))}`),
+      h("p", null, `Observed process: ${plain(fields.name) || "not recorded"} · Image: ${plain(fields.image_path) || "not recorded"} · Started: ${plain(fields.created_at) || "not recorded"}`),
+      h("p", null, "Run on the original host only, after checking that this PID still belongs to the observed process. Saved reports cannot verify the current host or PID; a process may have exited and its PID may have been reused."),
+      model.rep.synthetic_demo === true ? h("p", { class: "warn" }, "Synthetic training example. This PID does not identify a verified live target.") : null,
+      h("pre", { class: "ev scan-command" }, command),
+      h("button", { class: "btn", type: "button", onclick: (e) => copyText(command, e.currentTarget) }, "Copy memory-scan command"),
+      h("p", { class: "fine" }, "Run from the extracted LRNG folder with its sidecar, using elevation if needed. This scans one process with bounded budgets and writes an HTML report plus checksum. Built-in memory checks and prompt scanning run; YARA matching requires your own trusted rules via -yara. Default sensitive-process exclusions remain in effect. Copying does not start a scan."));
+  }
+  function memoryFollowups() {
+    const seen = new Set(), cards = [];
+    for (const finding of model.findings) {
+      const target = memoryTarget(finding);
+      if (!target || seen.has(target.pid)) continue;
+      seen.add(target.pid); cards.push(memoryFollowup(finding));
+      if (cards.length === 3) break;
+    }
+    return cards.length ? h("section", null, h("h3", null, "Optional process-memory follow-up"),
+      h("p", { class: "muted" }, "Commands for up to three priority processes in this source report. Open a finding for its individual follow-up."), cards) : null;
+  }
+  function viewReview() {
+    const session = reviewSession(), gaps = coverageGaps();
+    const priority = model.findings.filter((f) => rank(f.sev)>=3).length;
+    const reviewed = [...session.findings.values()].filter((v) => v.status !== "Unreviewed").length;
+    const wrap = h("section", null, h("h2", { class: "view-title" }, "Start here"),
+      h("p", { class: "view-sub" }, "A guided review of this source report. Evidence first, then your decision."),
+      h("div", { class: "review-grid" },
+        h("div", { class: "review-card" }, h("h3", null, `${priority} priority signals`), h("p", null, "Critical and suspect findings are the first review queue. A signal still needs context and corroboration.")),
+        h("div", { class: "review-card" }, h("h3", null, `${fmtNum(gaps.length)} reported coverage gaps`), h("p", null, "Unreadable or interrupted collection can hide evidence. Review the run details before concluding that nothing happened.")),
+        h("div", { class: "review-card" }, h("h3", null, `${reviewed} of ${model.findings.length} findings reviewed`), h("p", null, "Open a finding to add your assessment and notes. Each source report keeps its own review in this tab."))),
+      h("section", { class: "review-card" }, h("h3", null, "1. Review the signals"),
+        h("p", null, "Open a finding for its source record, a review prompt, and possible benign context. Follow process, timeline and evidence-graph links to corroborate it."),
+        h("button", { class: "btn primary", type: "button", onclick: priorityFindings }, priority ? "Review priority findings" : "Review all findings")),
+      h("section", { class: "review-card" }, h("h3", null, "2. Check what was missed"),
+        h("p", null, gaps.length ? gaps.slice(0,3).join(" · ") : "No collection errors are reported. Only the collectors included in this report were checked; absence of findings is not proof that the host is clean."),
+        h("button", { class: "btn", type: "button", onclick: () => go("run") }, "Review collection coverage")));
+    const memory = memoryFollowups();
+    if (memory) wrap.append(memory);
+    const notes = h("textarea", { class: "review-note", rows: "5", maxlength: "8000", disabled: !session.ready, "aria-label": "Analyst handoff summary", placeholder: "What happened, what did you verify, what is still uncertain, and who should act next?" }, session.summary);
+    notes.addEventListener("input", () => { session.summary = notes.value; persistReview(session); });
+    wrap.append(h("section", { class: "review-card" }, h("h3", null, "3. Leave a useful handoff"),
+      h("p", null, "Record what the next analyst needs. The download includes this summary, priority signals, reviewed findings, source references and collection gaps."),
+      h("label", null, "Analyst summary ", notes),
+      h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", disabled: !session.ready, onclick: downloadHandoff }, "Download analyst handoff"),
+        h("button", { class: "btn", type: "button", disabled: !session.ready, onclick: copyHandoff }, "Copy handoff")),
+      reviewSaveStatus(session),
+      h("p", { class: "fine" }, "Drafts stay in this tab's session storage where available. Closing the tab ends the cache. Reopen the same report after refreshing the standalone viewer to recover its draft. Export for a durable handoff and preserve the original report and checksum separately.")));
+    return wrap;
+  }
+  function openDemo() {
+    const rep = { tool: "liveresponse-ng", tool_version: "training", schema_version: "1.2", synthetic_demo: true,
+      host: "SAMPLE-ENDPOINT", os: "windows", arch: "amd64", run_id: "synthetic-training-run", collected_at: "2026-01-01T12:00:00Z",
+      run: { elevated: false, interrupted: false, collectors: ["processes", "services", "eventlog"] }, results: [
+        { collector: "processes", records: [{ fields: { pid: 2400, ppid: 1000, name: "powershell.exe", command_line: "Synthetic training command; no command was executed", image_path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" }, findings: [{ rule: "exec.powershell_encoded", severity: "suspect", confidence: 85, technique: "T1059.001", detail: "Training signal: an encoded PowerShell command needs validation against approved automation." }] }] },
+        { collector: "services", records: [{ fields: { name: "SampleUpdater", image_path: "C:\\Program Files\\Example\\updater.exe", state: "running" }, findings: [{ rule: "persistence.sample_service", severity: "notable", confidence: 40, detail: "Training signal: confirm the service owner and approved installation." }] }] },
+        { collector: "eventlog", records: [], errors: ["Synthetic collection gap: Security events were unavailable in this non-elevated example."] } ] };
+    open(JSON.stringify(rep), { name: "Synthetic training report", embedded: true });
+    go("review");
+  }
+
   // ---- Startup ---------------------------------------------------------------------------
   async function sha256Hex(buf) {
     if (!(window.crypto && crypto.subtle && window.isSecureContext)) return "";
@@ -1642,6 +1963,8 @@ tr.detail-row td { max-width: none; background: var(--paper); }
       showError("This isn't an lrng report: " + err.message + ".");
       return;
     }
+    if (model && hasUnexportedReviews() && !window.confirm("This report or case has unexported review notes. Cancel to export them first, or continue to open the new file. Same-tab cached drafts remain available where storage is supported.")) return;
+    activeReviews.clear(); syncUnloadGuard();
     workspace = parsed.workspace ? { rep: parsed.workspace, source, selected: parsed.workspace.sources[0].id } : null;
     source.skipped = parsed.skipped;
     state.workspace = { q: "", shown: PAGE, compareQ: "", compareShown: PAGE };
@@ -1665,6 +1988,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     pendingFocus = null;
     lastRoute = "";
     document.title = (plain(rep.host) || "Report") + " – lrng report";
+    prepareReview(model);
   }
   function alertBar(msg) {
     const warnRow = document.querySelector(".case .warn-row") || $("case").appendChild(h("div", { class: "warn-row" }));
@@ -1702,6 +2026,9 @@ tr.detail-row td { max-width: none; background: var(--paper); }
       if (s) { e.preventDefault(); s.focus(); }
     }
   });
+  $("demo").addEventListener("click", openDemo);
+  syncUnloadGuard();
+  if (location.hash === "#demo") openDemo();
   const embedded = $("lrng-report");
   if (embedded && embedded.textContent.trim()) open(embedded.textContent, { name: "", size: 0, sha256: "", embedded: true });
 })();

@@ -22,4 +22,4 @@ func (c *autorunsCollector) Collect(ctx context.Context) (Result, error) {
 	return collectAutoruns(ctx, c.opts)
 }
 
-func init() { Register(&autorunsCollector{}) }
+func init() { Register(func() Collector { return &autorunsCollector{} }) }

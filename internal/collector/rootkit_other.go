@@ -19,4 +19,4 @@ func (rootkitCollector) Collect(ctx context.Context) (Result, error) {
 	return NewResult("rootkit").Finish(), nil
 }
 
-func init() { Register(rootkitCollector{}) }
+func init() { Register(func() Collector { return rootkitCollector{} }) }

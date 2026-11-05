@@ -17,4 +17,4 @@ func (c *modulesCollector) Collect(ctx context.Context) (Result, error) {
 	return collectModules(ctx, c.opts)
 }
 
-func init() { Register(&modulesCollector{}) }
+func init() { Register(func() Collector { return &modulesCollector{} }) }

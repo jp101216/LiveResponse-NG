@@ -24,7 +24,7 @@ func (kmodCollector) Collect(ctx context.Context) (Result, error) {
 	return scanKmod(ctx, "/"), nil
 }
 
-func init() { Register(kmodCollector{}) }
+func init() { Register(func() Collector { return kmodCollector{} }) }
 
 // Boot-time module lists and modprobe configuration, in systemd's and
 // kmod's search order (earlier directories win for a same-named file).

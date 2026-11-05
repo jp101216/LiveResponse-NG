@@ -18,4 +18,4 @@ func (amcacheCollector) Collect(ctx context.Context) (Result, error) {
 	return collectAmcache(ctx)
 }
 
-func init() { Register(amcacheCollector{}) }
+func init() { Register(func() Collector { return amcacheCollector{} }) }

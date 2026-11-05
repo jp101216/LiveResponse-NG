@@ -37,7 +37,7 @@ func (*defensesCollector) Collect(ctx context.Context) (Result, error) {
 	return collectDefenses(ctx)
 }
 
-func init() { Register(&defensesCollector{}) }
+func init() { Register(func() Collector { return &defensesCollector{} }) }
 
 // exclusion is one thing Defender won't scan.
 type exclusion struct {

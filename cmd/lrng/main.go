@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jp101216/liveresponse-ng/internal/analyst"
 	"github.com/jp101216/liveresponse-ng/internal/collector"
 	"github.com/jp101216/liveresponse-ng/internal/config"
 	"github.com/jp101216/liveresponse-ng/internal/hostinfo"
@@ -54,6 +55,9 @@ func main() {
 	var (
 		list        = flag.Bool("list", false, "list collectors available on this OS and exit")
 		showVer     = flag.Bool("version", false, "print version and exit")
+		ui          = flag.Bool("ui", false, "open the local guided analyst console in a browser")
+		uiNoOpen    = flag.Bool("ui-no-open", false, "with -ui, print the console URL without opening a browser")
+		uiReports   = flag.String("ui-reports", "", "with -ui, save collections under this folder instead of the account's home folder")
 		collectors  = flag.String("collectors", "", `comma-separated collectors to run; "default" is the default set (default: default)`)
 		allow       = flag.String("allow", "", "comma-separated extra process names allowed to call LLM APIs")
 		pingSide    = flag.Bool("ping-sidecar", false, "check the Rust sidecar is reachable and exit")
@@ -109,6 +113,7 @@ func main() {
 	flag.Parse()
 	var explicit []string
 	flag.Visit(func(f *flag.Flag) { explicit = append(explicit, f.Name) })
+	usageErrorOn(validateUIOptions(*ui, explicit))
 	usageErrorOn(validateCaseOptions(cfg, caseReports, *caseName, *compareCase, *sameHost, explicit))
 
 	if *evtxOffline != "" && (cfg.Adaptive || cfg.TraceOnly || cfg.CloudOnly) {
@@ -145,6 +150,19 @@ func main() {
 	}()
 
 	switch {
+	case *ui:
+		exitOn(analyst.Serve(ctx, analyst.Options{
+			Version: versionString(), Directory: *uiReports, Run: doRunWithProgress,
+			Ready: func(url string) {
+				fmt.Fprintln(os.Stderr, "LiveResponse NG analyst console: "+url)
+				if !*uiNoOpen {
+					if err := analyst.OpenBrowser(url); err != nil {
+						fmt.Fprintln(os.Stderr, "Open the console URL above in a local browser:", err)
+					}
+				}
+			},
+		}))
+		return
 	case len(caseReports) > 0:
 		summary, err := doCase(ctx, cfg, caseReports, *caseName, *compareCase, *sameHost)
 		exitOn(err)
@@ -185,6 +203,18 @@ func main() {
 
 // validate rejects option combinations that would otherwise be silently
 // misread — on a live response, a typo should stop the run, not change it.
+func validateUIOptions(enabled bool, explicit []string) error {
+	for _, name := range explicit {
+		if enabled && name != "ui" && name != "ui-no-open" && name != "ui-reports" {
+			return fmt.Errorf("-%s cannot be combined with -ui; choose collection settings in the console", name)
+		}
+		if !enabled && (name == "ui-no-open" || name == "ui-reports") {
+			return fmt.Errorf("-%s requires -ui", name)
+		}
+	}
+	return nil
+}
+
 func validate(cfg config.Config, args []string, memScan int) error {
 	switch {
 	case len(args) > 0:
@@ -241,6 +271,7 @@ func usage() {
 
 Usage: lrng [flags]
 
+  lrng -ui                            open the guided local analyst console
   lrng -out host.json                  default collectors; also writes host.json.sha256
   lrng -collectors default,dnscache    add an opt-in collector to the default set
   lrng -no-dns -out host.json          skip module A's LLM-provider DNS lookups
@@ -343,6 +374,10 @@ func selectCollectors(cfg config.Config) ([]collector.Collector, error) {
 }
 
 func doRun(ctx context.Context, cfg config.Config) (output.Report, error) {
+	return doRunWithProgress(ctx, cfg, nil)
+}
+
+func doRunWithProgress(ctx context.Context, cfg config.Config, progress func(collector.Result)) (output.Report, error) {
 	started := time.Now().UTC()
 	cfg.Graph = cfg.Graph || cfg.AgentTrace != "" || cfg.Adaptive || cfg.CloudAudit != ""
 	traceFiles, err := expandAgentTracePaths(cfg.AgentTrace)
@@ -438,7 +473,7 @@ func doRun(ctx context.Context, cfg config.Config) (output.Report, error) {
 		Sigma:           sigmaRS,
 	})
 
-	d := &collector.Dispatcher{Workers: cfg.Workers, Timeout: cfg.Timeout}
+	d := &collector.Dispatcher{Workers: cfg.Workers, Timeout: cfg.Timeout, OnResult: progress}
 	results := d.Run(ctx, selected)
 	if len(traceFiles) > 0 {
 		results = append(results, collector.ParseAgentTraceFiles(ctx, traceFiles))

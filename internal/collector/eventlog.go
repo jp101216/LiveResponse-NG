@@ -34,7 +34,7 @@ func (c *eventLogCollector) Collect(ctx context.Context) (Result, error) {
 	return collectEventLog(ctx, c.sigma)
 }
 
-func init() { Register(&eventLogCollector{}) }
+func init() { Register(func() Collector { return &eventLogCollector{} }) }
 
 // Retention bounds. Logs are parsed whole, newest record first (a log of any
 // size streams through in constant memory); what is bounded is how many

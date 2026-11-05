@@ -33,7 +33,7 @@ func (c *implantsCollector) Collect(ctx context.Context) (Result, error) {
 	return collectImplants(ctx, c.opts)
 }
 
-func init() { Register(&implantsCollector{}) }
+func init() { Register(func() Collector { return &implantsCollector{} }) }
 
 // xorKey decodes a marker stored XOR 0x5A.
 func xorKey(s string) []byte {

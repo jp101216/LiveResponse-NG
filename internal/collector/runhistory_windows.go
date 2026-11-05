@@ -68,4 +68,4 @@ func (*runHistoryCollector) Collect(ctx context.Context) (Result, error) {
 	return r.Finish(), nil
 }
 
-func init() { Register(&runHistoryCollector{}) }
+func init() { Register(func() Collector { return &runHistoryCollector{} }) }

@@ -23,6 +23,10 @@ type Dispatcher struct {
 	// Grace is how long to wait after the timeout for a collector that honours
 	// cancellation to return its partial results. 0 means defaultGrace.
 	Grace time.Duration
+	// OnResult observes each completed collector, including skipped collectors
+	// after cancellation. Calls may overlap across workers; observers must be
+	// concurrency-safe and return promptly. Results remain owned by the run.
+	OnResult func(Result)
 }
 
 // Run executes every collector and returns one Result per collector, in the
@@ -59,9 +63,15 @@ func (d *Dispatcher) Run(ctx context.Context, cs []Collector) []Result {
 					out[i] = finalize(Result{Errors: []string{
 						"not run: the run was interrupted before this collector started (" + err.Error() + ")"}},
 						cs[i].Name(), time.Now().UTC())
+					if d.OnResult != nil {
+						d.OnResult(out[i])
+					}
 					continue
 				}
 				out[i] = d.runOne(ctx, cs[i])
+				if d.OnResult != nil {
+					d.OnResult(out[i])
+				}
 			}
 		}()
 	}

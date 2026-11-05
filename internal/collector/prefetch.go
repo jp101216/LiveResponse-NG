@@ -19,4 +19,4 @@ func (prefetchCollector) Collect(ctx context.Context) (Result, error) {
 	return collectPrefetch(ctx)
 }
 
-func init() { Register(prefetchCollector{}) }
+func init() { Register(func() Collector { return prefetchCollector{} }) }

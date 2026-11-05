@@ -41,7 +41,7 @@ func (*lateralCollector) Collect(ctx context.Context) (Result, error) {
 	return collectLateral(ctx)
 }
 
-func init() { Register(&lateralCollector{}) }
+func init() { Register(func() Collector { return &lateralCollector{} }) }
 
 // pipeRule is one known pipe name and who uses it.
 type pipeRule struct {

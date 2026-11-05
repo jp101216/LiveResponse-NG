@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -39,6 +40,27 @@ func TestDispatcherKeepsOrder(t *testing.T) {
 	for i, r := range res {
 		if r.Collector != cs[i].Name() {
 			t.Fatalf("slot %d = %s, want %s", i, r.Collector, cs[i].Name())
+		}
+	}
+}
+
+func TestDispatcherProgressIncludesCancelledCollectors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var lock sync.Mutex
+	seen := map[string]int{}
+	d := Dispatcher{Workers: 2, OnResult: func(r Result) { lock.Lock(); defer lock.Unlock(); seen[r.Collector]++ }}
+	results := d.Run(ctx, []Collector{ok("a"), ok("b"), ok("c")})
+	for _, r := range results {
+		if seen[r.Collector] != 1 || len(r.Errors) == 0 {
+			t.Fatalf("cancelled progress lost: %+v %v", r, seen)
+		}
+	}
+	seen = map[string]int{}
+	results = d.Run(context.Background(), []Collector{ok("a"), ok("b")})
+	for _, r := range results {
+		if seen[r.Collector] != 1 || len(r.Records) != 1 {
+			t.Fatalf("completed progress lost: %+v %v", r, seen)
 		}
 	}
 }

@@ -122,6 +122,14 @@ jobs:
         env:
           NODE_PATH: ${{ runner.temp }}/pw/node_modules
         run: node viewer/browsertest/browser_test.cjs windows/report.json windows/report.jsonl windows/report.html linux.json linux.html cloud.json cloud.jsonl cloud.html
+      - name: guided collection, review notes, training demo and handoff
+        env:
+          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+        run: node viewer/browsertest/analyst_browser_test.cjs ./lrng
+      - name: draft recovery, close warnings and memory follow-up commands
+        env:
+          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+        run: node viewer/browsertest/review_browser_test.cjs case.json
 
   rust-linux:
     name: Rust sidecar (Linux; type-check Windows code)

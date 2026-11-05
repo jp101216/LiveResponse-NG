@@ -61,6 +61,21 @@ async function check(browser, file, hostile = false) {
   }
   await nav(page, "Case overview").click();
   await page.waitForSelector(".case-source");
+  // Review notes follow the exact source object, even when hostnames and PIDs
+  // repeat across source runs. Source switching must not transfer assessments.
+  const sourcePick=page.getByRole("combobox",{name:"Source report",exact:true});
+  const sourceIDs=await sourcePick.locator("option").evaluateAll((xs)=>xs.map((x)=>x.value));
+  await sourcePick.selectOption(sourceIDs[0]);
+  await page.locator("nav").getByRole("button",{name:/Start here/}).click();
+  await page.getByLabel("Analyst handoff summary").fill("Review belongs to the first source only.");
+  await page.getByRole("combobox",{name:"Source report",exact:true}).selectOption(sourceIDs[1]);
+  await page.locator("nav").getByRole("button",{name:/Start here/}).click();
+  assert.equal(await page.getByLabel("Analyst handoff summary").inputValue(),"");
+  await page.getByRole("combobox",{name:"Source report",exact:true}).selectOption(sourceIDs[0]);
+  await page.locator("nav").getByRole("button",{name:/Start here/}).click();
+  assert.equal(await page.getByLabel("Analyst handoff summary").inputValue(),"Review belongs to the first source only.");
+  await nav(page,"Case overview").click();
+  await page.waitForSelector(".case-source");
   const audit = await page.evaluate(() => ({ foreign: document.querySelectorAll("img,svg,iframe,object,embed,form").length, scripts: document.scripts.length, polluted: ({}).polluted, nodes: document.querySelectorAll("*").length }));
   assert.equal(audit.foreign, 0, "hostile data stayed text");
   assert.equal(audit.scripts, 2);

@@ -6,7 +6,7 @@ Extract the release archive first. On Windows, double-click **Start-LRNG.cmd** b
 
 On a Linux desktop, run **Start-LRNG.sh**. Desktop file-manager behavior varies; if it opens in an editor, use `sh Start-LRNG.sh`. Experienced operators can start the same console with `lrng -ui`. On a machine without a browser, use the CLI or transfer a saved report to a workstation with the offline viewer. The console listens only on this computer.
 
-If a browser does not open, copy the local URL printed by the launcher into a browser on the same computer. Keep the launcher running until you close the console with its button.
+If a browser does not open, copy the local URL printed by the launcher into a browser on the same computer. The first browser to open the URL is the only one that can use that console. Keep the launcher running until you close the console with its button.
 
 ## Collect with a profile
 
@@ -50,6 +50,8 @@ Use **Try a sample investigation** in the console or standalone viewer. It opens
 
 ## Local session boundaries
 
-The console uses an OS-assigned loopback port and an unguessable session URL, validates the host and request origin, and accepts only named profiles. It has no remote listener, account system, telemetry or upload service. Treat the URL like a local session secret. The report viewer keeps its strict offline policy and renders report data as text.
+The console uses an OS-assigned loopback port and an unguessable session URL, validates the host and request origin, and accepts only named profiles. It has no remote listener, account system, telemetry or upload service. The report viewer keeps its strict offline policy and renders report data as text.
+
+The URL alone does not grant access. It reaches the browser on a command line, which other local accounts can read on Linux, so the first browser to open the console page claims the session with a cookie only that browser holds. Its report tabs and downloads keep working. Any other browser, program or account that tries the address is refused, and the launcher's terminal prints a warning. If you see that warning and did not open the console in another browser, stop the console and treat it as a possible sign of compromise. To use a browser other than the one that opened automatically, start the console with `-ui-no-open` and paste the URL into that browser first.
 
 Use **Close console** when finished. During a collection, stop and let the partial report finish first. Saved evidence remains on disk. On terminal interruption, the console requests cancellation and gives the collection a bounded period to save partial evidence; a forced second interrupt can stop it immediately.

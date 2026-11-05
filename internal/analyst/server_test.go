@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,13 +21,24 @@ import (
 	"github.com/jp101216/liveresponse-ng/internal/output"
 )
 
+const testSession = "test-browser-session"
+
+// testConsole returns a console whose session the test client has already
+// claimed; request sends that client's cookie.
 func testConsole(t *testing.T, run func(context.Context, config.Config, func(collector.Result)) (output.Report, error)) (*console, *httptest.Server) {
+	return testConsoleWith(t, run, true, nil)
+}
+
+// testConsoleWith returns a console that is either already claimed or still
+// waiting for its first browser, with an optional operator-warning hook.
+func testConsoleWith(t *testing.T, run func(context.Context, config.Config, func(collector.Result)) (output.Report, error), claimed bool, warn func(string)) (*console, *httptest.Server) {
 	t.Helper()
 	ctx, stop := context.WithCancel(context.Background())
-	c := &console{ctx: ctx, stop: stop, prefix: "/test-session/", opts: Options{Version: "test", Directory: t.TempDir(), Run: run}}
-	s := httptest.NewServer(c)
-	c.origin = s.URL
-	c.host = strings.TrimPrefix(s.URL, "http://")
+	c := &console{ctx: ctx, stop: stop, prefix: "/test-session/", session: testSession, claimed: claimed, opts: Options{Version: "test", Directory: t.TempDir(), Run: run, Warn: warn}}
+	s := httptest.NewUnstartedServer(c)
+	c.host = s.Listener.Addr().String()
+	c.origin = "http://" + c.host
+	s.Start()
 	t.Cleanup(func() { stop(); s.Close(); c.workers.Wait() })
 	return c, s
 }
@@ -35,6 +48,7 @@ func request(t *testing.T, s *httptest.Server, c *console, method, path, body st
 	if err != nil {
 		t.Fatal(err)
 	}
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: testSession})
 	if method == http.MethodPost {
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set("Origin", c.origin)
@@ -71,6 +85,7 @@ func TestConsoleRejectsForeignRequestsAndCommands(t *testing.T) {
 				method = http.MethodGet
 			}
 			r := httptest.NewRequest(method, s.URL+c.prefix+test.path, strings.NewReader(test.body))
+			r.AddCookie(&http.Cookie{Name: sessionCookie, Value: testSession})
 			r.Host = c.host
 			if test.host != "" {
 				r.Host = test.host
@@ -189,15 +204,32 @@ func TestServeUsesLoopbackAndCloses(t *testing.T) {
 	if !strings.HasPrefix(url, "http://127.0.0.1:") {
 		t.Fatal("not loopback", url)
 	}
-	r, _ := http.NewRequest("POST", url+"api/close", strings.NewReader(`{}`))
-	r.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(r)
+	closeWith := func(client *http.Client) int {
+		r, _ := http.NewRequest("POST", url+"api/close", strings.NewReader(`{}`))
+		r.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		return response.StatusCode
+	}
+	// Knowing the address is not enough to drive the console.
+	if code := closeWith(http.DefaultClient); code != 403 {
+		t.Fatal("console closed by a client that never opened it", code)
+	}
+	jar, _ := cookiejar.New(nil)
+	browser := &http.Client{Jar: jar}
+	page, err := browser.Get(url)
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
-	if response.StatusCode != 200 {
-		t.Fatal("close failed", response.StatusCode)
+	page.Body.Close()
+	if page.StatusCode != 200 {
+		t.Fatal("console page refused its first browser", page.StatusCode)
+	}
+	if code := closeWith(browser); code != 200 {
+		t.Fatal("close failed", code)
 	}
 	select {
 	case err := <-done:
@@ -206,5 +238,93 @@ func TestServeUsesLoopbackAndCloses(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("console did not close")
+	}
+}
+
+// The console address reaches the browser on a command line that other local
+// accounts can read, so it must not work as a credential on its own.
+func TestConsoleBindsToFirstBrowser(t *testing.T) {
+	var mu sync.Mutex
+	var warnings []string
+	c, s := testConsoleWith(t, nil, false, func(message string) { mu.Lock(); warnings = append(warnings, message); mu.Unlock() })
+	do := func(client *http.Client, method, path, cookie string) (int, string) {
+		t.Helper()
+		r, err := http.NewRequest(method, s.URL+c.prefix+path, strings.NewReader(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if method == http.MethodPost {
+			r.Header.Set("Content-Type", "application/json")
+		}
+		if cookie != "" {
+			r.Header.Set("Cookie", cookie)
+		}
+		response, err := client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		data, _ := io.ReadAll(response.Body)
+		return response.StatusCode, string(data)
+	}
+	other := &http.Client{}
+
+	// Nothing but the console page itself answers before a browser opens it.
+	if code, _ := do(other, "GET", "api/info", ""); code != 403 {
+		t.Fatal("API served before any browser opened the console", code)
+	}
+
+	// The first page load claims the session with a narrowly scoped cookie.
+	jar, _ := cookiejar.New(nil)
+	analyst := &http.Client{Jar: jar}
+	r, _ := http.NewRequest("GET", s.URL+c.prefix, nil)
+	response, err := analyst.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != 200 {
+		t.Fatal("first browser refused", response.StatusCode)
+	}
+	var issued *http.Cookie
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == sessionCookie {
+			issued = cookie
+		}
+	}
+	if issued == nil || issued.Value != testSession || !issued.HttpOnly || issued.SameSite != http.SameSiteStrictMode || issued.Path != c.prefix {
+		t.Fatalf("session cookie missing or too broad: %+v", issued)
+	}
+
+	// The claimant keeps working: page reloads, API calls and report routes.
+	for _, path := range []string{"", "api/info", "api/jobs", "console.js", "demo"} {
+		if code, _ := do(analyst, "GET", path, ""); code != 200 {
+			t.Fatalf("claimant refused %q: %d", path, code)
+		}
+	}
+
+	// Anyone else with the address is refused everywhere, with an explanation,
+	// and so is a guessed or empty cookie.
+	for _, attempt := range []struct{ method, path, cookie string }{
+		{"GET", "", ""}, {"GET", "api/info", ""}, {"GET", "api/jobs", ""}, {"GET", "console.js", ""},
+		{"GET", "viewer", ""}, {"POST", "api/jobs", ""}, {"POST", "api/close", ""},
+		{"GET", "api/jobs", sessionCookie + "=guess"}, {"GET", "api/jobs", sessionCookie + "="},
+	} {
+		code, body := do(other, attempt.method, attempt.path, attempt.cookie)
+		if code != 403 || !strings.Contains(body, "already open in another browser") {
+			t.Fatalf("%s %q with cookie %q: %d %s", attempt.method, attempt.path, attempt.cookie, code, body)
+		}
+	}
+
+	// The operator is warned once, not once per request.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "possible sign of compromise") {
+		t.Fatalf("terminal warnings: %q", warnings)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.refused != 10 {
+		t.Fatalf("refused %d requests, want 10", c.refused)
 	}
 }

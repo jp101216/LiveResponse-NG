@@ -161,6 +161,7 @@ func main() {
 					}
 				}
 			},
+			Warn: func(message string) { fmt.Fprintln(os.Stderr, message) },
 		}))
 		return
 	case len(caseReports) > 0:

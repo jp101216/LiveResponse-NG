@@ -30,6 +30,12 @@ const { chromium } = require("playwright");
   });
     const page=await context.newPage();await page.goto(url);
     await page.getByRole("button",{name:/Quick triage/}).waitFor();
+    // The first browser owns the session. Another browser (or program) with a copy of the address is refused, and the terminal says so.
+    const intruder=await browser.newContext();const refused=await (await intruder.newPage()).goto(url);
+    assert.equal(refused.status(),403);assert.match(await refused.text(),/already open in another browser/);
+    assert.equal((await intruder.request.get(url+"api/jobs")).status(),403);await intruder.close();
+    for(let i=0;i<50&&!output.includes("refused a request");i++)await new Promise((r)=>setTimeout(r,100));
+    assert.match(output,/refused a request that did not come from the browser that opened it/);
     assert.equal(await page.getByRole("button",{name:"Start collection",exact:true}).isDisabled(),true);
     const popup=context.waitForEvent("page");await page.getByRole("link",{name:"Try a sample investigation"}).click();
     const sample=await popup;await sample.getByRole("heading",{name:"Start here",exact:true}).waitFor();

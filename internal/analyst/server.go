@@ -33,12 +33,28 @@ import (
 var assets embed.FS
 
 // Options supplies the collection engine and optional storage/ready hooks.
+// Warn, when set, receives operator warnings such as a refused request from
+// something other than the browser that opened the console.
 type Options struct {
 	Version   string
 	Directory string
 	Run       func(context.Context, config.Config, func(collector.Result)) (output.Report, error)
 	Ready     func(string)
+	Warn      func(string)
 }
+
+// sessionCookie carries the secret that binds the console to the first
+// browser that opens its address.
+const sessionCookie = "lrng_console"
+
+const refusedMessage = `This console is already open in another browser. Only the browser that first opened its address can use it.
+
+If you opened it yourself, return to that browser. If you did not, another program or user on this computer may have copied the console address: stop the console and treat this as a possible sign of compromise.
+`
+
+const refusedWarning = "Warning: the analyst console refused a request that did not come from the browser that opened it. " +
+	"If you did not open the console in a second browser, another program or user on this computer may have its address. " +
+	"Stop the console (Ctrl+C) and treat this as a possible sign of compromise."
 
 type profile struct {
 	ID          string   `json:"id"`
@@ -61,10 +77,19 @@ func profiles() []profile {
 	for _, c := range collector.Defaults() {
 		defaults = append(defaults, c.Name())
 	}
+	// Each profile names collectors for every platform; filter keeps the ones
+	// this OS has, and the descriptions say only what this OS collects.
+	quick := "Start with processes, connections, startup entries, services and host defenses."
+	persistence := "Focus on programs and settings that can keep running after a restart or sign-in."
+	if runtime.GOOS == "linux" {
+		quick = "Start with processes, connections and startup entries such as cron jobs and systemd units."
+		persistence = "Focus on programs, settings and kernel components that can keep running after a restart or sign-in."
+	}
 	return []profile{
-		{"quick", "Quick triage", "Start with processes, connections, startup entries, services and host defenses.", filter("processes", "network", "autoruns", "services", "defenses")},
+		{"quick", "Quick triage", quick, filter("processes", "network", "autoruns", "services", "defenses")},
 		{"full", "Full triage", "Collect all standard artifacts available on this operating system, with the bundled event-log rules.", defaults},
-		{"persistence", "Persistence review", "Focus on programs and settings that can keep running after a restart or sign-in.", filter("processes", "autoruns", "services", "scheduledtasks", "wmi", "drivers", "aiagents")},
+		// drivers is the Windows kernel surface; kmod, ebpf and rootkit are Linux's.
+		{"persistence", "Persistence review", persistence, filter("processes", "autoruns", "services", "scheduledtasks", "wmi", "drivers", "kmod", "ebpf", "rootkit", "aiagents")},
 	}
 }
 
@@ -93,7 +118,10 @@ type console struct {
 	ctx                  context.Context
 	stop                 context.CancelFunc
 	host, origin, prefix string
+	session              string // cookie value given to the first browser
 	mu                   sync.Mutex
+	claimed              bool // guarded by mu
+	refused              int  // guarded by mu
 	jobs                 []*job
 	workers              sync.WaitGroup
 }
@@ -109,6 +137,11 @@ func randomID() (string, error) {
 // Serve listens only on IPv4 loopback at an OS-selected port. A random session
 // path, exact Host checking, Origin checking, JSON-only mutations, and no CORS
 // keep ordinary websites from invoking the collector through the browser.
+//
+// The session path is not a credential on its own. The console address reaches
+// the browser on a command line, which any local account can read on Linux, so
+// the first load of the console page claims the session with an HttpOnly
+// cookie and every later request must carry it. See authorize.
 func Serve(ctx context.Context, opts Options) error {
 	if opts.Run == nil {
 		return errors.New("analyst console needs a collection engine")
@@ -137,9 +170,13 @@ func Serve(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
+	session, err := randomID()
+	if err != nil {
+		return err
+	}
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
-	c := &console{opts: opts, ctx: ctx, stop: stop, host: ln.Addr().String(), prefix: "/" + token + "/"}
+	c := &console{opts: opts, ctx: ctx, stop: stop, host: ln.Addr().String(), prefix: "/" + token + "/", session: session}
 	c.origin = "http://" + c.host
 	srv := &http.Server{Handler: c, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	done := make(chan error, 1)
@@ -160,6 +197,12 @@ func Serve(ctx context.Context, opts Options) error {
 	select {
 	case <-wait:
 	case <-time.After(10 * time.Second):
+	}
+	c.mu.Lock()
+	refused := c.refused
+	c.mu.Unlock()
+	if refused > 1 && opts.Warn != nil {
+		opts.Warn(fmt.Sprintf("The analyst console refused %d requests that did not come from the browser that opened it.", refused))
 	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
@@ -185,6 +228,9 @@ func (c *console) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, c.prefix)
+	if !c.authorize(w, r, path) {
+		return
+	}
 	if r.Method == http.MethodPost {
 		if r.Header.Get("Content-Type") != "application/json" {
 			http.Error(w, "JSON required.", http.StatusUnsupportedMediaType)
@@ -254,6 +300,44 @@ func (c *console) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// authorize binds the console to one browser. The session path reaches the
+// browser on a command line (rundll32 or xdg-open, then the browser itself),
+// where on Linux every local account can read it from /proc, so knowing the
+// path is not enough. The first GET of the console page claims the session and
+// receives an HttpOnly, SameSite=Strict cookie scoped to the session path.
+// Every later request must present it: the claimant's page loads, API calls,
+// report tabs and downloads all carry it automatically. Anything else is
+// refused with an explanation, and the operator's terminal is warned once.
+//
+// The first page load wins. If another account races the browser to it, the
+// analyst's own browser is refused and the terminal shows the warning, which
+// is the signal to stop the console and treat the host as compromised.
+func (c *console) authorize(w http.ResponseWriter, r *http.Request, path string) bool {
+	if cookie, err := r.Cookie(sessionCookie); err == nil && c.session != "" &&
+		subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(c.session)) == 1 {
+		return true
+	}
+	c.mu.Lock()
+	claim := !c.claimed && c.session != "" && path == "" && r.Method == http.MethodGet
+	first := false
+	if claim {
+		c.claimed = true
+	} else {
+		c.refused++
+		first = c.refused == 1
+	}
+	c.mu.Unlock()
+	if claim {
+		http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: c.session, Path: c.prefix, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+		return true
+	}
+	if first && c.opts.Warn != nil {
+		c.opts.Warn(refusedWarning)
+	}
+	http.Error(w, refusedMessage, http.StatusForbidden)
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

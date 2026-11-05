@@ -169,7 +169,10 @@ release-linux: $(LINUX_RELEASE) ## Linux builds only + dist/SHA256SUMS (needs ca
 	$(MAKE) viewer-dist checksums
 
 viewer-dist: ## Put the report viewer beside the agent in every dist/<os>-<arch>/
-	for d in $(DIST)/*/; do cp viewer/lrng-viewer.html "$$d"; done
+	for d in $(DIST)/*/; do \
+		cp viewer/lrng-viewer.html docs/ANALYST_QUICKSTART.md "$$d"; \
+		case "$$d" in *windows-*) cp launchers/Start-LRNG.cmd "$$d" ;; *) cp launchers/Start-LRNG.sh "$$d" ;; esac; \
+	done
 
 checksums: ## Write dist/SHA256SUMS (record these in your case notes)
 	cd $(DIST) && rm -f SHA256SUMS && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS && cat SHA256SUMS

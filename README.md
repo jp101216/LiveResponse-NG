@@ -73,6 +73,14 @@ lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 
 ---
 
+## Guided analyst console
+
+On Windows, extract a release and double-click **Start-LRNG.cmd** beside **lrng.exe**. The local browser console offers **Quick triage**, **Full triage**, and **Persistence review**, shows collection scope and elevation, and provides progress, cancellation with partial evidence, and direct report downloads. On a Linux desktop, run **Start-LRNG.sh**. Operators can also use `lrng -ui`; `-ui-no-open` prints the local URL, and `-ui-reports <folder>` selects a different report root.
+
+Reports open on **Start here** for priority signals, coverage gaps and a human handoff. Findings include rule-family review prompts, possible benign context, a review status and notes. **Download analyst handoff** produces a separate text summary while preserving the original evidence. Notes stay in the current tab, so export before closing or opening another file. A **sample investigation** works in the console or standalone viewer without collecting a host.
+
+The console binds only to loopback with a random session URL. Collection profiles leave live DNS resolution, adaptive follow-up and process-memory scanning off. The standalone report viewer retains its offline policy. See the [analyst quickstart](docs/ANALYST_QUICKSTART.md) for the full workflow, storage paths and limits. Advanced collection and offline case-building options remain available through the CLI.
+
 ## Evidence graphs and guided investigation
 
 Use `-graph` to connect source observations in an interactive offline evidence

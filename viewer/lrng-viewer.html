@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-hkJ90800u6OejdQ0TunuEIcDxk57AoP61kGeGlNW1DA='; style-src 'sha256-/I6/W1QKlVYQ1Y+BG35vRHAU3sjXU9UUgYbNmiYFQ6Y='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-8jSmBJ/GJw4Fq+E6I4pE3hfTOa/pbcg1fKE2tfNypGQ='; style-src 'sha256-P+3MIYvQvspR1sWJnmnkNF6HI2UGFQrR51IBXxqJpyI='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>lrng report viewer</title>
 <style>
@@ -314,6 +314,12 @@ tr.detail-row td { max-width: none; background: var(--paper); }
   .layout { grid-template-columns: 1fr; }
   body { background: #fff; }
 }
+.review-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+.review-card { border: 1px solid var(--rule); border-radius: 8px; padding: 18px; margin-bottom: 16px; background: var(--panel); }
+.review-card p { line-height: 1.6; }
+.review-card label { display: block; margin: 12px 0; }
+.review-note { display: block; width: 100%; padding: 12px; border: 1px solid var(--rule); border-radius: 6px; background: var(--paper); color: var(--ink); font: inherit; resize: vertical; margin: 7px 0; }
+.review-note:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 </style>
 </head>
 <body>
@@ -326,6 +332,8 @@ tr.detail-row td { max-width: none; background: var(--paper); }
 <h1>Open a report or case</h1>
 <p>Drop an <span class="ev">lrng</span> report (.json or .jsonl) or an offline case (.json) anywhere on this page, or choose one.</p>
 <button class="btn primary" id="choose" type="button">Choose a report</button>
+<button class="btn" id="demo" type="button">Try a sample investigation</button>
+<p>New here? Start with the sample, then use <strong>Start here</strong> to review priorities, collection gaps, and your handoff.</p>
 <p class="error" id="load-error" hidden></p>
 <p class="fine">The report stays on this computer. This page has no network access: its content security policy blocks every connection, and everything in the report is shown as plain text.</p>
 </section>
@@ -625,14 +633,14 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     for (const r of results) if (!byName.has(r.name)) byName.set(r.name, r);
 
     const findings = [];
-    results.forEach((r, ri) => r.records.forEach((rec, i) => rec.findings.forEach((f) => {
+    results.forEach((r, ri) => r.records.forEach((rec, i) => rec.findings.forEach((f, fi) => {
       findings.push({
         sev: typeof f.severity === "string" ? f.severity : "",
         rule: plain(f.rule),
         technique: typeof f.technique === "string" ? f.technique : "",
         confidence: Number.isFinite(f.confidence) ? f.confidence : null,
         detail: plain(f.detail),
-        collector: r.name, ri, i,
+        collector: r.name, ri, i, fi,
       });
     })));
     findings.sort((a, b) => rank(b.sev) - rank(a.sev) || (b.confidence ?? -1) - (a.confidence ?? -1));
@@ -677,6 +685,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
       : null;
     const warns = [];
     if (run.elevated === false) warns.push("Not elevated: some artifacts were unreadable");
+    if (rep.synthetic_demo === true) warns.push("Synthetic training report: no host was collected");
     if (run.interrupted) warns.push("Run interrupted: results are partial");
     const errs = model.results.reduce((n, r) => n + r.errors.length, 0);
     if (errs) warns.push(`${fmtNum(errs)} collector error${errs === 1 ? "" : "s"}: coverage has gaps`);
@@ -724,6 +733,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
   }
 
   const VIEWS = [
+    ["review", "Start here", () => model.findings.length],
     ["findings", "Findings", () => model.findings.length],
     ["processes", "Process tree", () => (model.byName.get("processes") || { records: [] }).records.length],
     ["graph", "Evidence graph", () => evidenceGraph().nodes.size],
@@ -775,7 +785,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     if (view === "collector" && model && model.byName.has(arg)) return { view, arg };
     if (workspace && (view === "case" || view === "compare" && workspace.rep.comparison)) return { view, arg: "" };
     if (VIEWS.some(([id]) => id === view)) return { view, arg: "" };
-    return { view: model && model.findings.length ? "findings" : "run", arg: "" };
+    return { view: "review", arg: "" };
   }
   function go(view, arg) {
     const hash = "#" + view + (arg ? "/" + encodeURIComponent(arg) : "");
@@ -812,7 +822,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     }
     renderCase();
     renderTactics();
-    const v = { findings: viewFindings, processes: viewProcesses, graph: viewGraph, timeline: viewTimeline, indicators: viewIndicators, run: viewRun, collector: viewCollector }[view];
+    const v = { review: viewReview, findings: viewFindings, processes: viewProcesses, graph: viewGraph, timeline: viewTimeline, indicators: viewIndicators, run: viewRun, collector: viewCollector }[view];
     main.append(v(arg));
     if (pendingFocus) {
       const el = pendingFocus.el;
@@ -890,7 +900,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     }
     return wrap;
   }
-  const findingKey = (f) => f.ri + ":" + f.i + ":" + f.rule;
+  const findingKey = (f) => f.ri + ":" + f.i + ":" + f.fi + ":" + f.rule;
   function findingItem(f) {
     const st = state.findings;
     const key = findingKey(f);
@@ -903,7 +913,8 @@ tr.detail-row td { max-width: none; background: var(--paper); }
         f.technique ? h("span", { class: "tech" }, f.technique) : null,
         f.confidence !== null ? h("span", { class: "num", title: "Confidence" }, f.confidence + "%") : null,
         h("span", null, f.collector)),
-      h("span", { class: "f-detail" }, f.detail));
+      h("span", { class: "f-detail" }, f.detail),
+      reviewSession().findings.has(key) ? h("span", { class: "chip" }, reviewSession().findings.get(key).status) : null);
     row.addEventListener("click", () => {
       if (st.open.has(key)) st.open.delete(key); else st.open.add(key);
       const fresh = findingItem(f);
@@ -919,6 +930,7 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     const tl = techLink(f.technique);
     if (tl) box.append(h("p", { class: "muted" }, "ATT&CK ", tl,
       tacticsOf(f.technique).length ? ` (${tacticsOf(f.technique).map((t) => TACTIC_NAME.get(t)).join(", ")})` : ""));
+    box.append(findingGuide(f), reviewEditor(f));
     box.append(h("h3", null, `Record ${f.i + 1} of ${f.collector}`), kvList(rec.fields));
     const others = rec.findings.filter((x) => !(plain(x.rule) === f.rule && plain(x.detail) === f.detail));
     if (others.length) {
@@ -1621,6 +1633,126 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     return wrap;
   }
 
+  // ---- Guided analyst review ------------------------------------------------------------
+  // Reviews belong to the parsed source report object. Switching sources in a
+  // case preserves each review without mixing runs. Evidence is never edited.
+  const reviews = new WeakMap();
+  function reviewSession() {
+    if (!reviews.has(model.rep)) reviews.set(model.rep, { summary: "", findings: new Map() });
+    return reviews.get(model.rep);
+  }
+  const REVIEW_STATUS = ["Unreviewed", "Needs follow-up", "Expected behavior", "Escalated"];
+  function guidance(f) {
+    const groups = [
+      ["cred.", "Possible access to credentials or sessions", "Check the process owner, parent, signer, command line and approved administrative activity. Corroborate with authentication and endpoint logs.", "Password recovery, debugging and authorized security tools can produce similar evidence."],
+      ["persistence.", "A way for code or access to survive a restart", "Check who created this entry, its target file and signer, its creation time, and whether it belongs to approved software.", "Installers, management agents and legitimate application updaters also create persistence."],
+      ["defense.", "A security control or logging setting needs review", "Compare the observed setting with the approved policy. Review change records and management policy before deciding whether it was tampered with.", "Troubleshooting, policy changes and approved exceptions can alter security controls."],
+      ["exec.", "A command or execution pattern needs context", "Read the full command and parent process. Check the file signature, hash, user and timing against an approved task or change.", "Administrative automation and software deployment can use the same utilities."],
+      ["lateral.", "Possible movement between systems", "Check the initiating account, source and destination, authentication events and approved remote administration.", "Help-desk tooling, deployment systems and administrator sessions can look similar."],
+      ["impact.", "A change could affect availability or recovery", "Verify the exact action and its timing against approved maintenance. Escalate corroborated destructive activity through your incident process.", "Backup maintenance and approved repair work may generate related commands."],
+      ["privesc.", "A possible path to greater privileges", "Inspect the referenced driver, executable or setting, its signer and version, and whether it is required and approved.", "Older legitimate software can expose risk without proving that the risk was exploited."],
+    ];
+    const match = groups.find(([prefix]) => f.rule.startsWith(prefix));
+    return match ? match.slice(1) : ["An observed artifact matched a detection rule", "Read the finding detail and source record. Check ownership, timing, related processes and trusted change records before deciding what it means.", "A heuristic match is a lead. Confirm it with independent evidence and expected activity on this host."];
+  }
+  function findingGuide(f) {
+    const [meaning, next, benign] = guidance(f);
+    return h("section", { class: "review-card" }, h("h3", null, "How to review this finding"),
+      h("p", null, h("strong", null, meaning), ". ", f.detail),
+      h("p", null, h("strong", null, "Check next: "), next),
+      h("p", { class: "muted" }, h("strong", null, "Possible benign context: "), benign),
+      h("p", { class: "fine" }, "These are review prompts for this rule family. Severity and confidence are detector signals, not a confirmed incident or a probability of compromise."));
+  }
+  function reviewEditor(f) {
+    const session = reviewSession(), key = findingKey(f);
+    const saved = session.findings.get(key) || { status: "Unreviewed", note: "" };
+    const pick = h("select", { class: "pick", "aria-label": "Review status" }, REVIEW_STATUS.map((s) => h("option", { value: s, selected: s === saved.status }, s)));
+    const note = h("textarea", { class: "review-note", "aria-label": "Finding review notes", rows: "3", maxlength: "4000", placeholder: "What did you verify? Record the evidence, owner or escalation reference." }, saved.note);
+    function save() {
+      if (pick.value === "Unreviewed" && !note.value) session.findings.delete(key);
+      else session.findings.set(key, { status: pick.value, note: note.value });
+    }
+    pick.addEventListener("change", save); note.addEventListener("input", save);
+    return h("section", { class: "review-card" }, h("h3", null, "Your review"),
+      h("label", null, "Review status ", pick), h("label", null, "Notes ", note),
+      h("p", { class: "fine" }, "Notes stay in this tab and do not change the evidence. Download a handoff from Start here before closing."));
+  }
+  function priorityFindings() {
+    state.findings.sevs = new Set(model.findings.some((f) => rank(f.sev) >= 3) ? ["critical", "suspect"] : SEVS.concat([""]));
+    state.findings.q = ""; state.findings.collector = ""; state.findings.tactic = ""; state.findings.shown = PAGE;
+    go("findings");
+  }
+  function coverageGaps() {
+    const run = isObj(model.rep.run) ? model.rep.run : {};
+    const gaps = model.results.flatMap((r) => r.errors.map((error) => r.name + ": " + error));
+    if (run.elevated === false) gaps.unshift("Run was not elevated; protected artifacts may be unavailable.");
+    if (run.interrupted) gaps.unshift("Collection was interrupted; results are partial.");
+    if (model.source.skipped) gaps.unshift(model.source.skipped + " unreadable input lines were skipped.");
+    if (!model.results.length) gaps.unshift("This report contains no collector results.");
+    return gaps;
+  }
+  function handoffText() {
+    const rep = model.rep, review = reviewSession(), gaps = coverageGaps();
+    const src = model.source;
+    const hash = src.caseSource ? src.caseSource.sha256 : src.sha256;
+    const lines = ["LIVERESPONSE NG · ANALYST HANDOFF", "Host: " + plain(rep.host), "Run: " + plain(rep.run_id), "Collected: " + plain(rep.collected_at),
+      "Report SHA-256: " + (hash || "not available for this embedded report"),
+      "Prepared: " + new Date().toISOString(), "", "DETECTOR SIGNALS", ...SEVS.map((s) => s + ": " + model.bySev.get(s)),
+      "Findings are leads requiring validation; zero findings does not establish a clean host.", "", "COLLECTION GAPS", ...(gaps.length ? gaps.slice(0,200) : ["No gaps reported by the supplied collectors. This does not measure every possible artifact."]),
+      ...(gaps.length>200 ? [`${gaps.length-200} more gaps in the source report.`] : []), "", "ANALYST SUMMARY", review.summary || "No analyst summary recorded.", "", "PRIORITY FINDINGS AND REVIEWED ITEMS"];
+    const selected = model.findings.filter((f) => rank(f.sev)>=3 || review.findings.has(findingKey(f)));
+    for (const f of selected.slice(0,200)) {
+      const item = review.findings.get(findingKey(f));
+      lines.push(`[${f.sev}] ${f.rule} · ${f.collector}, source result ${model.results[f.ri].sourceIndex}, record ${f.i} (zero-based)`,
+        "Signal: " + f.detail, "Review: " + (item ? item.status : "Unreviewed"), "Notes: " + (item && item.note || "None"), "");
+    }
+    if (selected.length>200) lines.push(`${selected.length-200} additional items remain in the source report and this review tab.`);
+    if (!selected.length) lines.push("No priority or reviewed findings. Review other findings and coverage before closing the investigation.");
+    if (rep.synthetic_demo === true) lines.unshift("SYNTHETIC TRAINING DATA · NOT A REAL INCIDENT", "");
+    return lines.join("\n");
+  }
+  function downloadHandoff() {
+    const url = URL.createObjectURL(new Blob([handoffText()], { type: "text/plain;charset=utf-8" }));
+    const a = h("a", { href: url, download: "lrng-analyst-handoff.txt" });
+    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  function viewReview() {
+    const session = reviewSession(), gaps = coverageGaps();
+    const priority = model.findings.filter((f) => rank(f.sev)>=3).length;
+    const reviewed = [...session.findings.values()].filter((v) => v.status !== "Unreviewed").length;
+    const wrap = h("section", null, h("h2", { class: "view-title" }, "Start here"),
+      h("p", { class: "view-sub" }, "A guided review of this source report. Evidence first, then your decision."),
+      h("div", { class: "review-grid" },
+        h("div", { class: "review-card" }, h("h3", null, `${priority} priority signals`), h("p", null, "Critical and suspect findings are the first review queue. A signal still needs context and corroboration.")),
+        h("div", { class: "review-card" }, h("h3", null, `${fmtNum(gaps.length)} reported coverage gaps`), h("p", null, "Unreadable or interrupted collection can hide evidence. Review the run details before concluding that nothing happened.")),
+        h("div", { class: "review-card" }, h("h3", null, `${reviewed} of ${model.findings.length} findings reviewed`), h("p", null, "Open a finding to add your assessment and notes. Each source report keeps its own review in this tab."))),
+      h("section", { class: "review-card" }, h("h3", null, "1. Review the signals"),
+        h("p", null, "Open a finding for its source record, a review prompt, and possible benign context. Follow process, timeline and evidence-graph links to corroborate it."),
+        h("button", { class: "btn primary", type: "button", onclick: priorityFindings }, priority ? "Review priority findings" : "Review all findings")),
+      h("section", { class: "review-card" }, h("h3", null, "2. Check what was missed"),
+        h("p", null, gaps.length ? gaps.slice(0,3).join(" · ") : "No collection errors are reported. Only the collectors included in this report were checked; absence of findings is not proof that the host is clean."),
+        h("button", { class: "btn", type: "button", onclick: () => go("run") }, "Review collection coverage")));
+    const notes = h("textarea", { class: "review-note", rows: "5", maxlength: "8000", "aria-label": "Analyst handoff summary", placeholder: "What happened, what did you verify, what is still uncertain, and who should act next?" }, session.summary);
+    notes.addEventListener("input", () => { session.summary = notes.value; });
+    wrap.append(h("section", { class: "review-card" }, h("h3", null, "3. Leave a useful handoff"),
+      h("p", null, "Record what the next analyst needs. The download includes this summary, priority signals, reviewed findings, source references and collection gaps."),
+      h("label", null, "Analyst summary ", notes),
+      h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onclick: downloadHandoff }, "Download analyst handoff"),
+        h("button", { class: "btn", type: "button", onclick: (e) => copyText(handoffText(), e.currentTarget) }, "Copy handoff")),
+      h("p", { class: "fine" }, "Review notes stay in this tab. Download before closing or opening another file. Preserve the original report and checksum separately.")));
+    return wrap;
+  }
+  function openDemo() {
+    const rep = { tool: "liveresponse-ng", tool_version: "training", schema_version: "1.2", synthetic_demo: true,
+      host: "SAMPLE-ENDPOINT", os: "windows", arch: "amd64", run_id: "synthetic-training-run", collected_at: "2026-01-01T12:00:00Z",
+      run: { elevated: false, interrupted: false, collectors: ["processes", "services", "eventlog"] }, results: [
+        { collector: "processes", records: [{ fields: { pid: 2400, ppid: 1000, name: "powershell.exe", command_line: "Synthetic training command; no command was executed", image_path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" }, findings: [{ rule: "exec.powershell_encoded", severity: "suspect", confidence: 85, technique: "T1059.001", detail: "Training signal: an encoded PowerShell command needs validation against approved automation." }] }] },
+        { collector: "services", records: [{ fields: { name: "SampleUpdater", image_path: "C:\\Program Files\\Example\\updater.exe", state: "running" }, findings: [{ rule: "persistence.sample_service", severity: "notable", confidence: 40, detail: "Training signal: confirm the service owner and approved installation." }] }] },
+        { collector: "eventlog", records: [], errors: ["Synthetic collection gap: Security events were unavailable in this non-elevated example."] } ] };
+    open(JSON.stringify(rep), { name: "Synthetic training report", embedded: true });
+    go("review");
+  }
+
   // ---- Startup ---------------------------------------------------------------------------
   async function sha256Hex(buf) {
     if (!(window.crypto && crypto.subtle && window.isSecureContext)) return "";
@@ -1702,6 +1834,8 @@ tr.detail-row td { max-width: none; background: var(--paper); }
       if (s) { e.preventDefault(); s.focus(); }
     }
   });
+  $("demo").addEventListener("click", openDemo);
+  if (location.hash === "#demo") openDemo();
   const embedded = $("lrng-report");
   if (embedded && embedded.textContent.trim()) open(embedded.textContent, { name: "", size: 0, sha256: "", embedded: true });
 })();

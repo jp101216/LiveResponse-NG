@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>LiveResponse NG · Analyst console</title>
+<link rel="stylesheet" href="console.css">
+<script src="console.js" defer></script>
+</head>
+<body>
+<header><div class="brand"><span class="mark" aria-hidden="true">LR</span><div><strong>LiveResponse NG</strong><span>Analyst console</span></div></div><div class="local">LOCAL SESSION</div><button id="close" class="subtle" type="button">Close console</button></header>
+<main>
+<p class="eyebrow">FROM COLLECTION TO A CLEAR NEXT STEP</p>
+<h1>Start an investigation.</h1>
+<p class="intro">Choose a collection, review the evidence, and leave a useful handoff. No commands to memorize.</p>
+<div class="workflow" aria-label="Investigation steps"><span><b>01</b> Choose a profile</span><span><b>02</b> Collect local evidence</span><span><b>03</b> Review and hand off</span></div>
+<p id="error" role="alert" hidden></p>
+<div class="workspace">
+<section aria-labelledby="profile-heading"><h2 id="profile-heading">What do you want to investigate?</h2><div id="profiles" class="profiles" role="group" aria-label="Collection profiles"></div>
+<div class="tools"><h2>Have evidence already?</h2><p>Open a saved JSON report or case in the offline viewer, or explore a synthetic investigation first.</p><div class="actions"><a class="button" href="viewer" target="_blank" rel="noopener">Open a report or case</a><a class="button" href="demo#demo" target="_blank" rel="noopener">Try a sample investigation</a></div></div></section>
+<aside aria-labelledby="preflight-heading"><h2 id="preflight-heading">Before you collect</h2><dl id="machine"><dt>Host</dt><dd>Loading local host details…</dd></dl>
+<p id="elevation" class="notice"></p><label class="field" for="case-label">Case label <span>(optional, for this session)</span></label><input id="case-label" maxlength="120" placeholder="For example, INC-2048 · unexpected startup">
+<details><summary>What will this profile collect?</summary><p id="scope"></p><p>Reads local artifacts and hashes referenced files. Live DNS lookups and process-memory scanning are off. Collection can still update access times or produce operating-system audit events.</p></details>
+<label class="check"><input type="checkbox" id="confirm"><span>I checked the host and collection scope.</span></label>
+<button id="start" class="primary" type="button" disabled>Start collection</button><p class="fine">Reports are saved locally. This console has no account, cloud upload, or telemetry.</p></aside>
+</div>
+<section id="history" aria-labelledby="history-heading"><div class="section-top"><h2 id="history-heading">Collections in this session</h2><span id="session-count" class="muted">0 collections</span></div><div id="jobs"><p class="empty">Your first collection will appear here, with progress and direct links to its reports.</p></div><p id="storage" class="fine"></p></section>
+</main>
+<footer><span id="version">LiveResponse NG</span><span>Evidence first. Human judgment throughout.</span></footer>
+</body></html>

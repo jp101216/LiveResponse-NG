@@ -77,10 +77,19 @@ func profiles() []profile {
 	for _, c := range collector.Defaults() {
 		defaults = append(defaults, c.Name())
 	}
+	// Each profile names collectors for every platform; filter keeps the ones
+	// this OS has, and the descriptions say only what this OS collects.
+	quick := "Start with processes, connections, startup entries, services and host defenses."
+	persistence := "Focus on programs and settings that can keep running after a restart or sign-in."
+	if runtime.GOOS == "linux" {
+		quick = "Start with processes, connections and startup entries such as cron jobs and systemd units."
+		persistence = "Focus on programs, settings and kernel components that can keep running after a restart or sign-in."
+	}
 	return []profile{
-		{"quick", "Quick triage", "Start with processes, connections, startup entries, services and host defenses.", filter("processes", "network", "autoruns", "services", "defenses")},
+		{"quick", "Quick triage", quick, filter("processes", "network", "autoruns", "services", "defenses")},
 		{"full", "Full triage", "Collect all standard artifacts available on this operating system, with the bundled event-log rules.", defaults},
-		{"persistence", "Persistence review", "Focus on programs and settings that can keep running after a restart or sign-in.", filter("processes", "autoruns", "services", "scheduledtasks", "wmi", "drivers", "aiagents")},
+		// drivers is the Windows kernel surface; kmod, ebpf and rootkit are Linux's.
+		{"persistence", "Persistence review", persistence, filter("processes", "autoruns", "services", "scheduledtasks", "wmi", "drivers", "kmod", "ebpf", "rootkit", "aiagents")},
 	}
 }
 

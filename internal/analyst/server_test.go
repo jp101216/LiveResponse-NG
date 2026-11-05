@@ -328,3 +328,39 @@ func TestConsoleBindsToFirstBrowser(t *testing.T) {
 		t.Fatalf("refused %d requests, want 10", c.refused)
 	}
 }
+
+func TestProfilesMatchThisOS(t *testing.T) {
+	byID := map[string]profile{}
+	for _, p := range profiles() {
+		byID[p.ID] = p
+	}
+	has := func(p profile, name string) bool {
+		for _, n := range p.Collectors {
+			if n == name {
+				return true
+			}
+		}
+		return false
+	}
+	// Persistence review includes every kernel-level surface this OS collects.
+	for _, name := range []string{"drivers", "kmod", "ebpf", "rootkit"} {
+		if _, ok := collector.Lookup(name); ok && !has(byID["persistence"], name) {
+			t.Errorf("persistence review is missing %s", name)
+		}
+	}
+	// Descriptions don't promise artifacts this OS doesn't collect.
+	for _, check := range []struct{ collector, phrase string }{{"services", "services"}, {"defenses", "host defenses"}} {
+		if _, ok := collector.Lookup(check.collector); !ok && strings.Contains(byID["quick"].Description, check.phrase) {
+			t.Errorf("quick triage mentions %s, which this OS does not collect", check.phrase)
+		}
+	}
+	// Every profile collector exists here and none is an opt-in intrusive one.
+	for _, p := range byID {
+		for _, name := range p.Collectors {
+			c, ok := collector.Lookup(name)
+			if !ok || collector.IsOptIn(c) {
+				t.Errorf("%s profile selects %s (available %v)", p.ID, name, ok)
+			}
+		}
+	}
+}

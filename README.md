@@ -16,7 +16,7 @@ modules, eBPF and the systemd journal behind the same interface.
 *The [report viewer](#report-viewer) on a lab VM seeded with harmless
 lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 
-> **Status:** v0.16.0. On **Linux**, a default run covers processes, network
+> **Status:** v0.17.1. On **Linux**, a default run covers processes, network
 > (TCP + UDP, with per-socket process attribution via `/proc`), loaded modules,
 > local accounts, persistence (cron, systemd, ld.so.preload, rc.local, XDG
 > autostart, PAM, sudo rules, udev), kernel modules (with a cross-view that

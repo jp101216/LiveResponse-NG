@@ -302,7 +302,7 @@ it reads only each region's first chunk, which is all the heuristics need.
 
 On Windows the sidecar then reads the process's **exception hooks**
 (`windows_hooks.rs`, judged in `hooks.rs`): each thread's debug registers,
-with `THREAD_GET_CONTEXT` and without suspending it, and ntdll's two vectored
+through `windows_context.rs` (brief suspend/GetThreadContext/resume), and ntdll's two vectored
 handler lists. The lists' heads are in ntdll's data, at the same address in
 every process of one architecture, so they are found once, in the sidecar:
 it registers a no-op handler of each kind, reads its own entry to see where
@@ -316,7 +316,14 @@ found once by looking for the sidecar's cookie in the sidecar's ntdll, after
 checking that decoding with it undoes `EncodePointer`. A decoded address
 that isn't executable is counted as invalid, never judged. A 32-bit process
 under the 64-bit sidecar has its handlers in its own ntdll, so only its debug
-registers are read.
+registers are read. Context capture requests `THREAD_SUSPEND_RESUME` in addition
+to query and context rights. It releases exactly the suspension it acquired,
+preserves previous suspend counts, skips the caller and verifies the thread's
+owning process before suspending it. No allocation, target-memory reads or
+stack walks take place during the suspended interval. A guard also releases
+the suspension on error/unwind. Resume failure rejects the captured context
+and triggers one cleanup retry; failures are reported rather than hidden.
+This follows Microsoft's [GetThreadContext requirements](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadcontext).
 
 The same `GetThreadContext` call returns, on x64, each thread's instruction
 and stack pointers, from which `windows_syscalls.rs` judges **system calls**
@@ -329,7 +336,12 @@ is reported only if the thread's registers, and the address at its stack
 pointer, read the same a second time: a thread blocked in the kernel stays
 put, while one back from a short call has run on and may have reused the slot
 (it is counted in `threads_moved`). The sidecar's own thread, when it reads
-its own process, is skipped: its context is its own `GetThreadContext` call. A
+its own process, is skipped so it can never suspend itself. The later register
+recheck uses the same supported capture path. Failed rechecks have their own
+`context_rechecks_failed` count, distinct from `threads_moved`. First-pass
+failures are in `exception_hooks.context_errors`; deadline/enumeration limits
+are in `thread_scan_stopped`. `thread_context_gaps` summarizes acquisition
+gaps and makes the per-process memory status `partial`. A
 `syscall` in memory no image backs is compared with ntdll's own stubs, read
 once from its file on disk, so a byte-for-byte copy (Chromium's sandbox
 thunks) is told from a stub of the attacker's own. Executable memory no image

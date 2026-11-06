@@ -455,6 +455,8 @@ pub struct Report {
     /// Threads that looked out of the ordinary but had moved when read again
     /// (back from a short call, their stack slot reused): not reported.
     pub moved: usize,
+    /// A later context acquisition failed; not evidence that a thread moved.
+    pub rechecks_failed: usize,
     /// Calls through ntdll returning into code a runtime registered as JIT
     /// code: not judged.
     pub jit: usize,
@@ -605,6 +607,7 @@ impl Report {
             "supported": true,
             "threads_in_syscall": self.in_syscall,
             "threads_moved": self.moved,
+            "context_rechecks_failed": self.rechecks_failed,
             "jit_returns": self.jit,
             "direct": count(Verdict::Direct),
             "indirect": count(Verdict::Indirect),

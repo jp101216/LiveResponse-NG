@@ -338,10 +338,10 @@ fn walk_all(
                 let start = starts.iter().find(|(t, _)| *t == r.tid).map(|&(_, a)| a);
                 if let Some(f) = judge_ends(p, r, &frames, start, mods) {
                     // Still blocked where it was: the frames are the ones it waits with.
-                    if still_in_call(p, r, None) {
-                        rep.stacks.push(f);
-                    } else {
-                        rep.moved += 1;
+                    match still_in_call(p, r, None) {
+                        Ok(true) => rep.stacks.push(f),
+                        Ok(false) => rep.moved += 1,
+                        Err(_) => rep.rechecks_failed += 1,
                     }
                 }
             }
@@ -350,10 +350,10 @@ fn walk_all(
             Walked::Finding(f, slot) => {
                 // Still blocked where it was, the slot unchanged: a thread
                 // that has run on may have reused that stack.
-                if still_in_call(p, r, None) && read_usize(p.h, slot) == Some(f.addr) {
-                    rep.stacks.push(f);
-                } else {
-                    rep.moved += 1;
+                match still_in_call(p, r, None) {
+                    Ok(true) if read_usize(p.h, slot) == Some(f.addr) => rep.stacks.push(f),
+                    Ok(_) => rep.moved += 1,
+                    Err(_) => rep.rechecks_failed += 1,
                 }
             }
         }
@@ -640,6 +640,7 @@ mod tests {
     use windows_sys::Win32::System::Threading::{
         CreateEventW, CreateThread, GetCurrentThreadId, OpenThread, ResumeThread, SetEvent,
         WaitForSingleObject, CREATE_SUSPENDED, INFINITE, THREAD_GET_CONTEXT,
+        THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
     };
 
     unsafe extern "system" fn idle(_: *mut c_void) -> u32 {
@@ -654,14 +655,16 @@ mod tests {
         }
     }
 
-    /// A thread's full context, read while it is blocked.
+    /// A thread's full context, acquired with the production suspension guard.
     fn context(h: HANDLE) -> AlignedContext {
         // SAFETY: an aligned context of a thread of ours.
         unsafe {
-            let mut c: AlignedContext = core::mem::zeroed();
-            c.0.ContextFlags = CONTEXT_FULL_AMD64;
-            assert_ne!(GetThreadContext(h, &mut c.0), 0);
-            c
+            super::super::windows_context::read(
+                windows_sys::Win32::System::Threading::GetThreadId(h),
+                std::process::id(),
+                CONTEXT_FULL_AMD64,
+            )
+            .expect("supported context capture")
         }
     }
 
@@ -840,7 +843,13 @@ mod tests {
         });
         let tid = tid_rx.recv().unwrap();
         // SAFETY: a handle to our own thread, closed below.
-        let th = unsafe { OpenThread(THREAD_GET_CONTEXT, 0, tid) };
+        let th = unsafe {
+            OpenThread(
+                THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION | THREAD_SUSPEND_RESUME,
+                0,
+                tid,
+            )
+        };
         let wait = export("ntdll.dll", c"NtWaitForSingleObject");
         let c = until_blocked(th, wait);
         let theirs = windows_frames(&c.0);

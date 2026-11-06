@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Windows opt-in memory scans now acquire thread registers with a brief,
+  balanced suspend/GetThreadContext/resume sequence, including later syscall
+  and stack rechecks. Existing suspensions are preserved; the calling thread
+  is skipped. Threads are resumed before memory inspection or allocations.
+- Failed context acquisitions and rechecks are reported as coverage gaps and
+  a partial memory scan, rather than treated as clean or simply moving threads.
+  Independent memory findings are retained. Syscall coverage documentation now
+  distinguishes representative indicators from complete technique coverage.
+
 ## 0.17.1
 
 Security and maintenance release for the analyst console. No dependency

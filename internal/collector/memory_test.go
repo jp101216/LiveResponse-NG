@@ -2,12 +2,39 @@ package collector
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jp101216/liveresponse-ng/internal/sidecar"
 )
+
+func TestMemoryRecordsPreserveContextCoverageGaps(t *testing.T) {
+	var response sidecar.Response
+	if err := json.Unmarshal([]byte(`{
+		"ok": true,
+		"meta": {
+			"pid": 20, "status": "partial", "bytes_scanned": 1000,
+			"thread_context_gaps": ["1 thread context(s) unreadable"],
+			"exception_hooks": {"context_errors": {"suspend (Win32 5)": 1}}
+		},
+		"hits": [{"rule": "memory.image_code_modified", "severity": "suspect", "offset": 4096}]
+	}`), &response); err != nil {
+		t.Fatal(err)
+	}
+	records, counts, _ := memoryRecords([]procInfo{{PID: 20}}, nil, map[int]*sidecar.Response{20: &response})
+	if counts["partial"] != 1 || counts["scanned"] != 0 || len(records) != 1 {
+		t.Fatalf("incomplete capture reported as complete: records=%+v counts=%+v", records, counts)
+	}
+	gaps, ok := records[0].Fields["thread_context_gaps"].([]any)
+	if !ok || len(gaps) != 1 || gaps[0] != "1 thread context(s) unreadable" {
+		t.Fatalf("capture gaps lost across sidecar boundary: %+v", records[0].Fields)
+	}
+	if len(records[0].Findings) != 1 || records[0].Findings[0].Rule != "memory.image_code_modified" {
+		t.Fatalf("independent memory finding lost: %+v", records[0])
+	}
+}
 
 func TestSelectMemoryTargets(t *testing.T) {
 	procs := []procInfo{

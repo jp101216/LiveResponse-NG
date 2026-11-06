@@ -37,6 +37,8 @@ mod linux;
 #[cfg(any(windows, lrng_typecheck_windows))]
 mod windows;
 #[cfg(any(windows, lrng_typecheck_windows))]
+mod windows_context;
+#[cfg(any(windows, lrng_typecheck_windows))]
 mod windows_hooks;
 #[cfg(any(windows, lrng_typecheck_windows))]
 mod windows_syscalls;
@@ -623,7 +625,8 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
     }
     hits.sort_by_key(|h| h.offset);
 
-    let status = if stopped.is_some() || yara_error.is_some() {
+    let context_gaps = thread_context_gaps(hooks.as_ref(), calls.as_ref(), threads.as_ref());
+    let status = if stopped.is_some() || yara_error.is_some() || !context_gaps.is_empty() {
         "partial"
     } else {
         "scanned"
@@ -680,8 +683,84 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
             "exception_hooks": hooks.as_ref().map(|h| h.meta()),
             "syscalls": calls.as_ref().map(|c| c.meta()),
             "threads": threads.as_ref().map(|t| t.meta()),
+            "thread_context_gaps": context_gaps,
         })),
         ..Default::default()
+    }
+}
+
+/// Failed acquisition is missing coverage, not a clean register/stack result.
+fn thread_context_gaps(
+    hooks: Option<&hooks::Report>,
+    calls: Option<&syscalls::Report>,
+    threads: Option<&threads::Report>,
+) -> Vec<String> {
+    let mut gaps = Vec::new();
+    if let Some(h) = hooks {
+        if h.threads_unreadable > 0 {
+            gaps.push(format!(
+                "{} thread context(s) unreadable",
+                h.threads_unreadable
+            ));
+        }
+        if let Some(why) = &h.thread_scan_stopped {
+            gaps.push(format!("thread context collection stopped: {why}"));
+        }
+    }
+    if let Some(c) = calls.filter(|c| c.rechecks_failed > 0) {
+        gaps.push(format!(
+            "{} syscall context recheck(s) failed",
+            c.rechecks_failed
+        ));
+    }
+    if let Some(t) = threads.filter(|t| t.rechecks_failed > 0) {
+        gaps.push(format!(
+            "{} stack context recheck(s) failed",
+            t.rechecks_failed
+        ));
+    }
+    gaps
+}
+
+#[cfg(test)]
+mod context_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn acquisition_failures_remain_distinct_from_moving_or_skipped_threads() {
+        let mut hooks = hooks::Report {
+            supported: true,
+            current_thread_skipped: 1,
+            ..Default::default()
+        };
+        let mut calls = syscalls::Report {
+            supported: true,
+            moved: 2,
+            ..Default::default()
+        };
+        let mut threads = threads::Report {
+            supported: true,
+            moved: 3,
+            ..Default::default()
+        };
+        assert!(thread_context_gaps(Some(&hooks), Some(&calls), Some(&threads)).is_empty());
+        hooks.threads_unreadable = 4;
+        hooks.thread_scan_stopped = Some("time budget exhausted".into());
+        calls.rechecks_failed = 2;
+        threads.rechecks_failed = 1;
+        let gaps = thread_context_gaps(Some(&hooks), Some(&calls), Some(&threads));
+        assert_eq!(
+            gaps,
+            [
+                "4 thread context(s) unreadable",
+                "thread context collection stopped: time budget exhausted",
+                "2 syscall context recheck(s) failed",
+                "1 stack context recheck(s) failed",
+            ]
+        );
+        assert_eq!(calls.meta()["context_rechecks_failed"], 2);
+        assert_eq!(calls.meta()["supported"], true);
+        assert_eq!(hooks.meta()["current_thread_skipped"], 1);
     }
 }
 

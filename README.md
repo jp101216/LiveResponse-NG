@@ -60,9 +60,9 @@ lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 > code overwritten in memory (module stomping, hollowing, AMSI/ETW patching),
 > a check of every thread's hardware breakpoints and the process's vectored
 > exception handlers, which catches the AMSI/ETW bypasses that patch nothing,
-> a check of the system calls threads are in, which catches direct and
-> indirect syscalls (the Hell's Gate family, SysWhispers, RecycledGate, ...),
-> the stubs that make them and fresh copies of ntdll mapped around EDR hooks,
+> checks for indicators of direct and indirect syscalls (the Hell's Gate
+> family, SysWhispers, RecycledGate, ...),
+> recognizable stubs and extra copies of ntdll mapped around EDR hooks,
 > a check of where threads started and a walk of each waiting thread's
 > stack, which finds sleeping beacons, sleep-masked implants and spoofed
 > stacks, and Cobalt Strike and Havoc configurations decoded out of memory
@@ -772,8 +772,11 @@ bypass changes no code, so image integrity has nothing to compare: it puts a
 hardware breakpoint (a debug register, `Dr0`–`Dr3`) on `AmsiScanBuffer` or
 `EtwEventWrite`, and a vectored exception handler (VEH) it registered catches
 the breakpoint and skips the function. Both halves can be read from outside.
-The sidecar reads every thread's debug registers (`GetThreadContext`, debug
-registers only, without suspending the thread), names what each armed
+The sidecar briefly suspends each accessible thread to read its debug
+registers with `GetThreadContext`, then releases exactly its own suspension
+before any memory inspection. It preserves pre-existing suspensions and skips
+its own calling thread. Acquisition failures are coverage gaps and make the
+memory report partial. It names what each armed
 breakpoint sits on by image and export, and reports one on `amsi.dll` code as
 `defense.amsi_hwbp` and one on ntdll's ETW event writers as `defense.etw_hwbp`
 (lower when a debugger is attached; debuggers set breakpoints too), and any
@@ -798,15 +801,18 @@ both lists and breakpoints on `AmsiScanBuffer`, `EtwEventWrite` and `Sleep` in
 a test process and requires each to be found, and requires a clean live
 PowerShell to show none.
 
-**System calls (no rules needed, Windows x64).** Only ntdll.dll and win32u.dll
-contain the instruction that enters the kernel, one small stub per system
+**System calls (no rules needed, Windows x64).** Normal system-service calls
+typically enter the kernel through ntdll.dll and win32u.dll, one small stub per system
 service (and, in a 32-bit process, WoW64's wow64cpu.dll and wow64win.dll, which
 make the calls WoW64 dispatches and the win32k ones themselves), and EDR
 products hook those stubs. Malware goes around them in a few
-ways, and each leaves something a point-in-time look can see. A thread blocked
+ways, and some leave indicators a point-in-time look can see. A thread blocked
 in a system call has its instruction pointer just past the `syscall` it ran
 and its stack pointer at the address the stub returns to (read with the same
-`GetThreadContext` call as the debug registers). A thread is reported only if
+supported context capture as the debug registers). Both the initial capture
+and the later register recheck use brief suspend/read/resume sequences. A
+failed recheck is recorded separately from a thread that moved; the candidate
+finding is discarded and coverage is partial. A thread is reported only if
 its registers and that address read the same a second time, so a busy thread
 caught on its way back from a short call isn't judged on a stack it has
 already reused. The sidecar reports:
@@ -836,7 +842,8 @@ ntdll's own stubs are read from its file on disk, where no hook reaches them,
 to name each call and to recognise copies. The event log adds the history:
 a Sysmon process-access event (10) whose call trace starts in code no module
 backs opened its target with a direct syscall (*critical* when the target is
-LSASS). How the named techniques show up:
+LSASS). The following table maps representative technique families to candidate
+indicators; it is not a guarantee for every tool version or invocation:
 
 | Technique | What reports it |
 |---|---|
@@ -848,7 +855,12 @@ LSASS). How the named techniques show up:
 | Sleep obfuscation (Ekko, Foliage, Zilean), waiting in a system call from hidden code | `defense.syscall_return_nonexec`, or `defense.stack_return_nonexec` when the hidden code is further up the stack (below) |
 
 The gates differ in how they find a service number when ntdll is hooked; that
-lookup leaves nothing behind, so they are caught by the call they make. CI
+lookup alone does not establish which technique ran. These are bounded
+snapshots, not a record of every call: short calls, unfamiliar stub layouts,
+unreadable memory and plausible spoofed stacks can be missed. JIT exceptions
+also trade detection coverage for fewer false positives. A finding named
+`defense.indirect_syscall` can also mean injected code calling an ordinary
+Native API; it does not identify a framework or prove a hook was bypassed. CI
 plants inert stubs of each shape (never run), poses suspended threads as
 stopped in direct, copied and indirect calls, maps ntdll twice, and requires
 each to be reported at the right address and a clean live PowerShell to show
@@ -1374,9 +1386,12 @@ leaves behind, so you can account for it in your notes:
   their memory. That's exactly what EDR products watch for, so expect alerts
   (and blocks, for protected processes) and tell the SOC before a sweep. Its
   image-integrity check also reads each loaded module's file from disk. On
-  Windows it opens each of their threads with `THREAD_GET_CONTEXT` to read its
-  registers (a brief interruption of the thread, which isn't suspended) and
-  reads its start address on the same handle, or on one opened with
+  Windows register capture requests `THREAD_GET_CONTEXT`, query rights and
+  `THREAD_SUSPEND_RESUME`. Each capture and recheck briefly pauses one thread,
+  reads its registers, and releases only that added suspension. No thread is
+  held paused during memory inspection, hashing or stack walking. Target
+  scheduling/timing can still be affected. Start addresses use query-only
+  handles, or a handle opened with
   `THREAD_QUERY_INFORMATION` where Windows asks for that,
   and the sidecar registers a no-op vectored handler of each kind in **its own**
   process for a moment to find ntdll's handler lists; nothing is written to the

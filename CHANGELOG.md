@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.17.1
+
+Security and maintenance release for the analyst console. No dependency
+changes; report schema remains 1.2.
+
+### Fixed
+
+- The analyst console URL is no longer a credential on its own. The address
+  reaches the browser on a command line, which other local accounts can read
+  on Linux; with it, an unprivileged account could list collections, download
+  reports collected with elevated rights and close the console. The first load
+  of the console page now claims the session with an HttpOnly, SameSite=Strict
+  cookie scoped to the session path, and every later request must carry it.
+  Report tabs, downloads and the sample investigation keep working. Other
+  browsers, programs and accounts are refused with an explanation, and the
+  terminal warns once, with a total at exit.
+- On Linux, **Persistence review** now includes the `kmod`, `ebpf` and
+  `rootkit` collectors, the counterparts of Windows `drivers`, instead of only
+  processes, autoruns and AI-agent configuration. Quick triage and Persistence
+  review descriptions name only what the running OS collects.
+
+### Notes
+
+- The first page load wins. If another account opens the URL before the
+  browser does, the analyst's browser is refused and the terminal warning
+  appears. To use a browser other than the one that opens automatically, start
+  with `-ui-no-open` and paste the URL into that browser first.
+
 ## 0.17.0
 
 ### Added

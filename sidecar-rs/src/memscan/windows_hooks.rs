@@ -1,11 +1,10 @@
 //! Reading a Windows process's exception hooks (judged in hooks.rs).
 //!
 //! Hardware breakpoints: every thread of the process is opened with
-//! THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION and its registers
-//! are read (GetThreadContext: the debug registers, and on x64 the control and
-//! integer registers the system-call and stack checks use; the thread isn't
-//! suspended, and nothing is set). Its start address is read on the same
-//! handle (NtQueryInformationThread), or on one opened with
+//! query rights for its start address, then windows_context.rs briefly
+//! suspends it, reads its debug/control/integer registers and releases only
+//! the suspension it acquired. No thread is held suspended while memory is
+//! inspected. Its start address is read with NtQueryInformationThread, or with
 //! THREAD_QUERY_INFORMATION where Windows asks for that.
 //!
 //! Vectored handlers: ntdll keeps them on two lists, exception handlers and
@@ -39,17 +38,20 @@ use super::procmem::{file_name_lower, ProcessMemory, ThreadChecks};
 use super::syscalls;
 use super::threads;
 use super::windows::{protect_name, read_image_file, WinProcess};
+use super::windows_context;
+#[cfg(test)]
+pub(super) use super::windows_context::AlignedContext;
 use super::windows_syscalls::{self, Regs};
 use super::windows_threads;
 use core::ffi::c_void;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 use std::time::Instant;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredContinueHandler, AddVectoredExceptionHandler, CheckRemoteDebuggerPresent,
-    DecodePointer, EncodePointer, GetThreadContext, ReadProcessMemory,
-    RemoveVectoredContinueHandler, RemoveVectoredExceptionHandler, CONTEXT, EXCEPTION_POINTERS,
+    DecodePointer, EncodePointer, ReadProcessMemory, RemoveVectoredContinueHandler,
+    RemoveVectoredExceptionHandler, EXCEPTION_POINTERS,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
@@ -62,8 +64,8 @@ use windows_sys::Win32::System::Memory::{
 };
 use windows_sys::Win32::System::ProcessStatus::{K32GetModuleInformation, MODULEINFO};
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetProcessId, IsWow64Process, OpenThread, THREAD_GET_CONTEXT,
-    THREAD_QUERY_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, GetProcessId, IsWow64Process, OpenThread, THREAD_QUERY_INFORMATION,
+    THREAD_QUERY_LIMITED_INFORMATION,
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -85,10 +87,6 @@ const CONTEXT_READ: u32 = CONTEXT_DEBUG;
 const MAX_THREADS: usize = 8192;
 const MAX_HANDLERS: usize = 64;
 const PTR: usize = core::mem::size_of::<usize>();
-
-/// CONTEXT, aligned as GetThreadContext requires on x64.
-#[repr(C, align(16))]
-pub(super) struct AlignedContext(pub(super) CONTEXT);
 
 pub(super) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
@@ -126,7 +124,7 @@ pub(super) fn read(p: &WinProcess, deadline: Instant) -> ThreadChecks {
         rep.debugged = Some(present != 0);
     }
     let (mut regs, mut starts) = (Vec::new(), Vec::new());
-    let starts_unreadable = read_threads(pid, &mut rep, &mut regs, &mut starts);
+    let starts_unreadable = read_threads(pid, &mut rep, &mut regs, &mut starts, deadline);
 
     if self_wow.is_none() || self_wow != target_wow {
         rep.handlers_skipped = Some(
@@ -210,18 +208,23 @@ fn wow64(h: HANDLE) -> Option<bool> {
 }
 
 /// Every thread of `pid`, from one system-wide thread snapshot.
-fn threads_of(pid: u32) -> Vec<u32> {
+fn threads_of(pid: u32) -> Result<Vec<u32>, u32> {
     let mut out = Vec::new();
     // SAFETY: the snapshot handle is closed below; te.dwSize is set as the
     // API requires.
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         if snap == INVALID_HANDLE_VALUE || snap.is_null() {
-            return out;
+            return Err(GetLastError());
         }
         let mut te: THREADENTRY32 = core::mem::zeroed();
         te.dwSize = core::mem::size_of::<THREADENTRY32>() as u32;
         let mut ok = Thread32First(snap, &mut te);
+        if ok == 0 {
+            let error = GetLastError();
+            CloseHandle(snap);
+            return Err(error);
+        }
         while ok != 0 && out.len() < MAX_THREADS {
             if te.th32OwnerProcessID == pid {
                 out.push(te.th32ThreadID);
@@ -230,11 +233,17 @@ fn threads_of(pid: u32) -> Vec<u32> {
         }
         CloseHandle(snap);
     }
-    out
+    Ok(out)
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-fn read_threads(_: u32, _: &mut Report, _: &mut Vec<Regs>, _: &mut Vec<(u32, usize)>) -> usize {
+fn read_threads(
+    _: u32,
+    _: &mut Report,
+    _: &mut Vec<Regs>,
+    _: &mut Vec<(u32, usize)>,
+    _: Instant,
+) -> usize {
     0
 }
 
@@ -282,57 +291,64 @@ fn start_address(th: HANDLE) -> Result<usize, i32> {
 /// `starts`) and, on x64, its instruction and stack pointers and integer
 /// registers (into `regs`). Returns how many start addresses couldn't be read.
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+// The shared signature needs a Vec for x64; x86 has no control-register pass.
+#[cfg_attr(target_arch = "x86", allow(unused_variables, clippy::ptr_arg))]
 fn read_threads(
     pid: u32,
     rep: &mut Report,
     regs: &mut Vec<Regs>,
     starts: &mut Vec<(u32, usize)>,
+    deadline: Instant,
 ) -> usize {
     let mut starts_unreadable = 0;
-    // The calling thread, when its own process is read: its context is its
-    // own GetThreadContext call, and its stack has moved on by the time the
-    // syscall checks look, so it has no call to judge.
-    #[cfg(target_arch = "x86_64")]
-    let own = {
-        use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
-        // SAFETY: plain queries about the calling thread.
-        (pid == unsafe { GetCurrentProcessId() }).then(|| unsafe { GetCurrentThreadId() })
+    let tids = match threads_of(pid) {
+        Ok(tids) => tids,
+        Err(code) => {
+            rep.thread_scan_stopped = Some(format!("thread enumeration failed (Win32 {code})"));
+            return 0;
+        }
     };
-    for tid in threads_of(pid) {
-        // SAFETY: the thread handle is closed below; the context is aligned
-        // and only the debug registers and control registers are asked for.
+    if tids.len() >= MAX_THREADS {
+        rep.thread_scan_stopped = Some("thread cap reached".into());
+    }
+    for tid in tids {
+        if Instant::now() >= deadline {
+            rep.thread_scan_stopped = Some("time budget exhausted".into());
+            break;
+        }
+        // Start-address collection stays query-only even if context capture
+        // is denied the additional SUSPEND_RESUME right.
+        // SAFETY: each successfully opened query handle is closed below.
         unsafe {
-            let th = OpenThread(
-                THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION,
-                0,
-                tid,
-            );
+            let th = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, tid);
             if th.is_null() {
-                rep.threads_unreadable += 1;
                 starts_unreadable += 1;
-                continue;
-            }
-            match start_address(th) {
-                Ok(a) => starts.push((tid, a)),
-                // Some Windows versions want THREAD_QUERY_INFORMATION for it.
-                Err(STATUS_ACCESS_DENIED) => {
-                    let q = OpenThread(THREAD_QUERY_INFORMATION, 0, tid);
-                    match (!q.is_null()).then(|| start_address(q)) {
-                        Some(Ok(a)) => starts.push((tid, a)),
-                        _ => starts_unreadable += 1,
+            } else {
+                match start_address(th) {
+                    Ok(a) => starts.push((tid, a)),
+                    // Some Windows versions want THREAD_QUERY_INFORMATION for it.
+                    Err(STATUS_ACCESS_DENIED) => {
+                        let q = OpenThread(THREAD_QUERY_INFORMATION, 0, tid);
+                        match (!q.is_null()).then(|| start_address(q)) {
+                            Some(Ok(a)) => starts.push((tid, a)),
+                            _ => starts_unreadable += 1,
+                        }
+                        if !q.is_null() {
+                            CloseHandle(q);
+                        }
                     }
-                    if !q.is_null() {
-                        CloseHandle(q);
-                    }
+                    Err(_) => starts_unreadable += 1,
                 }
-                Err(_) => starts_unreadable += 1,
+                CloseHandle(th);
             }
-            let mut c: AlignedContext = core::mem::zeroed();
-            c.0.ContextFlags = CONTEXT_READ;
-            if GetThreadContext(th, &mut c.0) != 0 {
+        }
+        // This returns only after the thread has been resumed. All allocation
+        // (including breakpoint vectors) and subsequent inspection happens now.
+        match windows_context::read(tid, pid, CONTEXT_READ) {
+            Ok(c) => {
                 rep.threads += 1;
                 #[cfg(target_arch = "x86_64")]
-                if own != Some(tid) {
+                {
                     let x = &c.0;
                     regs.push(Regs {
                         tid,
@@ -352,10 +368,12 @@ fn read_threads(
                 ];
                 rep.breakpoints
                     .extend(hooks::armed(tid, dr, c.0.Dr7 as usize));
-            } else {
-                rep.threads_unreadable += 1;
             }
-            CloseHandle(th);
+            Err(e) if e.stage == "current thread skipped" => rep.current_thread_skipped += 1,
+            Err(e) => {
+                rep.threads_unreadable += 1;
+                *rep.context_errors.entry(e.summary()).or_default() += 1;
+            }
         }
     }
     starts_unreadable
@@ -709,13 +727,14 @@ fn read_handlers(p: &WinProcess, l: &Layout) -> Result<Vec<(HandlerList, usize)>
 mod tests {
     use super::*;
     use crate::memscan::windows::open;
-    use windows_sys::Win32::System::Diagnostics::Debug::SetThreadContext;
+    use windows_sys::Win32::System::Diagnostics::Debug::{GetThreadContext, SetThreadContext};
     use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
     use windows_sys::Win32::System::Memory::{
         VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
     };
     use windows_sys::Win32::System::Threading::{
-        GetCurrentThreadId, ResumeThread, SuspendThread, THREAD_SET_CONTEXT, THREAD_SUSPEND_RESUME,
+        GetCurrentThreadId, ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_SET_CONTEXT,
+        THREAD_SUSPEND_RESUME,
     };
 
     fn export(module: &str, name: &core::ffi::CStr, load: bool) -> usize {

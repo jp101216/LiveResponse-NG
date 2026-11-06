@@ -1,7 +1,7 @@
 //! Reading a Windows process's system calls (judged in syscalls.rs).
 //!
 //! - Threads: the instruction and stack pointers windows_hooks.rs read with
-//!   each thread's debug registers (GetThreadContext, read-only). A thread
+//!   each thread's debug registers (brief suspend/read/resume). A thread
 //!   whose two bytes before its instruction pointer are a `syscall` is in (or
 //!   just back from) a system call; where that instruction lies, and where the
 //!   address at its stack pointer leads, are looked up with VirtualQueryEx.
@@ -25,6 +25,9 @@ use super::pe;
 use super::procmem::{file_name_lower, ProcessMemory};
 use super::syscalls::{self, Call, NtdllCopy, Place, Report, StubRegion, StubTable};
 use super::windows::{read_image_file, WinProcess};
+#[cfg(target_arch = "x86_64")]
+use super::windows_context;
+use super::windows_context::CaptureError;
 use super::windows_hooks::{locate, read_usize, wide};
 use core::ffi::c_void;
 use std::collections::{BTreeMap, BTreeSet};
@@ -201,9 +204,16 @@ pub(super) fn read(
             // The registers were read a while ago. A thread back from a short
             // call has run on, and may have reused the stack slot read above:
             // report only a thread still where it was.
-            if !still_in_call(p, r, call.ret.as_ref().map(|(ret, _)| *ret)) {
-                rep.moved += 1;
-                continue;
+            match still_in_call(p, r, call.ret.as_ref().map(|(ret, _)| *ret)) {
+                Ok(true) => {}
+                Ok(false) => {
+                    rep.moved += 1;
+                    continue;
+                }
+                Err(_) => {
+                    rep.rechecks_failed += 1;
+                    continue;
+                }
             }
             rep.calls.push(call);
         }
@@ -225,36 +235,31 @@ pub(super) fn read(
 /// Whether a thread is still at the instruction and stack pointers it was
 /// read with, and (when given) the address at its stack pointer is still
 /// `ret`. A thread blocked in a system call stays put.
-pub(super) fn still_in_call(p: &WinProcess, r: &Regs, ret: Option<usize>) -> bool {
-    registers_now(r.tid) == Some((r.rip, r.rsp))
-        && ret.is_none_or(|v| read_usize(p.h, r.rsp) == Some(v))
+pub(super) fn still_in_call(
+    p: &WinProcess,
+    r: &Regs,
+    ret: Option<usize>,
+) -> Result<bool, CaptureError> {
+    // SAFETY: the process handle is owned by p.
+    let pid = unsafe { windows_sys::Win32::System::Threading::GetProcessId(p.h) };
+    Ok(registers_now(r.tid, pid)? == (r.rip, r.rsp)
+        && ret.is_none_or(|v| read_usize(p.h, r.rsp) == Some(v)))
 }
 
 /// A thread's instruction and stack pointers, read now.
 #[cfg(target_arch = "x86_64")]
-fn registers_now(tid: u32) -> Option<(usize, usize)> {
-    use super::windows_hooks::AlignedContext;
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Diagnostics::Debug::{GetThreadContext, CONTEXT_CONTROL_AMD64};
-    use windows_sys::Win32::System::Threading::{OpenThread, THREAD_GET_CONTEXT};
-    // SAFETY: the handle is closed below; the context is aligned and only its
-    // control registers are asked for.
-    unsafe {
-        let th = OpenThread(THREAD_GET_CONTEXT, 0, tid);
-        if th.is_null() {
-            return None;
-        }
-        let mut c: AlignedContext = core::mem::zeroed();
-        c.0.ContextFlags = CONTEXT_CONTROL_AMD64;
-        let ok = GetThreadContext(th, &mut c.0) != 0;
-        CloseHandle(th);
-        ok.then_some((c.0.Rip as usize, c.0.Rsp as usize))
-    }
+fn registers_now(tid: u32, pid: u32) -> Result<(usize, usize), CaptureError> {
+    use windows_sys::Win32::System::Diagnostics::Debug::CONTEXT_CONTROL_AMD64;
+    let c = windows_context::read(tid, pid, CONTEXT_CONTROL_AMD64)?;
+    Ok((c.0.Rip as usize, c.0.Rsp as usize))
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-fn registers_now(_: u32) -> Option<(usize, usize)> {
-    None
+fn registers_now(_: u32, _: u32) -> Result<(usize, usize), CaptureError> {
+    Err(CaptureError {
+        stage: "unsupported architecture",
+        code: 0,
+    })
 }
 
 /// Where an address lies, for the syscall checks.
@@ -470,7 +475,7 @@ fn scan_memory(p: &WinProcess, nt: &Ntdll, deadline: Instant, rep: &mut Report) 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
     use crate::memscan::windows::{open, SELFTEST};

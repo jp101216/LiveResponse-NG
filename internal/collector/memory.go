@@ -248,6 +248,7 @@ var memoryRecordKeys = []string{
 	// Threads (Windows): start addresses read, stacks walked and how the
 	// walks ended, JIT code ranges, and what was found.
 	"threads",
+	"thread_context_gaps",
 }
 
 // memoryRecords turns sidecar responses into one record per process (every

@@ -22,7 +22,7 @@
 use super::integrity::{symbol_names, ETW_WRITERS};
 use crate::contract::Hit;
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What a debug register watches (its R/W bits in Dr7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +142,10 @@ pub struct Report {
     /// Threads whose debug registers were read, and those that couldn't be.
     pub threads: usize,
     pub threads_unreadable: usize,
+    /// Failed supported context acquisitions, by operation/error; never clean.
+    pub context_errors: BTreeMap<String, usize>,
+    pub current_thread_skipped: usize,
+    pub thread_scan_stopped: Option<String>,
     pub breakpoints: Vec<Breakpoint>,
     /// Both vectored-handler lists were read.
     pub handlers_walked: bool,
@@ -374,6 +378,10 @@ impl Report {
             "supported": true,
             "threads": self.threads,
             "threads_unreadable": self.threads_unreadable,
+            "context_capture": "suspend/get-context/resume",
+            "context_errors": self.context_errors,
+            "current_thread_skipped": self.current_thread_skipped,
+            "thread_scan_stopped": self.thread_scan_stopped,
             "breakpoints": self.breakpoints.len(),
             "handlers_walked": self.handlers_walked,
             "handlers_skipped": self.handlers_skipped,

@@ -104,6 +104,7 @@ pub struct Report {
     pub jit_ranges: Option<usize>,
     /// Findings dropped because the thread had moved when read again.
     pub moved: usize,
+    pub rechecks_failed: usize,
     pub starts: Vec<StartFinding>,
     pub stacks: Vec<StackFinding>,
 }
@@ -299,6 +300,7 @@ impl Report {
             "jit_frames": self.jit_frames,
             "jit_ranges": self.jit_ranges,
             "threads_moved": self.moved,
+            "context_rechecks_failed": self.rechecks_failed,
             "stack_findings": self.stacks.len(),
         })
     }

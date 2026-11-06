@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.17.2
+
+Windows memory-scan reliability release. Report schema remains 1.2.
 
 ### Fixed
 

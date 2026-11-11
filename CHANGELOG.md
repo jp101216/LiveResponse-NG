@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Collector deadlines and cancellation now mark returned evidence as partial
+  even when the collector returns its records without an error. Existing
+  collector errors and partial evidence are preserved.
+- Partial, denied, failed and unreached process-memory scans now contribute a
+  coverage error to report summaries and analyst handoffs. Intentional process
+  exclusions remain separate from failures; available findings are retained.
+- Agent-trace imports that reach an input limit now report a coverage error,
+  rather than leaving truncated telemetry visible only in collector metadata.
+
 ## 0.17.2
 
 Windows memory-scan reliability release. Report schema remains 1.2.

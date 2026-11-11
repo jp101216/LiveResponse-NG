@@ -42,7 +42,7 @@ func ParseAgentTraceFiles(ctx context.Context, paths []string) Result {
 			res.Fail("trace import interrupted: " + ctx.Err().Error())
 			break
 		}
-		if total >= traceMaxTotalBytes {
+		if total >= traceMaxTotalBytes || len(res.Records) >= traceMaxRecords {
 			truncated = true
 			break
 		}
@@ -163,6 +163,9 @@ func ParseAgentTraceFiles(ctx context.Context, paths []string) Result {
 	}
 	if len(res.Records) == 0 {
 		res.Fail("no supported agent spans imported; input must be normalized JSONL or OTLP/JSON resourceSpans")
+	}
+	if truncated {
+		res.Fail("trace input limit reached; import covers only retained spans")
 	}
 	res.SetMeta("sources", sources)
 	res.SetMeta("content_policy", "metadata only; known content fields have SHA-256 and JSON-encoded byte length; original content and unknown fields are omitted")

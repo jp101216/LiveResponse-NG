@@ -201,6 +201,135 @@ func TestParseHiveRejects(t *testing.T) {
 	}
 }
 
+func TestHiveRepeatedSubkeyListsDoNotAmplify(t *testing.T) {
+	b := newHiveBuilder()
+	child := b.add(makeNK("child", 0, hiveCellNil, 0, hiveCellNil, ftJan2021))
+	list := b.subkeyList(child)
+	for depth := 0; depth < 10; depth++ {
+		p := make([]byte, 12)
+		copy(p, "ri")
+		binary.LittleEndian.PutUint16(p[2:], 2)
+		binary.LittleEndian.PutUint32(p[4:], list)
+		binary.LittleEndian.PutUint32(p[8:], list)
+		list = b.add(p)
+	}
+	root := b.add(makeNK("ROOT", 1, list, 0, hiveCellNil, ftJan2021))
+	h, err := ParseHive(b.finish(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, _ := h.Root()
+	keys, err := k.SubKeys()
+	if err != nil || len(keys) != 1 || keys[0].Name != "child" {
+		t.Fatalf("repeated lists amplified one subkey into %d: %v", len(keys), err)
+	}
+}
+
+func TestHiveBigDataRejectsImpossibleSize(t *testing.T) {
+	b := newHiveBuilder()
+	seg := b.add([]byte("small value"))
+	list := b.valueList(seg)
+	db := make([]byte, 8)
+	copy(db, "db")
+	binary.LittleEndian.PutUint16(db[2:], 1)
+	binary.LittleEndian.PutUint32(db[4:], list)
+	root := b.add(makeNK("ROOT", 0, hiveCellNil, 0, hiveCellNil, ftJan2021))
+	h, err := ParseHive(b.finish(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data := h.readBigData(db, 16<<20); data != nil {
+		t.Fatalf("impossible value size allocated %d bytes from a %d-byte hive", cap(data), len(h.data))
+	}
+}
+
+func TestHiveCellBoundsOnEveryArchitecture(t *testing.T) {
+	for _, mode := range []string{"huge_offset", "huge_negative_size", "huge_positive_size"} {
+		t.Run(mode, func(t *testing.T) {
+			data := buildAmcacheHive()
+			off := binary.LittleEndian.Uint32(data[36:])
+			switch mode {
+			case "huge_offset":
+				binary.LittleEndian.PutUint32(data[36:], 0x7fffefff)
+			case "huge_negative_size":
+				binary.LittleEndian.PutUint32(data[hiveBaseBlock+int(off):], 0x80000004)
+			case "huge_positive_size":
+				binary.LittleEndian.PutUint32(data[hiveBaseBlock+int(off):], 0x7ffffffc)
+			}
+			if _, err := ParseHive(data); err == nil {
+				t.Fatal("oversized cell accepted")
+			}
+		})
+	}
+}
+
+func TestHiveCyclicListKeepsHealthyBranch(t *testing.T) {
+	b := newHiveBuilder()
+	child := b.add(makeNK("child", 0, hiveCellNil, 0, hiveCellNil, ftJan2021))
+	leaf := b.subkeyList(child)
+	p := make([]byte, 12)
+	copy(p, "ri")
+	binary.LittleEndian.PutUint16(p[2:], 2)
+	binary.LittleEndian.PutUint32(p[8:], leaf)
+	list := b.add(p)
+	binary.LittleEndian.PutUint32(b.bins[int(list)+8:], list) // first branch points to itself
+	root := b.add(makeNK("ROOT", 1, list, 0, hiveCellNil, ftJan2021))
+	h, err := ParseHive(b.finish(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, _ := h.Root()
+	keys, err := k.SubKeys()
+	if err != nil || len(keys) != 1 || keys[0].Name != "child" {
+		t.Fatalf("cyclic list lost or duplicated its healthy branch: %d keys, %v", len(keys), err)
+	}
+}
+
+func TestHiveBigDataRetainsValidSegments(t *testing.T) {
+	b := newHiveBuilder()
+	first := b.add([]byte(strings.Repeat("a", hiveBigDataMax)))
+	second := b.add([]byte("tail"))
+	list := b.valueList(first, second)
+	db := make([]byte, 8)
+	copy(db, "db")
+	binary.LittleEndian.PutUint16(db[2:], 2)
+	binary.LittleEndian.PutUint32(db[4:], list)
+	root := b.add(makeNK("ROOT", 0, hiveCellNil, 0, hiveCellNil, ftJan2021))
+	h, err := ParseHive(b.finish(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data := h.readBigData(db, hiveBigDataMax+4); string(data) != strings.Repeat("a", hiveBigDataMax)+"tail" {
+		t.Fatalf("valid big-data value changed: %d bytes", len(data))
+	}
+}
+
+func FuzzHiveReader(f *testing.F) {
+	f.Add(buildAmcacheHive())
+	f.Add([]byte("regf"))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > 64<<10 {
+			t.Skip()
+		}
+		h, err := ParseHive(data)
+		if err != nil {
+			return
+		}
+		k, err := h.Root()
+		if err != nil {
+			return
+		}
+		_, _ = k.Values()
+		keys, _ := k.SubKeys()
+		for i, child := range keys {
+			if i >= 64 {
+				break
+			}
+			_, _ = child.Values()
+		}
+	})
+}
+
 // TestValuesHugeCountNoOOB guards the value-count clamp against integer
 // overflow. The key claims ~1 billion values but its value-list cell holds room
 // for only two offsets. numValues is attacker-controlled, so on a 32-bit build

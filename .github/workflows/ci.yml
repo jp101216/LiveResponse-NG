@@ -65,6 +65,9 @@ jobs:
       - name: go test (runs every collector against the runner)
         shell: bash
         run: go test -count=1 -json ./... 2>&1 | python .github/scripts/ci-annotate.py go-test
+      - name: 32-bit hostile-input parsers
+        shell: bash
+        run: GOARCH=386 go test -count=1 -json ./internal/winreg ./internal/pehash ./internal/casefile 2>&1 | python .github/scripts/ci-annotate.py go-test
       - name: smoke run
         shell: pwsh
         run: |

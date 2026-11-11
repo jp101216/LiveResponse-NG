@@ -6,14 +6,100 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/jp101216/liveresponse-ng/internal/collector"
 )
+
+func TestForcedArtifactFailurePreservesEvidence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.json")
+	for _, p := range []string{path, path + ".sha256"} {
+		if err := os.WriteFile(p, []byte("original evidence"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := errors.New("write failed")
+	_, err := WriteArtifact(path, true, func(w io.Writer) error {
+		_, _ = io.WriteString(w, "incomplete replacement")
+		return want
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("writer error lost: %v", err)
+	}
+	for _, p := range []string{path, path + ".sha256"} {
+		data, err := os.ReadFile(p)
+		if err != nil || string(data) != "original evidence" {
+			t.Fatalf("failed replacement changed existing evidence: %s: %q %v", p, data, err)
+		}
+	}
+	entries, _ := os.ReadDir(filepath.Dir(path))
+	if len(entries) != 2 {
+		t.Fatalf("failed replacement left temporary files: %v", entries)
+	}
+}
+
+func TestForcedArtifactReplacesLinksWithoutChangingTargets(t *testing.T) {
+	for _, kind := range []string{"symlink", "hardlink"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "report.json")
+			for _, p := range []string{path, path + ".sha256"} {
+				target := p + ".original"
+				if err := os.WriteFile(target, []byte("original evidence"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				link := os.Symlink
+				if kind == "hardlink" {
+					link = os.Link
+				}
+				if err := link(target, p); err != nil {
+					t.Skipf("%s unavailable: %v", kind, err)
+				}
+			}
+			if _, err := WriteFile(path, Report{}, FormatJSON, false, true); err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range []string{path, path + ".sha256"} {
+				data, err := os.ReadFile(p + ".original")
+				if err != nil || string(data) != "original evidence" {
+					t.Fatalf("forced output followed a %s: %q %v", kind, data, err)
+				}
+				info, err := os.Lstat(p)
+				if err != nil || !info.Mode().IsRegular() {
+					t.Fatalf("output was not replaced with a regular file: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestForcedArtifactUsesPrivatePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode-bit permissions")
+	}
+	path := filepath.Join(t.TempDir(), "report.json")
+	for _, p := range []string{path, path + ".sha256"} {
+		if err := os.WriteFile(p, []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := WriteFile(path, Report{}, FormatJSON, false, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{path, path + ".sha256"} {
+		info, err := os.Stat(p)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("forced output retained public permissions: %s: %v %v", p, info, err)
+		}
+	}
+}
 
 func sampleResults() []collector.Result {
 	return []collector.Result{

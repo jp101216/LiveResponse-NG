@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- Forced report/checksum replacement now stages a private file before replacing
+  the destination. Failed writes preserve previous evidence, and destination
+  symlinks/hard links cannot redirect writes into another file. Unix output
+  permissions no longer inherit a previous file's public access bits.
+- Offline registry-hive parsing now rejects cell offsets/sizes that overflow
+  on 32-bit builds, avoids repeated/cyclic list expansion, and rejects
+  impossible big-data allocations. CI now executes parser tests on Windows x86.
+- Linux memory image comparisons now check their time/byte budgets within each
+  mapping. Windows image-file reads stay bounded if a file grows during a scan.
 - Collector deadlines and cancellation now mark returned evidence as partial
   even when the collector returns its records without an error. Existing
   collector errors and partial evidence are preserved.

@@ -1261,6 +1261,7 @@ name = "lrng-sidecar"
 version = "0.17.2"
 dependencies = [
  "regex",
+ "rsa",
  "serde",
  "serde_json",
  "windows-sys 0.61.2",

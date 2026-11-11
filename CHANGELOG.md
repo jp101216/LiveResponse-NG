@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Update YARA-X to 1.23 and refresh its locked dependencies for upstream parser,
+  scanner and security fixes. The dependency audit now finds no known
+  vulnerabilities and runs in CI. Building the sidecar requires Rust 1.95+.
 - Forced report/checksum replacement now stages a private file before replacing
   the destination. Failed writes preserve previous evidence, and destination
   symlinks/hard links cannot redirect writes into another file. Unix output

@@ -146,6 +146,10 @@ jobs:
         with:
           workspaces: sidecar-rs
       - run: cargo fmt --manifest-path sidecar-rs/Cargo.toml -- --check
+      - name: Rust dependency security audit
+        run: |
+          cargo install --locked cargo-audit --version 0.23.0
+          cargo audit --file sidecar-rs/Cargo.lock
       - name: clippy
         shell: bash
         run: >-

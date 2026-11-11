@@ -2,7 +2,7 @@
 name = "lrng-sidecar"
 version = "0.17.2"
 edition = "2021"
-rust-version = "1.93" # yara-x 1.21
+rust-version = "1.95" # yara-x 1.23
 description = "Live Response NG sidecar: memory-safe hostile-input scanning (prompt artifacts, YARA over process memory)."
 license = "MIT"
 
@@ -24,7 +24,7 @@ yara-pulley = ["yara", "yara-x/pulley"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
-yara-x = { version = "1.21", optional = true }
+yara-x = { version = "1.23", optional = true }
 
 # Windows memory access. Also pulled in under the lrng_typecheck_windows cfg so
 # the Windows code can be type-checked from Linux (see Makefile: check-windows-rs).

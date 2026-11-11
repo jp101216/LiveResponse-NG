@@ -1446,7 +1446,7 @@ environment read above), and the DNS cache with cache-only lookups.
 ## Build
 
 Requires Go 1.24+ (build releases with a currently supported Go release) and,
-for the sidecar, Rust 1.93+ (YARA-X). `Cargo.lock` is committed and builds use
+for the sidecar, Rust 1.95+ (YARA-X). `Cargo.lock` is committed and builds use
 `--locked`. With YARA-X the release sidecar is about 21 MB and takes around
 10 minutes to build (LTO); `cargo build --no-default-features` builds a small
 sidecar without YARA (prompt scanning and memory heuristics only).

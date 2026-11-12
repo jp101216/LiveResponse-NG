@@ -71,6 +71,15 @@ var iocPathFields = map[string]bool{
 	"library": true, "suspicious_modules": true, "deleted_modules": true,
 }
 
+// iocInventoryFields hold a record's complete inventory rather than the part
+// of it a finding is about. A flagged process's "modules" list names every
+// library it has loaded — libc, ntdll — and none of those is an indicator; the
+// ones the finding is about are repeated in suspicious_modules,
+// deleted_modules and side_load_candidates, which are read.
+var iocInventoryFields = map[string]bool{
+	"modules": true,
+}
+
 // iocLocalAddrFields hold the host's own endpoint of a socket, not a remote
 // indicator, so IPs there are not extracted (a host doesn't block itself).
 var iocLocalAddrFields = map[string]bool{
@@ -157,7 +166,10 @@ func ExtractIOCs(results []Result) Result {
 		if list[i].typ != list[j].typ {
 			return list[i].typ < list[j].typ
 		}
-		return strings.ToLower(list[i].value) < strings.ToLower(list[j].value)
+		if a, b := strings.ToLower(list[i].value), strings.ToLower(list[j].value); a != b {
+			return a < b
+		}
+		return list[i].value < list[j].value // POSIX paths differing only in case
 	})
 
 	total := len(list)
@@ -203,6 +215,9 @@ func ExtractIOCs(results []Result) Result {
 // process named like a domain isn't mistaken for one).
 func extractRecordIOCs(collectorName string, rec Record, emit func(typ, norm, display, field string)) {
 	for _, key := range sortedFieldKeys(rec.Fields) {
+		if iocInventoryFields[key] {
+			continue
+		}
 		walkIOCStrings(key, rec.Fields[key], func(field, s string) {
 			classifyIOC(collectorName, field, s, emit)
 		})

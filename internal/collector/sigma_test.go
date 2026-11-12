@@ -188,17 +188,14 @@ level: low
 }
 
 func TestSigmaUnsupportedModifierSkipped(t *testing.T) {
-	// |base64 (the plain, non-offset encoding) and |utf16/|wide remain
-	// unsupported, so a rule using one must be skipped rather than mis-scored.
-	reason := compileReason(t, `title: Plain Base64 Rule
-detection:
-    selection:
-        CommandLine|base64: 'whoami'
-    condition: selection
-level: high
-`)
-	if reason == "" {
-		t.Fatal("a rule using |base64 must be skipped, not compiled")
+	// A modifier the engine doesn't implement (|expand needs placeholder
+	// values lrng has no source for) must skip the rule, not mis-score it. So
+	// must a combination that can't mean anything here.
+	for _, field := range []string{"CommandLine|expand", "CommandLine|wide", "CommandLine|contains|i", "CommandLine|base64|base64offset"} {
+		reason := compileReason(t, "title: Unsupported\ndetection:\n    selection:\n        "+field+": 'whoami'\n    condition: selection\nlevel: high\n")
+		if reason == "" {
+			t.Errorf("a rule using %s must be skipped, not compiled", field)
+		}
 	}
 }
 

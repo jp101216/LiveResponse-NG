@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 // builtinSigmaFS holds the bundled starter rule pack, mapped to the channels
@@ -79,6 +80,7 @@ type sigmaRule struct {
 	technique string
 	logFilter func(winEvent) bool
 	searches  map[string]*sigmaSearch
+	names     []string // the search identifiers, sorted
 	cond      condNode
 	agg       *aggregation // non-nil for a "| count() ..." rule; fired from the aggregator, not per-event
 }
@@ -161,11 +163,12 @@ func (r *sigmaRule) match(ev winEvent, fields map[string]string, values []string
 	if r.logFilter != nil && !r.logFilter(ev) {
 		return false
 	}
-	ctx := &condCtx{matched: make(map[string]bool, len(r.searches)), names: make([]string, 0, len(r.searches))}
-	for name, s := range r.searches {
-		ctx.matched[name] = s.eval(fields, values)
-		ctx.names = append(ctx.names, name)
-	}
+	// Searches are evaluated on demand: most events fail the first selection,
+	// and "selection and not filter" then never has to evaluate the filter.
+	ctx := &condCtx{names: r.names, lookup: func(name string) bool {
+		s := r.searches[name]
+		return s != nil && s.eval(fields, values)
+	}}
 	return r.cond.eval(ctx)
 }
 
@@ -773,11 +776,7 @@ func (st *aggState) flushNear() []Record {
 // evalNear evaluates the rule's expression and its near expression treating a
 // selection as true when it has at least one match in the current window.
 func (r *sigmaRule) evalNear(win map[string]int) bool {
-	ctx := &condCtx{matched: make(map[string]bool, len(r.searches)), names: make([]string, 0, len(r.searches))}
-	for name := range r.searches {
-		ctx.matched[name] = win[name] > 0
-		ctx.names = append(ctx.names, name)
-	}
+	ctx := &condCtx{names: r.names, lookup: func(name string) bool { return win[name] > 0 }}
 	return r.cond.eval(ctx) && r.agg.nearCond.eval(ctx)
 }
 
@@ -853,8 +852,11 @@ func (ev winEvent) sigmaFields() map[string]string {
 	if ev.ThreadID != 0 {
 		put("ThreadId", strconv.Itoa(ev.ThreadID))
 	}
+	// A named EventData value that is present but empty stays in the map, so
+	// "Field: ''" and "Field|exists: true" see it; a field the event doesn't
+	// carry at all stays absent.
 	for k, v := range ev.Data {
-		put(k, v)
+		f[strings.ToLower(k)] = v
 	}
 	for k, v := range ev.UserData {
 		put(k, v)
@@ -1082,9 +1084,19 @@ func compileSigmaRule(doc *yamlNode) (*sigmaRule, string) {
 		technique: sigmaTechnique(doc.get("tags")),
 		logFilter: compileLogFilter(doc.get("logsource")),
 		searches:  searches,
+		names:     sortedSearchNames(searches),
 		cond:      cond,
 		agg:       agg,
 	}, ""
+}
+
+func sortedSearchNames(searches map[string]*sigmaSearch) []string {
+	names := make([]string, 0, len(searches))
+	for name := range searches {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // splitAggregation splits a condition on its top-level aggregation pipe into the
@@ -1293,10 +1305,25 @@ func compileFieldMatch(key string, val *yamlNode) (fieldMatch, string) {
 	exists := false
 	windash := false
 	b64 := false
+	b64Plain := false
+	wide := "" // "", "le", "be" or "bom": re-encode the value as UTF-16 before base64
+	reFlags := ""
 	cidr := false
 	fieldref := false
 	for _, mod := range parts[1:] {
-		switch strings.ToLower(strings.TrimSpace(mod)) {
+		switch m := strings.ToLower(strings.TrimSpace(mod)); m {
+		case "i", "m", "s":
+			if !strings.Contains(reFlags, m) {
+				reFlags += m
+			}
+		case "base64":
+			b64Plain = true
+		case "wide", "utf16le":
+			wide = "le"
+		case "utf16be":
+			wide = "be"
+		case "utf16":
+			wide = "bom"
 		case "contains":
 			op = opContains
 		case "startswith":
@@ -1337,6 +1364,20 @@ func compileFieldMatch(key string, val *yamlNode) (fieldMatch, string) {
 		fm.exists = &b
 		return fm, ""
 	}
+	if reFlags != "" && op != opRegex {
+		return fm, "the |i, |m and |s flags apply only to |re"
+	}
+	if b64 && b64Plain {
+		return fm, "|base64 cannot combine with |base64offset"
+	}
+	if wide != "" && !b64 && !b64Plain {
+		// Event values are already decoded text, so a UTF-16 pattern can only
+		// ever match inside an encoded blob.
+		return fm, "|wide and the |utf16 modifiers need |base64 or |base64offset"
+	}
+	if (b64 || b64Plain) && (op == opRegex || op == opGt || op == opGte || op == opLt || op == opLte) {
+		return fm, "|base64 and |base64offset cannot combine with |re or a numeric comparison"
+	}
 
 	// Gather the value(s).
 	var raw []string
@@ -1361,7 +1402,7 @@ func compileFieldMatch(key string, val *yamlNode) (fieldMatch, string) {
 	// the field value is matched as an IP falling inside it. The values are OR'd
 	// (AND with |all), like any other value list.
 	if cidr {
-		if op != opEquals || windash || b64 || fieldref {
+		if op != opEquals || windash || b64 || b64Plain || fieldref {
 			return fm, "|cidr cannot combine with another value modifier"
 		}
 		for _, v := range raw {
@@ -1383,8 +1424,8 @@ func compileFieldMatch(key string, val *yamlNode) (fieldMatch, string) {
 		default:
 			return fm, "|fieldref supports only an equals/contains/startswith/endswith comparison"
 		}
-		if windash || b64 {
-			return fm, "|fieldref cannot combine with |windash or |base64offset"
+		if windash || b64 || b64Plain {
+			return fm, "|fieldref cannot combine with |windash, |base64 or |base64offset"
 		}
 		for _, v := range raw {
 			ref := strings.ToLower(strings.TrimSpace(v))
@@ -1407,9 +1448,25 @@ func compileFieldMatch(key string, val *yamlNode) (fieldMatch, string) {
 			if hasWildcard(v) {
 				return fm, "|base64offset cannot combine with wildcards"
 			}
-			for _, enc := range base64OffsetVariants(v) {
+			for _, enc := range base64OffsetVariants(sigmaWide(v, wide)) {
 				fm.matchers = append(fm.matchers, valueMatcher{op: opContains, cased: true, literal: enc})
 			}
+		}
+		return fm, ""
+	}
+
+	// base64: match the value's own base64 encoding (case-sensitive), with the
+	// rule's comparison — in practice |base64|contains.
+	if b64Plain {
+		if windash {
+			return fm, "|base64 cannot combine with |windash"
+		}
+		for _, v := range raw {
+			if hasWildcard(v) {
+				return fm, "|base64 cannot combine with wildcards"
+			}
+			enc := base64.StdEncoding.EncodeToString([]byte(sigmaWide(unescapeWildcards(v), wide)))
+			fm.matchers = append(fm.matchers, valueMatcher{op: op, cased: true, literal: enc})
 		}
 		return fm, ""
 	}
@@ -1423,6 +1480,9 @@ func compileFieldMatch(key string, val *yamlNode) (fieldMatch, string) {
 			}
 			fm.matchers = append(fm.matchers, valueMatcher{op: op, num: n})
 		default:
+			if reFlags != "" {
+				v = "(?" + reFlags + ")" + v
+			}
 			m, err := compileStringMatcher(v, op, cased, windash)
 			if err != nil {
 				return fm, err.Error()
@@ -1458,18 +1518,42 @@ func compileStringMatcher(value string, op matchOp, cased, windash bool) (valueM
 	return valueMatcher{op: op, literal: lit, cased: cased}, nil
 }
 
+// sigmaWide re-encodes a value as UTF-16 for the |wide (|utf16le), |utf16be and
+// |utf16 (little-endian with a byte-order mark) modifiers, returning the bytes
+// as a string; mode "" returns the value unchanged.
+func sigmaWide(s, mode string) string {
+	if mode == "" {
+		return s
+	}
+	units := utf16.Encode([]rune(s))
+	b := make([]byte, 0, 2*len(units)+2)
+	if mode == "bom" {
+		b = append(b, 0xFF, 0xFE)
+	}
+	for _, u := range units {
+		if mode == "be" {
+			b = append(b, byte(u>>8), byte(u))
+		} else {
+			b = append(b, byte(u), byte(u>>8))
+		}
+	}
+	return string(b)
+}
+
 // base64OffsetVariants returns the value's base64 encoding as it appears at each
 // of the three byte alignments (offset 0/1/2), trimmed to the alignment-stable
 // core — matching the SigmaHQ base64offset modifier.
 func base64OffsetVariants(s string) []string {
 	b := []byte(s)
 	starts := [3]int{0, 2, 3}
+	// How much of the tail depends on the bytes that follow the value is set
+	// by the padded length (offset + value), not by the offset alone.
 	trimEnd := [3]int{0, 3, 2}
 	var out []string
 	for i := 0; i < 3; i++ {
 		data := append(bytes.Repeat([]byte(" "), i), b...)
 		enc := base64.StdEncoding.EncodeToString(data)
-		start, end := starts[i], len(enc)-trimEnd[i]
+		start, end := starts[i], len(enc)-trimEnd[len(data)%3]
 		if start < end && start >= 0 && end <= len(enc) {
 			out = append(out, enc[start:end])
 		}
@@ -1521,16 +1605,22 @@ func unescapeWildcards(s string) string {
 
 func patternRegex(value string, op matchOp, cased, windash bool) (*regexp.Regexp, error) {
 	var b strings.Builder
-	if !cased {
-		b.WriteString("(?i)")
+	// (?s): a wildcard spans line breaks, as it must in multi-line values such
+	// as a PowerShell script block.
+	if cased {
+		b.WriteString("(?s)")
+	} else {
+		b.WriteString("(?is)")
 	}
 	if op == opEquals || op == opStartsWith {
 		b.WriteString("^")
 	}
-	for i := 0; i < len(value); i++ {
-		c := value[i]
-		if c == '\\' && i+1 < len(value) {
-			n := value[i+1]
+	// Rune by rune, so a non-ASCII character is quoted whole.
+	runes := []rune(value)
+	for i := 0; i < len(runes); i++ {
+		c := runes[i]
+		if c == '\\' && i+1 < len(runes) {
+			n := runes[i+1]
 			if n == '*' || n == '?' || n == '\\' {
 				b.WriteString(regexp.QuoteMeta(string(n)))
 				i++
@@ -1691,9 +1781,25 @@ func categoryPred(category string) func(winEvent) bool {
 
 // ---- condition parser ----
 
+// condCtx answers "did this search match?" for one evaluation. lookup computes
+// a search's result the first time the condition asks for it and the answer is
+// remembered, so a search the condition never reaches is never evaluated.
 type condCtx struct {
-	matched map[string]bool
-	names   []string
+	names  []string // every search identifier, sorted
+	lookup func(name string) bool
+	memo   map[string]bool
+}
+
+func (c *condCtx) hit(name string) bool {
+	if v, ok := c.memo[name]; ok {
+		return v
+	}
+	v := c.lookup(name)
+	if c.memo == nil {
+		c.memo = make(map[string]bool, len(c.names))
+	}
+	c.memo[name] = v
+	return v
 }
 
 type condNode interface{ eval(*condCtx) bool }
@@ -1708,7 +1814,7 @@ type condQuant struct {
 	pattern string // "them" or an identifier, possibly ending in '*'
 }
 
-func (n condIdent) eval(c *condCtx) bool { return c.matched[n.name] }
+func (n condIdent) eval(c *condCtx) bool { return c.hit(n.name) }
 func (n condNot) eval(c *condCtx) bool   { return !n.x.eval(c) }
 func (n condAnd) eval(c *condCtx) bool   { return n.a.eval(c) && n.b.eval(c) }
 func (n condOr) eval(c *condCtx) bool    { return n.a.eval(c) || n.b.eval(c) }
@@ -1724,20 +1830,27 @@ func (n condQuant) eval(c *condCtx) bool {
 			}
 		}
 	}
-	trues := 0
-	for _, name := range names {
-		if c.matched[name] {
-			trues++
-		}
-	}
 	if n.all {
-		return len(names) > 0 && trues == len(names)
+		for _, name := range names {
+			if !c.hit(name) {
+				return false
+			}
+		}
+		return len(names) > 0
 	}
 	min := n.min
 	if min < 1 {
 		min = 1
 	}
-	return trues >= min
+	trues := 0
+	for _, name := range names {
+		if c.hit(name) {
+			if trues++; trues >= min {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // condHasNot reports whether a condition tree contains a negation, which makes
@@ -1754,11 +1867,27 @@ func condHasNot(n condNode) bool {
 	return false
 }
 
+// matchIdentPattern matches a search identifier against a condition pattern in
+// which each '*' stands for any run of characters ("selection_*", "*_filter",
+// "sel_*_cli").
 func matchIdentPattern(name, pattern string) bool {
-	if strings.HasSuffix(pattern, "*") {
-		return strings.HasPrefix(name, strings.TrimSuffix(pattern, "*"))
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 1 {
+		return name == pattern
 	}
-	return name == pattern
+	if !strings.HasPrefix(name, parts[0]) {
+		return false
+	}
+	name = name[len(parts[0]):]
+	last := parts[len(parts)-1]
+	for _, mid := range parts[1 : len(parts)-1] {
+		i := strings.Index(name, mid)
+		if i < 0 {
+			return false
+		}
+		name = name[i+len(mid):]
+	}
+	return strings.HasSuffix(name, last)
 }
 
 func parseCondition(s string) (condNode, error) {

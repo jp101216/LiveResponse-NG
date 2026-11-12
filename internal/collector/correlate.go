@@ -279,8 +279,14 @@ func stringSliceField(f map[string]any, key string) []string {
 // something missing from its records may simply not have been reached. Such a
 // gap must not become an "installed, then removed" finding.
 func inventoryPartial(r *Result) bool {
+	// The dispatcher marks a result partial when the collector's deadline or
+	// the run's cancellation had fired by the time it returned, whatever the
+	// collector itself reported.
+	if p, _ := r.Meta["partial"].(bool); p {
+		return true
+	}
 	for _, e := range r.Errors {
-		if strings.HasPrefix(e, "cancelled") {
+		if strings.HasPrefix(e, "cancelled") || strings.HasPrefix(e, "collection interrupted") {
 			return true
 		}
 	}

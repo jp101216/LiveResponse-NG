@@ -17,8 +17,11 @@ use std::io::{self, BufRead, Write};
 fn main() {
     let mut out = io::stdout().lock();
     let mut emit = |resp: Response| {
+        // The fallback is built by serde too, so an error message containing a
+        // quote or a backslash still yields a line the host can decode.
         let mut line = serde_json::to_string(&resp).unwrap_or_else(|e| {
-            format!(r#"{{"op":"","ok":false,"error":"serialize response: {e}"}}"#)
+            serde_json::json!({"op": "", "ok": false, "error": format!("serialize response: {e}")})
+                .to_string()
         });
         line.push('\n');
         let _ = out.write_all(line.as_bytes());

@@ -17,6 +17,7 @@ type moduleJudgement struct {
 	replaced []string // unlinked, but a new file sits at the same system path
 	high     []string // loaded from a high-risk location
 	low      []string // loaded from a low-risk (but unusual) location
+	reasons  []string // why, for high then low: the distinct location kinds, first-seen order
 }
 
 // judgeLinuxModules classifies the mappings. A deleted mapping's location is
@@ -24,6 +25,7 @@ type moduleJudgement struct {
 // it isn't counted twice — and a memfd is reported only as a memfd.
 func judgeLinuxModules(mods []mapsFile, exists func(string) bool) moduleJudgement {
 	var j moduleJudgement
+	var highWhy, lowWhy []string
 	for _, m := range mods {
 		path := m.Path
 		switch {
@@ -37,14 +39,28 @@ func judgeLinuxModules(mods []mapsFile, exists func(string) bool) moduleJudgemen
 			j.deleted = append(j.deleted, path)
 			path = strings.TrimSuffix(path, deletedSuffix)
 		}
-		switch lvl, _ := unixPathRisk(path); lvl {
+		switch lvl, why := unixPathRisk(path); lvl {
 		case riskHigh:
 			j.high = append(j.high, m.Path)
+			highWhy = appendDistinct(highWhy, why)
 		case riskLow:
 			j.low = append(j.low, m.Path)
+			lowWhy = appendDistinct(lowWhy, why)
 		}
 	}
+	for _, why := range append(highWhy, lowWhy...) {
+		j.reasons = appendDistinct(j.reasons, why)
+	}
 	return j
+}
+
+func appendDistinct(list []string, s string) []string {
+	for _, have := range list {
+		if have == s {
+			return list
+		}
+	}
+	return append(list, s)
 }
 
 // annotate adds the judgement's fields to a modules record and returns the
@@ -83,10 +99,16 @@ func (j moduleJudgement) annotate(fields map[string]any, label string) (map[stri
 		if len(j.high) > 0 {
 			sev, conf = SevSuspect, 55
 		}
+		// Say where they really are: a hidden directory in a home folder is not
+		// a world-writable temporary location, and the difference is the triage.
+		where := strings.Join(j.reasons, "; ")
+		if where == "" {
+			where = "an unusual location"
+		}
 		findings = append(findings, Finding{
 			Rule: "modules.unusual_path", Severity: sev, Technique: "T1574.006", Confidence: conf,
-			Detail: fmt.Sprintf("%s has %d module(s) loaded from a world-writable or temporary location: %s",
-				label, len(susp), strings.Join(susp, ", ")),
+			Detail: fmt.Sprintf("%s has %d module(s) loaded from %s: %s",
+				label, len(susp), where, strings.Join(susp, ", ")),
 		})
 	}
 	return fields, findings

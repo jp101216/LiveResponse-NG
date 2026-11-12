@@ -531,11 +531,14 @@ measures a log clear against), and what the Sigma engine could and couldn't
 run (`sigma`: counts, each skipped rule with its reason, and each file that
 failed to parse).
 
-Two built-in aggregations run beside Sigma's and flush the same way, as
+Three built-in aggregations run beside Sigma's and flush the same way, as
 synthetic records (`source_log` `builtin:aggregation`): Kerberoasting
 (`kerberoastTracker`: per account and client address, the busiest 15-minute
-window of RC4 service tickets to user-account services, by distinct service)
-and DNS tunnels (`dnsTunnelTracker`: Sysmon 22 queries grouped per program and
+window of service tickets to user-account services, by distinct service — RC4
+tickets first, a much bigger burst of AES ones failing that), DCSync by machine
+account (`machineReplTracker`: computer accounts that used the
+password-returning replication rights, against the domain controllers the run
+learnt from which computers wrote KDC and directory-service events), and DNS tunnels (`dnsTunnelTracker`: Sysmon 22 queries grouped per program and
 registered domain, counting distinct data-like names; the DNS cache collector
 runs the same grouping over the cached names). The Active Directory rules are
 in `adattacks.go`: 4662's replication rights and object types, 5136's
@@ -554,7 +557,11 @@ here, unlike a channel missing from a live host.
 The `journald` collector reads journald's files itself (`journalfile.go`):
 objects walked in append order, both the regular and the compact layout
 (32-bit entry items; data payloads at offset 72 rather than 64), with
-LZ4-compressed payloads decoded and zstd/xz ones counted. Every offset and size
+LZ4- and zstd-compressed payloads decoded and xz ones counted. The zstd
+decoder (`zstd.go`, RFC 8878 without dictionaries) is checked against frames
+libzstd wrote at every level and fuzzed; decompression is capped per field and
+per file, so a crafted file of tiny frames that each expand to megabytes can't
+balloon the reader. Every offset and size
 is checked against the file without overflowing (it is fuzzed in both layouts), and
 the reader is checked against `journalctl` on real files of each layout and
 compression (`LRNG_JOURNAL_SAMPLES`). Files are read newest first within a byte

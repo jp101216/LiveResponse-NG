@@ -3,7 +3,57 @@
 ## Unreleased
 
 Fixes from a line-by-line review of the whole source tree (agent, sidecar,
-viewer and build). Report schema remains 1.2.
+viewer and build), and a round of new detections. Report schema remains 1.2.
+
+### Added
+
+- **zstd journal fields.** journald compresses fields over 512 bytes, with
+  zstd by default on current distributions; they were counted, not read. A
+  dependency-free zstd decoder (RFC 8878, no dictionaries; checked against
+  libzstd's frames at every level and fuzzed) now reads them, as LZ4 already
+  was, within 16 MiB a field and 128 MiB a file. Checked field for field
+  against `journalctl`.
+- **systemd, anacron and `at`.** Every `Exec*` key of a unit is graded, not
+  only `ExecStart` (a payload in `ExecStop` runs at each shutdown);
+  `/etc/anacrontab` jobs and queued `at` jobs (with owner and run time) are
+  recorded and graded.
+- **Downloads run through substitution.** `exec.download_pipe_shell` also
+  catches `bash -c "$(curl …)"`, `eval "$(wget -qO- …)"` and
+  `bash <(curl …)`.
+- **`ai.mcp_server_env_injection`.** An MCP server's environment that preloads
+  a library, runs a startup script or hook, loads a Node module or Java agent,
+  or puts a temporary folder on a search path. Only those variables' values are
+  kept (`code_env`); every other value is still dropped.
+- **More AI clients**: Claude Code's `settings.local.json`, VS Code Insiders
+  and VSCodium, Cline and Roo Code inside Cursor, Continue (`config.yaml`,
+  `config.json` and `.continue/mcpServers` blocks, also in projects), Goose and
+  Amazon Q.
+- **Kerberoasting with AES.** Where RC4 is switched off, a burst of AES
+  tickets to 12 or more user-account services within 15 minutes is
+  `cred.kerberoasting` at *notable* (*suspect* from 25); records say which
+  encryption the burst used.
+- **`cred.dcsync_machine_account`.** Computer accounts were all skipped as
+  domain controllers. The run now learns which computers are DCs from the logs
+  (those that wrote KDC or directory-service events) and reports a machine
+  account that used Get-Changes-All and never showed up as one.
+- **Sigma `process_creation` on Security 4688.** A 4688 also carries Sysmon's
+  field names (`Image`, `ParentImage`, `ProcessId`, `ParentProcessId`, `User`,
+  `LogonId`, `IntegrityLevel`), so SigmaHQ's Sysmon-written rules run on hosts
+  that only audit process creation.
+- **Linux groups.** Privileged group membership is also read from each
+  account's primary GID, which `/etc/group` doesn't list;
+  `accounts.root_equiv_group` covers `incus-admin`, `libvirt` and `disk`
+  (*suspect* as a primary group), and `accounts.shadow_group` and
+  `accounts.privileged_primary_group` are new.
+
+### Changed
+
+- Programs in developer toolchain folders under a home (`~/.cargo/bin`,
+  `~/.rustup/toolchains`, nvm, pyenv, rbenv, asdf and mise runtimes, uv and
+  pipx tools, the VS Code, Cursor and Windsurf servers and editor extensions)
+  are no longer graded as hidden-folder payloads; a hidden folder inside one
+  still is.
+- 4769-4771 are provider-gated like the other Security event ids.
 
 ### Security
 

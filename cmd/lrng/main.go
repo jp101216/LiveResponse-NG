@@ -45,7 +45,7 @@ import (
 // Set at build time: go build -ldflags "-X main.version=... -X main.commit=...".
 // These must be vars — -X silently does nothing to a const.
 var (
-	version = "0.18.0"
+	version = "0.19.0"
 	commit  = ""
 )
 

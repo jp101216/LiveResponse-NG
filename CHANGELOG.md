@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+## 0.19.0
+
 Fixes from a line-by-line review of the whole source tree (agent, sidecar,
-viewer and build), and a round of new detections. Report schema remains 1.2.
+viewer and build), and a round of new detections: zstd journal fields, MCP
+servers whose environment loads code, AES Kerberoasting, DCSync by machine
+account, Sysmon-written Sigma rules on Security 4688, and primary-group
+privilege on Linux. Report schema remains 1.2.
 
 ### Added
 

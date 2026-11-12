@@ -51,8 +51,17 @@ func init() { Register(func() Collector { return &aiAgentsCollector{} }) }
 type aiClientConfig struct {
 	Client string
 	Path   string // relative to a home directory (absolute for system-wide files), "/"-separated
-	TOML   bool   // Codex's config.toml
+	Format aiFormat
 }
+
+// aiFormat is a configuration file's syntax.
+type aiFormat int
+
+const (
+	aiJSON aiFormat = iota // JSON with comments (JSONC)
+	aiTOML                 // Codex's config.toml
+	aiYAML                 // Continue's config.yaml and blocks, Goose's config.yaml
+)
 
 // Bounds on the sweep for project instruction files.
 var (
@@ -78,6 +87,7 @@ type mcpServer struct {
 	Args                 []string
 	URL                  string
 	EnvNames             []string // names only: the values are usually API keys
+	CodeEnv              []string // "NAME=value" for the code-loading names only (mcpCodeEnv)
 	Disabled             bool
 }
 
@@ -92,7 +102,7 @@ func collectAIAgents(ctx context.Context, homes []string, configs []aiClientConf
 	res := NewResult("aiagents")
 	seen := map[string]bool{}
 	servers, hooks := 0, 0
-	readConfig := func(client, path string, toml bool) {
+	readConfig := func(client, path string, format aiFormat) {
 		key := pathKey(filepath.Clean(path))
 		if seen[key] {
 			return
@@ -105,7 +115,7 @@ func collectAIAgents(ctx context.Context, homes []string, configs []aiClientConf
 			}
 			return
 		}
-		ss, hs, err := parseAIConfig(client, path, data, toml)
+		ss, hs, err := parseAIConfig(client, path, data, format)
 		if err != nil {
 			res.Fail(path + ": " + err.Error())
 		}
@@ -122,11 +132,11 @@ func collectAIAgents(ctx context.Context, homes []string, configs []aiClientConf
 		}
 	}
 	for _, c := range system {
-		readConfig(c.Client, filepath.FromSlash(c.Path), c.TOML)
+		readConfig(c.Client, filepath.FromSlash(c.Path), c.Format)
 	}
 	for _, home := range homes {
 		for _, c := range configs {
-			readConfig(c.Client, filepath.Join(home, filepath.FromSlash(c.Path)), c.TOML)
+			readConfig(c.Client, filepath.Join(home, filepath.FromSlash(c.Path)), c.Format)
 		}
 	}
 
@@ -165,8 +175,8 @@ func collectAIAgents(ctx context.Context, homes []string, configs []aiClientConf
 			}
 			parent := filepath.Base(filepath.Dir(path))
 			grand := filepath.Base(filepath.Dir(filepath.Dir(path)))
-			if client, toml, ok := projectConfigKind(name, parent); ok {
-				readConfig(client, path, toml)
+			if client, format, ok := projectConfigKind(name, parent, grand); ok {
+				readConfig(client, path, format)
 				return nil
 			}
 			kind := agentFileKind(name, parent, grand)
@@ -230,23 +240,32 @@ func readBounded(path string, max int64) ([]byte, error) {
 }
 
 // projectConfigKind recognises the MCP and settings files a project carries.
-func projectConfigKind(name, parent string) (client string, toml, ok bool) {
-	n, p := strings.ToLower(name), strings.ToLower(parent)
+func projectConfigKind(name, parent, grand string) (client string, format aiFormat, ok bool) {
+	n, p, g := strings.ToLower(name), strings.ToLower(parent), strings.ToLower(grand)
 	switch {
 	case n == ".mcp.json":
-		return "Claude Code (project)", false, true
+		return "Claude Code (project)", aiJSON, true
 	case n == "mcp.json" && p == ".cursor":
-		return "Cursor (project)", false, true
+		return "Cursor (project)", aiJSON, true
 	case n == "mcp.json" && p == ".vscode":
-		return "VS Code (project)", false, true
+		return "VS Code (project)", aiJSON, true
 	case (n == "settings.json" || n == "settings.local.json") && p == ".claude":
-		return "Claude Code (project)", false, true
+		return "Claude Code (project)", aiJSON, true
 	case n == "settings.json" && p == ".gemini":
-		return "Gemini CLI (project)", false, true
+		return "Gemini CLI (project)", aiJSON, true
 	case n == "config.toml" && p == ".codex":
-		return "Codex (project)", true, true
+		return "Codex (project)", aiTOML, true
+	case p == "mcpservers" && g == ".continue": // Continue's MCP blocks
+		switch {
+		case strings.HasSuffix(n, ".yaml") || strings.HasSuffix(n, ".yml"):
+			return "Continue", aiYAML, true
+		case strings.HasSuffix(n, ".json"):
+			return "Continue", aiJSON, true
+		}
+	case n == "mcp.json" && p == ".amazonq":
+		return "Amazon Q (project)", aiJSON, true
 	}
-	return "", false, false
+	return "", aiJSON, false
 }
 
 // agentFileKind names the kind of an agent instruction file, "" if the file
@@ -365,12 +384,15 @@ func dropTrailingCommas(b []byte) []byte {
 // parseAIConfig reads the MCP servers and hooks out of one client
 // configuration, with anything that looks like a credential in their
 // arguments, URLs and commands redacted.
-func parseAIConfig(client, path string, data []byte, toml bool) ([]mcpServer, []agentHook, error) {
-	servers, hooks, err := parseAIConfigRaw(client, path, data, toml)
+func parseAIConfig(client, path string, data []byte, format aiFormat) ([]mcpServer, []agentHook, error) {
+	servers, hooks, err := parseAIConfigRaw(client, path, data, format)
 	for i := range servers {
 		servers[i].Command = redactSecrets(servers[i].Command)
 		servers[i].Args = redactArgs(servers[i].Args)
 		servers[i].URL = redactURL(servers[i].URL)
+		for j, kv := range servers[i].CodeEnv {
+			servers[i].CodeEnv[j] = excerpt(redactSecrets(kv), 300)
+		}
 	}
 	for i := range hooks {
 		hooks[i].Command = redactSecrets(hooks[i].Command)
@@ -439,9 +461,13 @@ func redactURL(raw string) string {
 	return redactSecrets(u.String())
 }
 
-func parseAIConfigRaw(client, path string, data []byte, toml bool) ([]mcpServer, []agentHook, error) {
-	if toml {
+func parseAIConfigRaw(client, path string, data []byte, format aiFormat) ([]mcpServer, []agentHook, error) {
+	switch format {
+	case aiTOML:
 		return parseCodexTOML(client, path, string(data)), nil, nil
+	case aiYAML:
+		servers, err := parseAIYAML(client, path, []byte(strings.TrimPrefix(string(data), "\uFEFF")))
+		return servers, nil, err
 	}
 	data = []byte(strings.TrimPrefix(string(data), "\uFEFF"))
 	var root map[string]any
@@ -470,6 +496,19 @@ func parseAIConfigRaw(client, path string, data []byte, toml bool) ([]mcpServer,
 	}
 	if m, ok := root["mcp"].(map[string]any); ok {
 		add(m["servers"], "") // VS Code's settings.json
+	}
+	if m, ok := root["experimental"].(map[string]any); ok { // Continue's config.json
+		list, _ := m["modelContextProtocolServers"].([]any)
+		for i, e := range list {
+			em, _ := e.(map[string]any)
+			if s, ok := mcpServerFrom(em["transport"]); ok {
+				s.Client, s.Config, s.Name = client, path, fmt.Sprintf("#%d", i+1)
+				if n, _ := em["name"].(string); n != "" {
+					s.Name = n
+				}
+				servers = append(servers, s)
+			}
+		}
 	}
 	if projects, ok := root["projects"].(map[string]any); ok { // Claude Code's ~/.claude.json
 		keys := make([]string, 0, len(projects))
@@ -529,8 +568,11 @@ func mcpServerFrom(v any) (mcpServer, bool) {
 	envNames := func(v any) []string {
 		env, _ := v.(map[string]any)
 		out := make([]string, 0, len(env))
-		for k := range env {
+		for k, val := range env {
 			out = append(out, k)
+			if str, ok := val.(string); ok && mcpCodeEnvName(k) {
+				s.CodeEnv = append(s.CodeEnv, k+"="+str)
+			}
 		}
 		sort.Strings(out)
 		return out
@@ -549,6 +591,7 @@ func mcpServerFrom(v any) (mcpServer, bool) {
 	if e := envNames(m["env"]); len(e) > 0 {
 		s.EnvNames = e
 	}
+	sort.Strings(s.CodeEnv)
 	for _, k := range []string{"url", "serverUrl", "httpUrl"} {
 		if u, ok := m[k].(string); ok && u != "" {
 			s.URL = u
@@ -600,7 +643,11 @@ func parseCodexTOML(client, path, text string) []mcpServer {
 		}
 		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
 		if inEnv {
-			cur.EnvNames = append(cur.EnvNames, strings.Trim(key, `"'`))
+			name := strings.Trim(key, `"'`)
+			cur.EnvNames = append(cur.EnvNames, name)
+			if mcpCodeEnvName(name) {
+				cur.CodeEnv = append(cur.CodeEnv, name+"="+tomlString(value))
+			}
 			continue
 		}
 		switch key {
@@ -612,8 +659,12 @@ func parseCodexTOML(client, path, text string) []mcpServer {
 			cur.Args = tomlStrings(value)
 		case "env":
 			for _, kv := range strings.Split(strings.Trim(value, "{} "), ",") {
-				if k, _, ok := strings.Cut(kv, "="); ok {
-					cur.EnvNames = append(cur.EnvNames, strings.Trim(strings.TrimSpace(k), `"'`))
+				if k, v, ok := strings.Cut(kv, "="); ok {
+					name := strings.Trim(strings.TrimSpace(k), `"'`)
+					cur.EnvNames = append(cur.EnvNames, name)
+					if mcpCodeEnvName(name) {
+						cur.CodeEnv = append(cur.CodeEnv, name+"="+tomlString(v))
+					}
 				}
 			}
 		case "enabled":
@@ -686,6 +737,9 @@ func (s mcpServer) fields() map[string]any {
 	}
 	if len(s.EnvNames) > 0 {
 		f["env_names"] = s.EnvNames
+	}
+	if len(s.CodeEnv) > 0 {
+		f["code_env"] = s.CodeEnv
 	}
 	if s.Disabled {
 		f["disabled"] = true
@@ -762,7 +816,158 @@ func judgeMCPServer(s mcpServer) []Finding {
 			out = append(out, f)
 		}
 	}
+	for _, kv := range s.CodeEnv {
+		name, value, _ := strings.Cut(kv, "=")
+		if f, ok := judgeMCPCodeEnv(where, name, value); ok {
+			out = append(out, f)
+		}
+	}
 	return out
+}
+
+// mcpCodeEnv are the environment variables that make the program an MCP
+// server starts load code nobody named on its command line — a library, a
+// module, a script run before main — by what each does. An MCP entry's env
+// block is there for API keys and settings; one of these in it reroutes the
+// server, and every session that starts it, through someone else's code.
+var mcpCodeEnv = map[string]string{
+	// Always: no ordinary server configuration sets these.
+	"LD_PRELOAD":               "the dynamic linker loads %s into the server before its own code",
+	"LD_AUDIT":                 "the dynamic linker loads %s as an audit library into the server",
+	"DYLD_INSERT_LIBRARIES":    "dyld loads %s into the server before its own code",
+	"BASH_ENV":                 "bash runs %s before any script the server is started through",
+	"PYTHONSTARTUP":            "Python runs %s when started interactively",
+	"PERL5OPT":                 "perl takes %s as command-line switches, loading modules first",
+	"DOTNET_STARTUP_HOOKS":     ".NET runs a startup hook from %s before Main",
+	"COR_PROFILER_PATH":        "the .NET Framework loads %s as a profiler into the server",
+	"COR_PROFILER_PATH_32":     "the .NET Framework loads %s as a profiler into the server",
+	"COR_PROFILER_PATH_64":     "the .NET Framework loads %s as a profiler into the server",
+	"CORECLR_PROFILER_PATH":    ".NET loads %s as a profiler into the server",
+	"CORECLR_PROFILER_PATH_32": ".NET loads %s as a profiler into the server",
+	"CORECLR_PROFILER_PATH_64": ".NET loads %s as a profiler into the server",
+	// Option strings: only the options that load code (mcpCodeEnvOptions).
+	"NODE_OPTIONS":      "Node runs the module given by %s before the server",
+	"JAVA_TOOL_OPTIONS": "the JVM loads the agent given by %s into the server",
+	"_JAVA_OPTIONS":     "the JVM loads the agent given by %s into the server",
+	"JDK_JAVA_OPTIONS":  "the java launcher loads the agent given by %s into the server",
+	"RUBYOPT":           "Ruby requires the library given by %s before the server",
+	// Search paths: only an entry in a temporary or shared-memory folder.
+	"LD_LIBRARY_PATH":   "the dynamic linker looks for the server's libraries in %s first",
+	"DYLD_LIBRARY_PATH": "dyld looks for the server's libraries in %s first",
+	"PYTHONPATH":        "Python imports the server's modules from %s first",
+	"NODE_PATH":         "Node resolves the server's modules from %s",
+	"PERL5LIB":          "perl loads the server's modules from %s first",
+	"RUBYLIB":           "Ruby loads the server's libraries from %s first",
+}
+
+// mcpCodeEnvOptions are the options, per option-string variable, that load
+// code; anything else in them (--max-old-space-size, -Xmx, -W0) is tuning.
+var mcpCodeEnvOptions = map[string][]string{
+	"NODE_OPTIONS":      {"--require", "-r", "--import", "--loader", "--experimental-loader"},
+	"JAVA_TOOL_OPTIONS": {"-javaagent:", "-agentpath:", "-agentlib:"},
+	"_JAVA_OPTIONS":     {"-javaagent:", "-agentpath:", "-agentlib:"},
+	"JDK_JAVA_OPTIONS":  {"-javaagent:", "-agentpath:", "-agentlib:"},
+	"RUBYOPT":           {"-r"},
+}
+
+var mcpCodeEnvSearchPaths = map[string]bool{
+	"LD_LIBRARY_PATH": true, "DYLD_LIBRARY_PATH": true, "PYTHONPATH": true, "NODE_PATH": true, "PERL5LIB": true, "RUBYLIB": true,
+}
+
+// mcpCodeEnvName reports whether an env name is one whose value is kept: the
+// values of these are paths and options, not secrets.
+func mcpCodeEnvName(name string) bool { _, ok := mcpCodeEnv[strings.ToUpper(name)]; return ok }
+
+// judgeMCPCodeEnv judges one code-loading variable in an MCP server's env: a
+// preload, a profiler or a startup hook always (a preload library is suspect
+// on its own), an option string when it names a module or agent to load, a
+// search path only when an entry is somewhere installed code never lives (a
+// temporary or shared-memory folder; aiPathRisk's high tier). What is loaded
+// from there is suspect.
+func judgeMCPCodeEnv(where, name, value string) (Finding, bool) {
+	upper := strings.ToUpper(name)
+	value = strings.TrimSpace(value)
+	what, ok := mcpCodeEnv[upper]
+	if !ok || value == "" {
+		return Finding{}, false
+	}
+	technique := "T1574"
+	switch {
+	case strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_"):
+		technique = "T1574.006"
+	case strings.Contains(upper, "PROFILER"):
+		technique = "T1574.012"
+	}
+	shown, paths := value, splitPathList(value)
+	if opts := mcpCodeEnvOptions[upper]; opts != nil {
+		shown, paths = codeLoadingOptions(value, opts)
+		if shown == "" {
+			return Finding{}, false
+		}
+	}
+	risky := ""
+	for _, p := range paths {
+		if lvl, why := aiPathRisk(strings.Trim(strings.TrimSpace(p), `"'`)); lvl == riskHigh {
+			risky = why
+			break
+		}
+	}
+	if mcpCodeEnvSearchPaths[upper] && risky == "" {
+		return Finding{}, false
+	}
+	sev, conf := SevNotable, 50
+	if upper == "LD_PRELOAD" || upper == "LD_AUDIT" || upper == "DYLD_INSERT_LIBRARIES" {
+		sev, conf = SevSuspect, 65
+	}
+	detail := fmt.Sprintf("%s sets %s: %s, every time the client starts it", where, name, fmt.Sprintf(what, shown))
+	if risky != "" {
+		sev, conf = SevSuspect, 70
+		detail += " — from " + risky
+	}
+	return Finding{Rule: "ai.mcp_server_env_injection", Severity: sev, Technique: technique, Confidence: conf, Detail: detail}, true
+}
+
+// splitPathList splits a search path: on ';' for a Windows-shaped value
+// ("C:\x;D:\y"), on ':' otherwise.
+func splitPathList(v string) []string {
+	sep := func(r rune) bool { return r == ':' }
+	if strings.Contains(v, ";") || strings.Contains(v, `\`) || len(v) > 1 && v[1] == ':' {
+		sep = func(r rune) bool { return r == ';' }
+	}
+	return strings.FieldsFunc(v, sep)
+}
+
+// codeLoadingOptions picks the code-loading options out of an option string
+// ("--max-old-space-size=4096 --require /tmp/x.js" -> "--require /tmp/x.js"),
+// with the paths they load.
+func codeLoadingOptions(value string, opts []string) (string, []string) {
+	var loads, paths []string
+	toks := strings.Fields(value)
+	for i := 0; i < len(toks); i++ {
+		t := toks[i]
+		for _, opt := range opts {
+			if strings.HasSuffix(opt, ":") { // -javaagent:/x.jar=args
+				if rest, ok := strings.CutPrefix(t, opt); ok {
+					p, _, _ := strings.Cut(rest, "=")
+					loads, paths = append(loads, t), append(paths, p)
+				}
+				continue
+			}
+			switch {
+			case t == opt && i+1 < len(toks):
+				loads, paths = append(loads, t+" "+toks[i+1]), append(paths, toks[i+1])
+				i++
+			case strings.HasPrefix(t, opt+"="):
+				loads, paths = append(loads, t), append(paths, t[len(opt)+1:])
+			case len(opt) == 2 && len(t) > 2 && strings.HasPrefix(t, opt): // -r/tmp/x, -rmodule
+				loads, paths = append(loads, t), append(paths, t[2:])
+			default:
+				continue
+			}
+			break
+		}
+	}
+	return strings.Join(loads, " "), paths
 }
 
 // judgeMCPURL judges a remote MCP server's address: a bare public IP, or

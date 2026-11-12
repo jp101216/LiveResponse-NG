@@ -51,6 +51,9 @@ type Request struct {
 	MaxBytes int64 `json:"max_bytes,omitempty"`
 	// IncludeSensitive scans processes excluded by default (lsass.exe).
 	IncludeSensitive bool `json:"include_sensitive,omitempty"`
+	// CancelOnEOF tells the sidecar that stdin stays open after the request
+	// and is closed to cancel. Stream sets it.
+	CancelOnEOF bool `json:"cancel_on_eof,omitempty"`
 }
 
 // Response is one line the sidecar returns.

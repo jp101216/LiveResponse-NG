@@ -4,7 +4,25 @@ use super::hooks;
 use super::integrity::Report;
 use super::syscalls;
 use super::threads;
+use std::sync::Mutex;
 use std::time::Instant;
+
+/// Held while one of a target's threads is suspended (suspend, read its
+/// context, resume). Stopping the sidecar takes it first, so the process never
+/// exits with a thread of the scanned process left suspended.
+static SUSPENSION: Mutex<()> = Mutex::new(());
+
+/// Holds off a cancellation while the caller has a target thread suspended.
+pub fn suspension_guard() -> std::sync::MutexGuard<'static, ()> {
+    SUSPENSION.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Ends the sidecar now (the host cancelled), once no target thread is
+/// suspended. Responses already written stay written.
+pub fn stop_now() -> ! {
+    let _no_suspension = suspension_guard();
+    std::process::exit(1)
+}
 
 /// One committed, readable memory region.
 #[derive(Clone, Debug)]

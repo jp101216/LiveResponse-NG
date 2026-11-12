@@ -43,6 +43,16 @@ fn run(emit: &mut dyn FnMut(Response)) {
         Err(e) => return emit(Response::err("", format!("decode request: {e}"))),
     };
 
+    if req.cancel_on_eof {
+        // The host closes stdin to cancel. Watch for that on the side and stop
+        // as soon as no target thread is suspended, instead of being killed at
+        // an arbitrary point.
+        std::thread::spawn(|| {
+            let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
+            memscan::procmem::stop_now();
+        });
+    }
+
     // A panic inside an op (e.g. a pathological sample) is caught and returned
     // as an error line rather than aborting the process. scan_memory also
     // catches per PID so earlier results aren't lost.

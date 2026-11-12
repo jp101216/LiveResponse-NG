@@ -33,6 +33,12 @@ pub struct Request {
     /// Scan processes excluded by default (lsass.exe).
     #[serde(default)]
     pub include_sensitive: bool,
+    /// The host keeps stdin open after the request and closes it to cancel:
+    /// the sidecar then stops at once, but never between suspending one of the
+    /// target's threads and resuming it (a kill there would leave the scanned
+    /// process's thread suspended for good).
+    #[serde(default)]
+    pub cancel_on_eof: bool,
 }
 
 #[derive(Debug, Default, Serialize)]

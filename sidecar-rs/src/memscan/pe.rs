@@ -245,7 +245,11 @@ impl Pe {
             .iter()
             .find_map(|s| {
                 let d = rva.checked_sub(s.va)?;
-                (d < s.raw_size).then(|| self.raw_start(s) + d as usize)
+                // checked: on the 32-bit sidecar a raw pointer near 4 GiB
+                // plus d overflows usize.
+                (d < s.raw_size)
+                    .then(|| self.raw_start(s).checked_add(d as usize))
+                    .flatten()
             })
             .or_else(|| (rva < self.size_of_headers).then_some(rva as usize))
     }
@@ -354,7 +358,9 @@ impl Pe {
         let Some(d) = self.rva_to_off(drva) else {
             return Exports(out);
         };
-        let field = |o: usize| u32_at(file, d + o);
+        // Offsets come from the file: every sum is checked, so a crafted
+        // table can't overflow usize on the 32-bit sidecar.
+        let field = |o: usize| u32_at(file, d.checked_add(o)?);
         let (Some(nfuncs), Some(nnames), Some(funcs), Some(names), Some(ords)) =
             (field(20), field(24), field(28), field(32), field(36))
         else {
@@ -368,14 +374,19 @@ impl Pe {
             return Exports(out);
         };
         for i in 0..(nnames as usize).min(MAX_EXPORTS) {
-            let (Some(name_rva), Some(ord)) = (u32_at(file, no + 4 * i), u16_at(file, oo + 2 * i))
-            else {
+            let (Some(name_rva), Some(ord)) = (
+                no.checked_add(4 * i).and_then(|o| u32_at(file, o)),
+                oo.checked_add(2 * i).and_then(|o| u16_at(file, o)),
+            ) else {
                 break;
             };
             if u32::from(ord) >= nfuncs {
                 continue;
             }
-            let Some(frva) = u32_at(file, fo + 4 * ord as usize) else {
+            let Some(frva) = fo
+                .checked_add(4 * ord as usize)
+                .and_then(|o| u32_at(file, o))
+            else {
                 continue;
             };
             if (drva..drva.saturating_add(dsize)).contains(&frva) {
@@ -397,7 +408,7 @@ impl Pe {
     pub fn il_only(&self, file: &[u8]) -> bool {
         self.dir(DIR_CLR)
             .and_then(|(rva, _)| self.rva_to_off(rva))
-            .and_then(|o| u32_at(file, o + 16))
+            .and_then(|o| u32_at(file, o.checked_add(16)?))
             .is_some_and(|flags| flags & 1 != 0)
     }
 }

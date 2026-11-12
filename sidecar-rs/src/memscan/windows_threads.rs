@@ -236,12 +236,12 @@ fn read_table_list(p: &WinProcess, head: usize) -> Option<Vec<(usize, usize)>> {
             return Some(out);
         }
         // Each entry's back link must lead to the one before it.
-        if cur == 0 || read_usize(p.h, cur + core::mem::size_of::<usize>())? != prev {
+        if cur == 0 || read_usize(p.h, cur.wrapping_add(core::mem::size_of::<usize>()))? != prev {
             return None;
         }
         let (min, max) = (
-            read_usize(p.h, cur + TABLE_MIN)?,
-            read_usize(p.h, cur + TABLE_MAX)?,
+            read_usize(p.h, cur.wrapping_add(TABLE_MIN))?,
+            read_usize(p.h, cur.wrapping_add(TABLE_MAX))?,
         );
         if min < max {
             out.push((min, max));

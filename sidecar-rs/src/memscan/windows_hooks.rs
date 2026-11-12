@@ -673,11 +673,13 @@ fn walk(h: HANDLE, head: usize, off: usize) -> Result<Vec<(usize, usize)>, Strin
         if out.len() >= MAX_HANDLERS {
             return Err("a handler list is too long, or changing".into());
         }
-        // Every entry links back to the one before it.
-        if read_usize(h, e + PTR) != Some(prev) {
+        // Every entry links back to the one before it. The pointers are the
+        // target's to forge, so the arithmetic wraps (and the read of a
+        // nonsense address fails) instead of overflowing.
+        if read_usize(h, e.wrapping_add(PTR)) != Some(prev) {
             return Err("a handler list is inconsistent".into());
         }
-        let enc = read_usize(h, e + off).ok_or("a handler list entry is unreadable")?;
+        let enc = read_usize(h, e.wrapping_add(off)).ok_or("a handler list entry is unreadable")?;
         out.push((e, enc));
         prev = e;
         e = read_usize(h, e).ok_or("a handler list entry is unreadable")?;

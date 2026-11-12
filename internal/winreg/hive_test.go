@@ -357,3 +357,23 @@ func TestValuesHugeCountNoOOB(t *testing.T) {
 		t.Fatalf("got %d values, want 2 (clamped to the value-list cell)", len(vs))
 	}
 }
+
+// A short value whose own bytes begin with "db" is plain data: the big-data
+// segment list is used only past one segment's worth of bytes.
+func TestHiveShortValueStartingWithDB(t *testing.T) {
+	b := newHiveBuilder()
+	data := []byte("db\x02\x00payload bytes")
+	vk := b.add(makeVK("Blob", TypeBinary, b.add(data), uint32(len(data)), false))
+	root := b.add(makeNK("ROOT", 0, hiveCellNil, 1, b.valueList(vk), ftJan2021))
+	h, err := ParseHive(b.finish(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := h.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := k.ValueMap()["blob"].Data; string(got) != string(data) {
+		t.Fatalf("value read as %q, want %q", got, data)
+	}
+}

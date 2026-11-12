@@ -3,6 +3,7 @@ package collector
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -186,8 +187,32 @@ func prefetchImagePath(exe string, filenames []string) string {
 			return f
 		}
 	}
-	return ""
+	// The header keeps only the first 29 characters of the name, so a longer
+	// one ("windowspackagemanagerserver.exe" is stored as
+	// "windowspackagemanagerserver.e") is matched as a prefix, when exactly one
+	// referenced file name starts that way.
+	if len([]rune(want)) < prefetchExeNameMax {
+		return ""
+	}
+	match, name := "", ""
+	for _, f := range filenames {
+		b := baseName(f)
+		if !strings.HasPrefix(b, want) {
+			continue
+		}
+		if name != "" && b != name {
+			return "" // ambiguous
+		}
+		if match == "" {
+			match, name = f, b
+		}
+	}
+	return match
 }
+
+// prefetchExeNameMax is how many characters of the executable's name the
+// prefetch header holds (a 60-byte UTF-16 field with its terminator).
+const prefetchExeNameMax = 29
 
 // prefetchFindings flags a program that actually executed from an unusual
 // location. It mirrors execution.shimcache_unusual_path but is stronger: a .pf

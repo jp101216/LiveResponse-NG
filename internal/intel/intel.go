@@ -173,8 +173,15 @@ func (d *DB) Lookup(ip netip.Addr) (Info, bool) {
 // the earlier one (last wins), which lets an overlay refine a base dataset.
 func (d *DB) insert(p netip.Prefix, asn uint32, cc string, cats Category, org string) {
 	p = p.Masked()
-	addr := p.Addr().Unmap()
-	p = netip.PrefixFrom(addr, p.Bits())
+	// An IPv4-mapped IPv6 prefix (::ffff:192.0.2.0/120) is stored as the IPv4
+	// prefix it covers (192.0.2.0/24): its length counts the 96 mapping bits.
+	// Unmapping the address but keeping the length would make an invalid
+	// prefix (a /120 of IPv4) and lose the entry.
+	addr, bits := p.Addr(), p.Bits()
+	if addr.Is4In6() && bits >= 96 {
+		addr, bits = addr.Unmap(), bits-96
+	}
+	p = netip.PrefixFrom(addr, bits)
 	idx := int32(len(d.entries))
 	d.entries = append(d.entries, entry{prefix: p, asn: asn, cc: cc, cats: cats, org: org})
 	if addr.Is4() {

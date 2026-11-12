@@ -168,6 +168,31 @@ type bxml struct {
 	subs  []substVal
 	depth int
 	err   error
+	// budget is the number of elements, template instances and embedded
+	// fragments the record may still render, shared by every cursor the
+	// record nests (nil: unlimited). Depth alone doesn't bound the work: a
+	// template body that references an embedded-BinXML substitution k times
+	// renders it k times, so nesting d levels renders k^d elements from a
+	// record of a few hundred bytes.
+	budget *int
+}
+
+// bxmlRecordBudget bounds one record's rendering. Real events have tens to a
+// few hundred elements.
+const bxmlRecordBudget = 1 << 16
+
+// spend takes one unit of the record's rendering budget, failing the record
+// when it runs out.
+func (b *bxml) spend() bool {
+	if b.budget == nil {
+		return true
+	}
+	if *b.budget <= 0 {
+		b.fail("record renders too many elements (nested template expansion)")
+		return false
+	}
+	*b.budget--
+	return true
 }
 
 func (b *bxml) fail(msg string) {
@@ -406,7 +431,8 @@ func parseChunkRecords(chunk []byte, warnings *[]string, emit func(evtxRecord) b
 			RecordID: le.Uint64(chunk[off+8:]),
 			Written:  fileTimeToTime(le.Uint64(chunk[off+16:])),
 		}
-		r := &bxml{chunk: chunk, pos: off + 24}
+		budget := bxmlRecordBudget
+		r := &bxml{chunk: chunk, pos: off + 24, budget: &budget}
 		rec.Root = r.parseFragment()
 		if r.err != nil {
 			warn(warnings, fmt.Sprintf("evtx: record %d: %v", rec.RecordID, r.err))
@@ -449,6 +475,9 @@ func (b *bxml) parseElement(tok uint8) *bxmlElement {
 		return nil
 	}
 	defer func() { b.depth-- }()
+	if !b.spend() {
+		return nil
+	}
 
 	_ = b.u16() // dependency identifier (unused)
 	_ = b.u32() // element data size (unused; we parse linearly)
@@ -601,6 +630,9 @@ func (b *bxml) parseTemplateInstance() *bxmlElement {
 		return nil
 	}
 	defer func() { b.depth-- }()
+	if !b.spend() {
+		return nil
+	}
 
 	instStart := b.pos - 1 // the TemplateInstance token
 	_ = b.u8()             // version / unknown
@@ -630,7 +662,7 @@ func (b *bxml) parseTemplateInstance() *bxmlElement {
 	}
 	b.pos = end // continue after the instance
 
-	body := &bxml{chunk: b.chunk, pos: fragAt, subs: subs, depth: b.depth}
+	body := &bxml{chunk: b.chunk, pos: fragAt, subs: subs, depth: b.depth, budget: b.budget}
 	root := body.parseFragment()
 	if body.err != nil && b.err == nil {
 		b.err = body.err
@@ -677,7 +709,10 @@ func (b *bxml) readSubstArray(at int) ([]substVal, int) {
 func (b *bxml) renderValue(sv substVal) (string, *bxmlElement) {
 	switch {
 	case sv.typ == valBinXML:
-		sub := &bxml{chunk: b.chunk, pos: sv.absOff, depth: b.depth + 1}
+		if !b.spend() {
+			return "", nil
+		}
+		sub := &bxml{chunk: b.chunk, pos: sv.absOff, depth: b.depth + 1, budget: b.budget}
 		return "", sub.parseFragment()
 	case sv.typ&valArrayFlag != 0:
 		return renderArray(sv.typ&^valArrayFlag, sv.data), nil

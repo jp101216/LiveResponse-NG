@@ -158,7 +158,7 @@ func (a *asepWalker) emit(e autorunEntry, raw string, keyWrite time.Time, sid st
 	for k, v := range extra {
 		fields[k] = v
 	}
-	findings := judgeAutorun(e, a.sysRoot)
+	findings := mergeFindings(judgeAutorun(e, a.sysRoot), e.Findings...)
 	fields["suspicious_path"] = hasRule(findings, "persistence.autorun_unusual_path")
 	// The program's file times: set by hand to look old (timestomping).
 	for _, p := range []string{img, payload} {
@@ -567,6 +567,12 @@ func (a *asepWalker) startupFolders(profiles map[string]string) {
 				e.Command = l.Command()
 				extra["shortcut_target"] = l.Target
 				extra["shortcut_target_source"] = l.TargetSource
+				if len(l.Conflicts) > 0 {
+					extra["shortcut_other_targets"] = l.Conflicts
+				}
+				if f, ok := lnkConflictFinding("startup shortcut "+d.Name(), l); ok {
+					e.Findings = append(e.Findings, f)
+				}
 				if l.Arguments != "" {
 					extra["shortcut_arguments"] = l.Arguments
 				}

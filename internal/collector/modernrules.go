@@ -12,8 +12,10 @@ var ideTunnelCommand = regexp.MustCompile(`(?i)(?:^|\s)tunnel(?:\s|$)`)
 var ideTunnelArgs = regexp.MustCompile(`(?i)^\s*(?:(?:--cli-data-dir|--log|--extensions-dir)\s+(?:"[^"]*"|\S+)\s+)*tunnel(?:\s|$)`)
 var clickFixMarker = regexp.MustCompile(`(?i)cloudflare.{0,40}verif|verif.{0,40}cloudflare|captcha|verify you are human|i am not a robot|browser.{0,20}(?:repair|fix)`)
 
-func modernCommandFindings(source, image, cmd string) []Finding {
-	c := prepareCommand(image, cmd)
+// modernCommandFindings applies the rules above to a command line. c is the
+// command as analyzeCommandLine already prepared it (lower-cased,
+// an encoded payload decoded), so it isn't decoded twice.
+func modernCommandFindings(source, image, cmd string, c *cmdInput) []Finding {
 	var fs []Finding
 	if c.ps && clickFixMarker.MatchString(c.text()) && cradle(c) && executes(c) {
 		fs = append(fs, Finding{"exec.clickfix_lure", SevSuspect, "T1204.004", 75,

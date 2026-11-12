@@ -19,7 +19,14 @@ func chunkWithID(firstID uint64, rec []byte) []byte {
 // eventRec frames one event (by event id, optional EventData pairs) as a
 // record with the given identifier.
 func eventRec(id uint64, eventID int, channel string, data ...[2]string) []byte {
-	children := []encNode{sysNode("Microsoft-Windows-Security-Auditing", eventID, channel)}
+	provider := "Microsoft-Windows-Security-Auditing"
+	switch eventID { // the provider that really writes the id: rules check it
+	case 104, 1100, 1102:
+		provider = "Microsoft-Windows-Eventlog"
+	case 1116, 1117:
+		provider = "Microsoft-Windows-Windows Defender"
+	}
+	children := []encNode{sysNode(provider, eventID, channel)}
 	if len(data) > 0 {
 		children = append(children, dataNode(data...))
 	}

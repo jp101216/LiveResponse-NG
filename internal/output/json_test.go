@@ -270,3 +270,17 @@ func TestConsoleSummary(t *testing.T) {
 		t.Fatalf("summary:\n%s", out)
 	}
 }
+
+func TestTerminalSafeEscapesControls(t *testing.T) {
+	in := "cmd.exe /c \x1b]52;c;ZXZpbA==\x07 ok \u202etxt.exe \u00e9"
+	got := TerminalSafe(in)
+	if strings.ContainsAny(got, "\x1b\x07\u202e") {
+		t.Fatalf("control characters survived: %q", got)
+	}
+	if !strings.Contains(got, "\\x1b]52") || !strings.Contains(got, "\\u202etxt") || !strings.Contains(got, "\u00e9") {
+		t.Fatalf("escapes not shown, or text altered: %q", got)
+	}
+	if TerminalSafe("plain text") != "plain text" {
+		t.Fatal("clean text must pass unchanged")
+	}
+}

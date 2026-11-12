@@ -36,7 +36,18 @@ var disabledShells = map[string]bool{
 // privilegedGroups grant administrative power; membership is worth listing.
 var privilegedGroups = map[string]bool{
 	"sudo": true, "wheel": true, "root": true, "admin": true,
-	"adm": true, "docker": true, "lxd": true,
+	"adm": true, "docker": true, "lxd": true, "incus-admin": true,
+	"disk": true, "shadow": true, "libvirt": true,
+}
+
+// rootEquivGroups are the groups whose members are root in all but name, and
+// how.
+var rootEquivGroups = map[string]string{
+	"docker":      "it can mount the host or run privileged containers",
+	"lxd":         "it can mount the host or run privileged containers",
+	"incus-admin": "it can mount the host or run privileged containers",
+	"libvirt":     "it can start a virtual machine with the host's disk or root directory attached",
+	"disk":        "it can read and write the raw disks (debugfs, dd): every file, /etc/shadow included, whatever its permissions",
 }
 
 func collectLocalAccounts(ctx context.Context) (Result, error) {
@@ -129,23 +140,12 @@ func collectLocalAccounts(ctx context.Context) (Result, error) {
 		res.Add(fields, findings...)
 	}
 
-	// Privileged group memberships.
+	// Privileged group memberships, listed in /etc/group or held as a
+	// user's primary group (the GID column of /etc/passwd, which /etc/group
+	// doesn't repeat).
 	if g := readFileSafe("/etc/group"); g != nil {
-		for _, grp := range parseGroup(g) {
-			if !privilegedGroups[grp.Name] {
-				continue
-			}
-			for _, m := range grp.Members {
-				f := map[string]any{"kind": "group_member", "group": grp.Name, "gid": grp.GID, "member": m}
-				var findings []Finding
-				if grp.Name == "docker" || grp.Name == "lxd" {
-					findings = append(findings, Finding{
-						Rule: "accounts.root_equiv_group", Severity: SevNotable, Technique: "T1078.003", Confidence: 45,
-						Detail: fmt.Sprintf("%q is in the %q group — effectively root (it can mount the host or run privileged containers)", m, grp.Name),
-					})
-				}
-				res.Add(f, findings...)
-			}
+		for _, m := range privilegedMemberships(parseGroup(g), users) {
+			res.Add(m.fields(), m.findings()...)
 		}
 	}
 
@@ -159,6 +159,91 @@ func collectLocalAccounts(ctx context.Context) (Result, error) {
 			"state or SSH keys couldn't be read; run as root to check whether they can actually be logged into")
 	}
 	return res.Finish(), nil
+}
+
+// groupMembership is one account's membership of a privileged group.
+type groupMembership struct {
+	group   string
+	gid     int
+	member  string
+	uid     int // -1 when the member isn't in /etc/passwd
+	primary bool
+}
+
+// privilegedMemberships lists the members of privilegedGroups: those
+// /etc/group names, then the accounts whose primary group it is, each once.
+func privilegedMemberships(groups []groupEntry, users []passwdEntry) []groupMembership {
+	uidOf := map[string]int{}
+	for _, u := range users {
+		if _, ok := uidOf[u.Name]; !ok {
+			uidOf[u.Name] = u.UID
+		}
+	}
+	var out []groupMembership
+	seen := map[string]bool{}
+	add := func(m groupMembership) {
+		if key := m.group + "\x00" + m.member; !seen[key] {
+			seen[key] = true
+			out = append(out, m)
+		}
+	}
+	for _, grp := range groups {
+		if !privilegedGroups[grp.Name] {
+			continue
+		}
+		for _, name := range grp.Members {
+			uid, ok := uidOf[name]
+			if !ok {
+				uid = -1
+			}
+			add(groupMembership{group: grp.Name, gid: grp.GID, member: name, uid: uid})
+		}
+		for _, u := range users {
+			// A group's own namesake account (root in root, a docker
+			// account in docker) is how distributions set groups up.
+			if u.GID == grp.GID && u.Name != grp.Name {
+				add(groupMembership{group: grp.Name, gid: grp.GID, member: u.Name, uid: u.UID, primary: true})
+			}
+		}
+	}
+	return out
+}
+
+func (m groupMembership) fields() map[string]any {
+	f := map[string]any{"kind": "group_member", "group": m.group, "gid": m.gid, "member": m.member}
+	if m.primary {
+		f["primary"] = true
+	}
+	return f
+}
+
+func (m groupMembership) findings() []Finding {
+	how := "is in"
+	if m.primary {
+		how = "has as its primary group"
+	}
+	if why, ok := rootEquivGroups[m.group]; ok {
+		f := Finding{Rule: "accounts.root_equiv_group", Severity: SevNotable, Technique: "T1078.003", Confidence: 45,
+			Detail: fmt.Sprintf("%q %s the %q group — effectively root (%s)", m.member, how, m.group, why)}
+		if m.primary {
+			// Nobody puts a person in docker or disk through the GID column
+			// by accident: useradd -g does, and so does a hand edit.
+			f.Severity, f.Confidence = SevSuspect, 60
+			f.Detail += "; a primary group doesn't show in /etc/group's member list, so `getent group` won't list it"
+		}
+		return []Finding{f}
+	}
+	if m.group == "shadow" && m.uid >= 1000 {
+		return []Finding{{Rule: "accounts.shadow_group", Severity: SevNotable, Technique: "T1003.008", Confidence: 50,
+			Detail: fmt.Sprintf("%q %s the \"shadow\" group: it can read /etc/shadow, every account's password hash. Only "+
+				"system programs (unix_chkpwd, chage) need that", m.member, how)}}
+	}
+	if m.primary && m.uid > 0 && (m.group == "root" || m.group == "sudo" || m.group == "wheel" || m.group == "admin") {
+		return []Finding{{Rule: "accounts.privileged_primary_group", Severity: SevNotable, Technique: "T1078.003", Confidence: 45,
+			Detail: fmt.Sprintf("%q has the %q group (GID %d) as its primary group, set in /etc/passwd where `getent group` and "+
+				"group-membership reviews don't look", m.member, m.group, m.gid)}}
+	}
+	return nil
 }
 
 // readSSHDConfigs returns the sshd configuration in the order sshd reads it: the

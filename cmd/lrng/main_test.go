@@ -66,7 +66,7 @@ func TestMemScanPropagatesStreamErrors(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	ok := config.Default()
-	if err := validate(ok, nil, 0); err != nil {
+	if err := validate(ok, nil, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	bad := []struct {
@@ -100,7 +100,7 @@ func TestValidate(t *testing.T) {
 	for _, b := range bad {
 		c := config.Default()
 		b.mut(&c)
-		if err := validate(c, b.args, b.pid); err == nil || !strings.Contains(err.Error(), b.want) {
+		if err := validate(c, b.args, b.pid, ""); err == nil || !strings.Contains(err.Error(), b.want) {
 			t.Errorf("want error containing %q, got %v", b.want, err)
 		}
 	}
@@ -170,5 +170,53 @@ func TestFailOn(t *testing.T) {
 		if got := failOnMet(s, th); got != want {
 			t.Errorf("failOnMet(%q) = %v, want %v", th, got, want)
 		}
+	}
+}
+
+// -evtx is an offline mode: a live option beside it would be silently ignored,
+// so it is refused instead.
+func TestValidateRejectsLiveOptionsWithEvtx(t *testing.T) {
+	base := config.Default()
+	if err := validate(base, nil, 0, "Security.evtx"); err != nil {
+		t.Fatalf("-evtx alone rejected: %v", err)
+	}
+	sigma := base
+	sigma.SigmaRules, sigma.Timeline, sigma.IOCs = "builtin", true, true
+	if err := validate(sigma, nil, 0, "Security.evtx"); err != nil {
+		t.Fatalf("-evtx with offline analysis options rejected: %v", err)
+	}
+	collectors, yara, pids := base, base, base
+	collectors.Collectors = []string{"processes"}
+	yara.YaraRules = "rules"
+	pids.MemPIDs = []int{4}
+	for name, c := range map[string]config.Config{"-collectors": collectors, "-yara": yara, "-mem-pids": pids} {
+		if err := validate(c, nil, 0, "Security.evtx"); err == nil {
+			t.Errorf("-evtx with %s accepted", name)
+		}
+	}
+	if err := validate(base, nil, 4242, "Security.evtx"); err == nil {
+		t.Error("-evtx with -mem-scan accepted")
+	}
+}
+
+// A directory given to -evtx is listed, not globbed: brackets in its name are
+// literal, and the extension's case doesn't matter.
+func TestExpandEvtxPathsReadsDirectoriesLiterally(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "IR[42] logs")
+	if err := os.MkdirAll(filepath.Join(dir, "nested.evtx"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"System.evtx", "Security.EVTX", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := expandEvtxPaths(dir + "," + filepath.Join(dir, "System.evtx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join(dir, "Security.EVTX"), filepath.Join(dir, "System.evtx")}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }

@@ -168,7 +168,7 @@ func itoa(n int) string {
 func TestSigmaMetaNamesSkippedRules(t *testing.T) {
 	dir := t.TempDir()
 	ok := "title: Usable Rule\ndetection:\n    selection:\n        EventID: 7045\n    condition: selection\nlevel: low\n"
-	skip := "title: Plain Base64 Rule\ndetection:\n    selection:\n        CommandLine|base64: 'whoami'\n    condition: selection\nlevel: high\n"
+	skip := "title: Placeholder Rule\ndetection:\n    selection:\n        CommandLine|expand: '%admins%'\n    condition: selection\nlevel: high\n"
 	for name, body := range map[string]string{"ok.yml": ok, "skip.yml": skip} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
@@ -184,7 +184,7 @@ func TestSigmaMetaNamesSkippedRules(t *testing.T) {
 		t.Fatalf("meta.sigma = %+v", m)
 	}
 	skipped, _ := m["skipped"].([]string)
-	if len(skipped) != 1 || !strings.Contains(skipped[0], "Plain Base64 Rule") || !strings.Contains(skipped[0], "base64") {
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "Placeholder Rule") || !strings.Contains(skipped[0], "expand") {
 		t.Fatalf("meta.sigma.skipped should name the rule and the reason: %q", skipped)
 	}
 	if _, has := m["failed"]; has {

@@ -321,36 +321,90 @@ func (p *yamlParser) consumeBlockScalar(keyIndent int) string {
 	return strings.TrimSpace(b.String())
 }
 
-// parseInlineValue parses an inline scalar or flow sequence/mapping.
-func parseInlineValue(s string) (*yamlNode, error) {
+// maxFlowDepth bounds how deeply flow collections may nest ("[[[...]]]"), so a
+// hostile rule file can't drive the recursion arbitrarily deep.
+const maxFlowDepth = 32
+
+// parseInlineValue parses an inline scalar or flow sequence/mapping. Flow
+// collections nest: "{User|contains: ['SYSTEM', 'SERVICE']}" is a mapping whose
+// value is a sequence, not a mapping to the text "['SYSTEM', 'SERVICE']".
+func parseInlineValue(s string) (*yamlNode, error) { return parseFlowValue(s, 0) }
+
+func parseFlowValue(s string, depth int) (*yamlNode, error) {
 	s = strings.TrimSpace(s)
-	switch {
-	case strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]"):
+	isSeq := strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]")
+	isMap := strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")
+	if !isSeq && !isMap {
+		return scalarFromToken(s), nil
+	}
+	if depth >= maxFlowDepth {
+		return nil, fmt.Errorf("yaml: flow collections nested more than %d deep", maxFlowDepth)
+	}
+	if isSeq {
 		node := &yamlNode{Kind: yamlSeq}
 		for _, part := range splitFlow(s[1 : len(s)-1]) {
 			part = strings.TrimSpace(part)
 			if part == "" {
 				continue
 			}
-			node.Seq = append(node.Seq, scalarFromToken(part))
+			item, err := parseFlowValue(part, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			node.Seq = append(node.Seq, item)
 		}
 		return node, nil
-	case strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}"):
-		node := &yamlNode{Kind: yamlMap, Map: map[string]*yamlNode{}}
-		for _, part := range splitFlow(s[1 : len(s)-1]) {
-			k, v, ok := splitKeyValue(strings.TrimSpace(part))
-			if !ok {
-				continue
-			}
-			k = unquoteScalar(k)
-			if _, dup := node.Map[k]; !dup {
-				node.Keys = append(node.Keys, k)
-			}
-			node.Map[k] = scalarFromToken(strings.TrimSpace(v))
+	}
+	node := &yamlNode{Kind: yamlMap, Map: map[string]*yamlNode{}}
+	for _, part := range splitFlow(s[1 : len(s)-1]) {
+		k, v, ok := splitKeyValue(strings.TrimSpace(part))
+		if !ok {
+			continue
 		}
-		return node, nil
-	default:
-		return scalarFromToken(s), nil
+		k = unquoteScalar(k)
+		val, err := parseFlowValue(v, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		if _, dup := node.Map[k]; !dup {
+			node.Keys = append(node.Keys, k)
+		}
+		node.Map[k] = val
+	}
+	return node, nil
+}
+
+// scanUnquoted calls visit(i) for each byte of s that lies outside a quoted
+// scalar, stopping early when visit returns false. A quote opens a scalar only
+// at the start of a token (so the apostrophe in "don't" is ordinary text);
+// inside double quotes a backslash escapes the next byte (so "say \"hi\"" is
+// one scalar), and inside single quotes ” is a literal quote.
+func scanUnquoted(s string, visit func(i int) bool) {
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote == '"':
+			if c == '\\' {
+				i++
+			} else if c == '"' {
+				quote = 0
+			}
+		case quote == '\'':
+			if c == '\'' {
+				if i+1 < len(s) && s[i+1] == '\'' {
+					i++
+				} else {
+					quote = 0
+				}
+			}
+		case (c == '"' || c == '\'') && (i == 0 || strings.IndexByte(" \t[{,:", s[i-1]) >= 0):
+			quote = c
+		default:
+			if !visit(i) {
+				return
+			}
+		}
 	}
 }
 
@@ -364,48 +418,40 @@ func scalarFromToken(s string) *yamlNode {
 // splitKeyValue splits "key: value" into key and the remainder, honouring a
 // quoted key and requiring the ": " (or a trailing ":") to be outside quotes.
 func splitKeyValue(s string) (key, value string, ok bool) {
-	inSingle, inDouble := false, false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == '\'' && !inDouble:
-			inSingle = !inSingle
-		case c == '"' && !inSingle:
-			inDouble = !inDouble
-		case c == ':' && !inSingle && !inDouble:
-			if i == len(s)-1 {
-				return s[:i], "", true
-			}
-			if s[i+1] == ' ' || s[i+1] == '\t' {
-				return s[:i], strings.TrimSpace(s[i+1:]), true
-			}
+	scanUnquoted(s, func(i int) bool {
+		if s[i] != ':' {
+			return true
 		}
-	}
-	return "", "", false
+		if i == len(s)-1 {
+			key, value, ok = s[:i], "", true
+			return false
+		}
+		if s[i+1] == ' ' || s[i+1] == '\t' {
+			key, value, ok = s[:i], strings.TrimSpace(s[i+1:]), true
+			return false
+		}
+		return true
+	})
+	return key, value, ok
 }
 
 // splitFlow splits a flow collection's body on top-level commas.
 func splitFlow(s string) []string {
 	var out []string
 	depth := 0
-	inSingle, inDouble := false, false
 	start := 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == '\'' && !inDouble:
-			inSingle = !inSingle
-		case c == '"' && !inSingle:
-			inDouble = !inDouble
-		case (c == '[' || c == '{') && !inSingle && !inDouble:
+	scanUnquoted(s, func(i int) bool {
+		switch c := s[i]; {
+		case c == '[' || c == '{':
 			depth++
-		case (c == ']' || c == '}') && !inSingle && !inDouble:
+		case c == ']' || c == '}':
 			depth--
-		case c == ',' && depth == 0 && !inSingle && !inDouble:
+		case c == ',' && depth == 0:
 			out = append(out, s[start:i])
 			start = i + 1
 		}
-	}
+		return true
+	})
 	out = append(out, s[start:])
 	return out
 }
@@ -414,21 +460,15 @@ func splitFlow(s string) []string {
 // sit inside quotes or are not preceded by whitespace (so a '#' inside a value
 // like a color code survives).
 func stripComment(s string) string {
-	inSingle, inDouble := false, false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == '\'' && !inDouble:
-			inSingle = !inSingle
-		case c == '"' && !inSingle:
-			inDouble = !inDouble
-		case c == '#' && !inSingle && !inDouble:
-			if i == 0 || s[i-1] == ' ' || s[i-1] == '\t' {
-				return s[:i]
-			}
+	cut := len(s)
+	scanUnquoted(s, func(i int) bool {
+		if s[i] == '#' && (i == 0 || s[i-1] == ' ' || s[i-1] == '\t') {
+			cut = i
+			return false
 		}
-	}
-	return s
+		return true
+	})
+	return s[:cut]
 }
 
 func isBlockScalarIndicator(s string) bool {

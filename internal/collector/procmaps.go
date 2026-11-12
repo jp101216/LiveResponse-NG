@@ -23,17 +23,13 @@ func parseExecMappedFiles(data []byte) []mapsFile {
 	var out []mapsFile
 	seen := map[string]bool{}
 	for _, line := range strings.Split(string(data), "\n") {
-		f := strings.Fields(line)
-		if len(f) < 6 {
+		perms, path, ok := mapsPermsAndPath(line)
+		if !ok {
 			continue // no pathname (anonymous mapping)
 		}
-		perms := f[1]
 		if !strings.Contains(perms, "x") {
 			continue // only executable mappings are "modules"
 		}
-		// The pathname is everything from field 6 on (it may carry a trailing
-		// " (deleted)"); join the rest to preserve that.
-		path := strings.Join(f[5:], " ")
 		if path == "" || !strings.HasPrefix(path, "/") {
 			continue // [vdso], [heap], anon_inode:..., empty — not a file
 		}
@@ -46,4 +42,26 @@ func parseExecMappedFiles(data []byte) []mapsFile {
 		out = append(out, mapsFile{Path: path, Deleted: deleted})
 	}
 	return out
+}
+
+// mapsPermsAndPath splits one maps line into its permissions and its pathname.
+// The first five columns are separated by runs of blanks; the pathname is the
+// rest of the line exactly as the kernel wrote it, so a name with consecutive
+// or trailing spaces — one way to make two files look alike in a listing — is
+// reported as it is rather than normalised (and keeps its " (deleted)" marker).
+func mapsPermsAndPath(line string) (perms, path string, ok bool) {
+	rest := line
+	for col := 0; col < 5; col++ {
+		rest = strings.TrimLeft(rest, " \t")
+		end := strings.IndexAny(rest, " \t")
+		if end < 0 {
+			return "", "", false
+		}
+		if col == 1 {
+			perms = rest[:end]
+		}
+		rest = rest[end:]
+	}
+	path = strings.TrimLeft(rest, " \t")
+	return perms, strings.TrimRight(path, "\r"), path != ""
 }

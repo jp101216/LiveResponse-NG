@@ -1030,17 +1030,21 @@ nothing on disk.
 .\lrng.exe -evtx E:\case42\winevt\Logs -sigma builtin       # offline, any OS
 ```
 
-**Supported:** string matching with `*`/`?` wildcards; the `|contains`,
-`|startswith`, `|endswith`, `|all`, `|re`, `|cased` and `|windash` (treats every
+**Supported:** string matching with `*`/`?` wildcards (a wildcard spans line
+breaks, as in a multi-line script block); the `|contains`,
+`|startswith`, `|endswith`, `|all`, `|re` (with the `|i`, `|m` and `|s` flags),
+`|cased` and `|windash` (treats every
 `-`/`/` as any Windows dash variant — `-`, `/`, en/em dash, horizontal bar)
-modifiers; `|base64offset` (match a value as it appears base64-encoded at any
-byte alignment); `|cidr` (match an IP-address field against a CIDR network, IPv4
+modifiers; `|base64` (match a value's base64 encoding) and `|base64offset`
+(match it as it appears base64-encoded at any byte alignment), each optionally
+after `|wide`/`|utf16le`, `|utf16be` or `|utf16` to encode the value as UTF-16
+first — the shape of a PowerShell `-EncodedCommand`; `|cidr` (match an IP-address field against a CIDR network, IPv4
 or IPv6); `|fieldref` (compare a field to another field's value — on its own, or
 with `|contains`/`|startswith`/`|endswith` and `|cased`); numeric
 `|lt`/`|lte`/`|gt`/`|gte`, `|exists`, and null matches; list values (OR, or AND
 with `|all`); a selection that is a list of maps; keyword lists; the condition
 language (`and`/`or`/`not`, parentheses, and `N`/`all`/`1 of them` or
-`… of <pattern>*`); the scalar aggregations
+`… of <pattern>`, where `*` may stand anywhere in the pattern); the scalar aggregations
 `<expr> | count|min|max|avg|sum([field]) [by <field>] <op> <n>` — evaluated
 across the whole run and emitted as a synthetic record per over-threshold group.
 A `count`, `count(field)` or `sum` with `>`/`>=` and a detection `timeframe:`
@@ -1053,8 +1057,9 @@ named selections co-occur inside one window (an install-then-wipe sequence, say)
 `logsource` narrows a rule to a channel/event when its service or category is one
 lrng maps; otherwise the rule is tried against every event.
 
-**Not evaluated — skipped with a reason, never mis-scored:** the plain `|base64`
-and `|utf16`/`|wide` encodings, a `| near` with no `timeframe` (it has no defined
+**Not evaluated — skipped with a reason, never mis-scored:** `|expand` and other
+modifiers not listed above, `|wide`/`|utf16` without a base64 modifier (event
+values are already decoded text), a `| near` with no `timeframe` (it has no defined
 window), a `timeframe` on `min`/`max`/`avg` or with an operator other than
 `>`/`>=` (no sound sliding-window meaning), and a condition that names a
 selection the rule doesn't define. Skipped

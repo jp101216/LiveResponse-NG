@@ -196,11 +196,16 @@ func planAdaptive(results []Result) []adaptiveTask {
 			}
 			if r.Collector == "modules" {
 				executableFields["image"] = rec.Fields["path"]
-				// Linux emits one process record with nested module paths.
-				executableFields["actions"] = rec.Fields["modules"]
+				// A modules record lists everything the process has loaded.
+				// Follow only the modules its findings are about: the rest are
+				// the system's own libraries, and would spend the file budget
+				// on them under a rule that never named them.
+				executableFields["actions"] = adaptiveFlaggedModules(rec.Fields)
 			}
 			for _, p := range graphPaths(executableFields) {
-				if !adaptiveLocalPath(p) {
+				// The kernel's " (deleted)" marker and a memfd name are not
+				// files: there is nothing on disk to follow up.
+				if !adaptiveLocalPath(p) || isMemfdPath(p) || strings.HasSuffix(p, deletedSuffix) {
 					continue
 				}
 				k := pathKey(p)
@@ -242,6 +247,27 @@ func planAdaptive(results []Result) []adaptiveTask {
 		return tasks[i].path < tasks[j].path
 	})
 	return tasks
+}
+
+// adaptiveFlaggedModules returns the module paths a modules record's findings
+// name (suspicious_modules, side_load_candidates), in the nested shape
+// graphPaths reads.
+func adaptiveFlaggedModules(f map[string]any) []map[string]any {
+	var out []map[string]any
+	for _, p := range stringSliceField(f, "suspicious_modules") {
+		out = append(out, map[string]any{"path": p})
+	}
+	switch cs := f["side_load_candidates"].(type) {
+	case []map[string]any:
+		out = append(out, cs...)
+	case []any:
+		for _, c := range cs {
+			if m, ok := c.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+	}
+	return out
 }
 
 func adaptiveLocalPath(path string) bool {

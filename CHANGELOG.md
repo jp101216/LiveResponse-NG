@@ -24,6 +24,64 @@
   exclusions remain separate from failures; available findings are retained.
 - Agent-trace imports that reach an input limit now report a coverage error,
   rather than leaving truncated telemetry visible only in collector metadata.
+- `-iocs` no longer lists every library a flagged process has loaded. A finding
+  on a `modules` record made each entry of its full module list an indicator,
+  so `libc.so.6` — or `ntdll.dll` — was exported as something to block or sweep
+  for. Only the modules a finding names (`suspicious_modules`,
+  `deleted_modules`, `side_load_candidates`) are indicators now. Indicators
+  that differ only in the case of a POSIX path also keep a fixed order.
+- Sigma `|base64offset` computed the wrong encoded form for any value whose
+  length is not a multiple of three, so one or two of the three byte alignments
+  never matched. All four values in the bundled *Base64-Encoded Command
+  Indicator* rule were affected.
+- Sigma `*` and `?` wildcards now span line breaks, so a pattern can match
+  across the lines of a script block; a wildcard pattern containing non-ASCII
+  characters is no longer corrupted and now matches.
+- Sigma `Field: ''` now matches a field that is present but empty, and
+  `Field|exists: true` sees such a field. Both used to treat it as absent, so a
+  filter written for empty values never applied.
+- Sigma rule files: a flow sequence inside a flow mapping
+  (`{User|contains: ['SYSTEM', 'SERVICE']}`) and collections inside a flow
+  sequence were read as literal text, so the rule loaded but could never match
+  that value. Flow collections now nest. An escaped quote no longer ends a
+  double-quoted value early, and an apostrophe inside a word no longer opens a
+  quoted string.
+- `-adaptive` no longer spends its file budget on the wrong files. For a
+  flagged `modules` record it followed every library the process had loaded,
+  under a rule that never named them; it now follows only the flagged modules.
+  A memfd name or a path the kernel marked ` (deleted)` is no longer planned as
+  a file to read (it produced an error record and used up a slot).
+- Linux `modules.unusual_path` findings said "a world-writable or temporary
+  location" for every location, including a hidden directory in a home folder
+  or a web root. The finding now names the real location kinds.
+- Linux `modules`: a mapped file whose name contains consecutive spaces is
+  reported exactly as the kernel printed it, not with the spaces collapsed.
+- `-evtx <directory>` lists the directory instead of globbing it, so a folder
+  whose name contains `[` or `]` no longer matches nothing, and a `.EVTX`
+  extension in any case is picked up on Linux.
+- `-evtx` with `-collectors`, `-yara`, `-mem-pids` or `-mem-scan` is a usage
+  error; the live option used to be silently ignored.
+- Event-log correlation treats a live inventory the dispatcher marked partial
+  as partial, whatever error text the collector itself reported, before calling
+  a service or task "installed, then removed".
+- The usage text's `-cloud-audit` example was indented with a tab.
+- The sidecar's last-resort error line is always valid JSON.
+
+### Changed
+
+- Sigma: `|re` accepts the `|i`, `|m` and `|s` flags; `|base64` is supported;
+  `|wide`/`|utf16le`, `|utf16be` and `|utf16` are supported ahead of `|base64`
+  or `|base64offset`; a `… of` pattern may use `*` anywhere. Rules using these
+  were previously skipped.
+- Sigma matching evaluates a rule's searches only as its condition needs them.
+  On an event no rule matches, the bundled pack runs in a little over half the
+  time (`BenchmarkSigmaBuiltinMatch`).
+- On Windows the analyst console opens the browser through `rundll32.exe` by
+  its full path in the system directory instead of a `PATH` search.
+- The hostile-input parsers (EVTX, LNK, prefetch, Xpress Huffman, journal
+  files, LZ4, shimcache, task XML, Sigma/YAML, agent configs, command lines and
+  the network tables) have native Go fuzz targets; their seeds run with
+  `go test`.
 
 ## 0.17.2
 

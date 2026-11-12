@@ -130,7 +130,7 @@ func main() {
 	pids, err := parsePIDs(*memPIDs)
 	usageErrorOn(err)
 	cfg.MemPIDs = pids
-	usageErrorOn(validate(cfg, flag.Args(), *memScan))
+	usageErrorOn(validate(cfg, flag.Args(), *memScan, *evtxOffline))
 
 	// Ctrl+C — or SIGTERM, which `timeout`, systemd and a plain `kill` send —
 	// cancels collection, and whatever was gathered is still written. A second
@@ -202,8 +202,8 @@ func main() {
 	}
 }
 
-// validate rejects option combinations that would otherwise be silently
-// misread — on a live response, a typo should stop the run, not change it.
+// validateUIOptions keeps -ui and the collection flags apart: the console
+// chooses its own collection settings.
 func validateUIOptions(enabled bool, explicit []string) error {
 	for _, name := range explicit {
 		if enabled && name != "ui" && name != "ui-no-open" && name != "ui-reports" {
@@ -216,8 +216,12 @@ func validateUIOptions(enabled bool, explicit []string) error {
 	return nil
 }
 
-func validate(cfg config.Config, args []string, memScan int) error {
+// validate rejects option combinations that would otherwise be silently
+// misread — on a live response, a typo should stop the run, not change it.
+func validate(cfg config.Config, args []string, memScan int, evtx string) error {
 	switch {
+	case evtx != "" && (memScan != 0 || cfg.YaraRules != "" || len(cfg.MemPIDs) > 0 || len(cfg.Collectors) > 0):
+		return errors.New("-evtx triages saved logs offline; it cannot be combined with live collector or memory-scan options")
 	case len(args) > 0:
 		return fmt.Errorf("unexpected argument %q (flags go before values: -out path)", args[0])
 	case cfg.Workers < 1:
@@ -287,7 +291,7 @@ Usage: lrng [flags]
   lrng -intel -iocs -out host.json     attribute remote IPs offline (ASN/country/cloud/Tor); enriches the IOC set
   lrng -graph -format html -out case.html   explore the evidence graph offline
   lrng -agent-trace spans.jsonl -trace-only -out trace.json   import existing agent telemetry only
-	  lrng -cloud-audit audit.json -cloud-only -out cloud.html -format html   offline LLMjacking heuristics
+  lrng -cloud-audit audit.json -cloud-only -out cloud.html -format html   offline LLMjacking heuristics
   lrng -adaptive -adaptive-budget 15s -out host.json   bounded follow-up of suspect local executables
   lrng -case-report host1.json -case-report host2.json -case-name IR-42 -format html -out case.html
   lrng -case-report before.json -case-report after.json -compare -same-host -format html -out comparison.html
@@ -702,7 +706,10 @@ func expandEvidencePaths(spec, option string) ([]string, error) {
 
 // expandEvtxPaths turns the -evtx value (comma-separated files and/or
 // directories) into a deduplicated, ordered list of .evtx files. A directory
-// contributes its *.evtx entries; a named file is taken as given.
+// contributes its .evtx entries, whatever the case of the extension (a log
+// copied off a Windows host may be Security.EVTX); a named file is taken as
+// given. The directory is listed rather than globbed, so a case folder named
+// "IR[42]" is read literally instead of as a pattern that matches nothing.
 func expandEvtxPaths(spec string) ([]string, error) {
 	var files []string
 	seen := map[string]bool{}
@@ -718,9 +725,15 @@ func expandEvtxPaths(spec string) ([]string, error) {
 			return nil, fmt.Errorf("-evtx %q: %w", entry, err)
 		}
 		if info.IsDir() {
-			matches, err := filepath.Glob(filepath.Join(entry, "*.evtx"))
+			ents, err := os.ReadDir(entry)
 			if err != nil {
 				return nil, fmt.Errorf("-evtx %q: %w", entry, err)
+			}
+			var matches []string
+			for _, e := range ents {
+				if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".evtx") {
+					matches = append(matches, filepath.Join(entry, e.Name()))
+				}
 			}
 			sort.Strings(matches)
 			for _, m := range matches {

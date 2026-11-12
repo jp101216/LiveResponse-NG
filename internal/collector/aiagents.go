@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/netip"
 	"net/url"
@@ -210,24 +211,22 @@ func collectAIAgents(ctx context.Context, homes []string, configs []aiClientConf
 
 // readBounded reads a whole file of at most max bytes.
 func readBounded(path string, max int64) ([]byte, error) {
-	f, err := os.Open(path)
+	f, st, err := openRegular(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
 	if st.Size() > max {
 		return nil, fmt.Errorf("%d bytes, larger than the %d-byte cap", st.Size(), max)
 	}
-	b := make([]byte, st.Size())
-	n, err := f.Read(b)
-	if err != nil && n == 0 && st.Size() > 0 {
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
 		return nil, err
 	}
-	return b[:n], nil
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("larger than the %d-byte cap", max)
+	}
+	return b, nil
 }
 
 // projectConfigKind recognises the MCP and settings files a project carries.

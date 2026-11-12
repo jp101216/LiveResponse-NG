@@ -88,15 +88,11 @@ var errNotCandidate = errors.New("not a candidate")
 // scanImplantFile searches one file for every family's markers. It returns
 // the family matched (nil for none), the markers it holds, and the bytes read.
 func scanImplantFile(path string) (*implantFamily, []string, int64, error) {
-	f, err := os.Open(path)
+	f, fi, err := openRegular(path)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, nil, 0, err
-	}
 	if !fi.Mode().IsRegular() || fi.Size() > implantMaxFile {
 		return nil, nil, 0, errNotCandidate
 	}
@@ -262,7 +258,7 @@ func readStaged(dir string) ([]stagedFile, error) {
 			continue
 		}
 		f := stagedFile{Name: name, Size: info.Size()}
-		if fh, err := os.Open(dir + string(os.PathSeparator) + e.Name()); err == nil {
+		if fh, _, err := openRegular(dir + string(os.PathSeparator) + e.Name()); err == nil {
 			head := make([]byte, 1024)
 			n, _ := io.ReadFull(fh, head)
 			f.Head = head[:n]

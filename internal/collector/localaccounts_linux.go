@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"sort"
 )
@@ -80,13 +79,8 @@ func collectLocalAccounts(ctx context.Context) (Result, error) {
 			"login_shell": hasLoginShell,
 		}
 
-		ev := loginEvidence{}
-		if shadow != nil {
-			if h, ok := shadow[u.Name]; ok {
-				ev.Password = passwordState(h)
-			} else {
-				ev.Password = pwNone
-			}
+		ev := loginEvidence{Password: effectivePasswordState(u, shadow)}
+		if ev.Password != "" {
 			fields["password_state"] = ev.Password
 		}
 		ev.Keys, ev.KeysUnknown = readAuthorizedKeys(authorizedKeysFiles(sshdConfigs, u.Name, u.Home))
@@ -100,6 +94,13 @@ func collectLocalAccounts(ctx context.Context) (Result, error) {
 			findings = append(findings, Finding{
 				Rule: "accounts.uid0_nonroot", Severity: SevSuspect, Technique: "T1136.001", Confidence: 80,
 				Detail: fmt.Sprintf("account %q has UID 0 — a second superuser besides root (backdoor account?)", u.Name),
+			})
+		}
+		if u.Passwd != "x" && ev.Password == pwUsable {
+			findings = append(findings, Finding{
+				Rule: "accounts.passwd_hash", Severity: SevSuspect, Technique: "T1136.001", Confidence: 65,
+				Detail: fmt.Sprintf("account %q keeps its password hash in world-readable /etc/passwd instead of /etc/shadow — "+
+					"how a backdoor account is added by hand (openssl passwd), and any local user can crack it offline", u.Name),
 			})
 		}
 		if ev.Password == pwEmpty {
@@ -175,6 +176,9 @@ func readSSHDConfigs() [][]byte {
 	return out
 }
 
+// authorizedKeysMax bounds one authorized_keys read (a user-owned file).
+const authorizedKeysMax = 4 << 20
+
 // readAuthorizedKeys totals the keys across the given authorized_keys files.
 // unknown is true when a file couldn't be read for lack of permission and no keys
 // were found elsewhere — "no keys" can't then be stated with confidence.
@@ -182,7 +186,7 @@ func readAuthorizedKeys(paths []string) (sshKeyCount, bool) {
 	var total sshKeyCount
 	denied := false
 	for _, p := range paths {
-		data, err := os.ReadFile(p)
+		data, _, err := readRegular(p, authorizedKeysMax)
 		if err != nil {
 			if errors.Is(err, fs.ErrPermission) {
 				denied = true

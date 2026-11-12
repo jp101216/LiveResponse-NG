@@ -255,6 +255,11 @@ func lz4Block(src []byte, size int) ([]byte, error) {
 			b := src[i]
 			i++
 			v += int(b)
+			if v > size {
+				// No literal run or match is longer than the output, and
+				// stopping here keeps a long 0xFF run from overflowing v.
+				return 0, 0, errors.New("lz4: length overrun")
+			}
 			if b != 255 {
 				return i, v, nil
 			}

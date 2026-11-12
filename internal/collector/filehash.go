@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -138,18 +137,11 @@ func hashFile(ctx context.Context, path string, max int64) HashResult {
 	if max <= 0 {
 		max = DefaultHashMaxBytes
 	}
-	f, err := os.Open(path)
+	f, st, err := openRegular(path)
 	if err != nil {
 		return HashResult{Err: err.Error(), NotExist: errors.Is(err, fs.ErrNotExist)}
 	}
 	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return HashResult{Err: err.Error()}
-	}
-	if !st.Mode().IsRegular() {
-		return HashResult{Err: "not a regular file"}
-	}
 	if st.Size() > max {
 		return HashResult{Size: st.Size(), Err: fmt.Sprintf("not hashed: %d bytes exceeds the %d-byte cap", st.Size(), max)}
 	}

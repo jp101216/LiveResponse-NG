@@ -246,7 +246,10 @@ func diagDump(family, proto uint8) ([]diagSocket, error) {
 	binary.NativeEndian.PutUint16(req[6:], syscall.NLM_F_REQUEST|syscall.NLM_F_DUMP)
 	binary.NativeEndian.PutUint32(req[8:], 1)
 	req[16], req[17] = family, proto
-	binary.NativeEndian.PutUint32(req[20:], 0xffffffff) // every state
+	// Every state but TCP_BOUND_INACTIVE (bit 13): since Linux 6.8 that bit
+	// also dumps sockets that are bound but neither listening nor connected,
+	// which /proc/net/tcp has never listed — they'd all look hidden.
+	binary.NativeEndian.PutUint32(req[20:], 0xffffffff&^(1<<13))
 	if err := syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		return nil, err
 	}

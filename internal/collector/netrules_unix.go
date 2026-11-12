@@ -2,7 +2,9 @@ package collector
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 
 	"github.com/jp101216/liveresponse-ng/internal/aidetect"
@@ -95,25 +97,27 @@ func linuxConnFindings(c connView) []Finding {
 			out = append(out, f)
 		}
 	}
-	peer := c.Remote.String()
+	// JoinHostPort brackets an IPv6 address, so its port can't be misread as
+	// the last group of the address.
+	peer := net.JoinHostPort(c.Remote.String(), strconv.Itoa(int(c.RemotePort)))
 	switch {
 	case shell:
 		out = append(out, Finding{
 			Rule: "network.shell_outbound", Severity: SevSuspect, Technique: "T1059.004", Confidence: 55,
-			Detail: fmt.Sprintf("%s has a connection to public address %s:%d — a shell/netcat talking to the internet (reverse shell or beacon?)",
-				label, peer, c.RemotePort),
+			Detail: fmt.Sprintf("%s has a connection to public address %s — a shell/netcat talking to the internet (reverse shell or beacon?)",
+				label, peer),
 		})
 	case script:
 		out = append(out, Finding{
 			Rule: "network.interpreter_outbound", Severity: SevNotable, Technique: "T1059", Confidence: 35,
-			Detail: fmt.Sprintf("%s has a connection to public address %s:%d", label, peer, c.RemotePort),
+			Detail: fmt.Sprintf("%s has a connection to public address %s", label, peer),
 		})
 	}
 	if lvl, why := unixPathRisk(c.ImagePath); lvl == riskHigh {
 		out = append(out, Finding{
 			Rule: "network.unusual_path_outbound", Severity: SevSuspect, Technique: "T1071", Confidence: 55,
-			Detail: fmt.Sprintf("%s runs from %s (%s) and has a connection to public address %s:%d",
-				label, why, c.ImagePath, peer, c.RemotePort),
+			Detail: fmt.Sprintf("%s runs from %s (%s) and has a connection to public address %s",
+				label, why, c.ImagePath, peer),
 		})
 	}
 	return out

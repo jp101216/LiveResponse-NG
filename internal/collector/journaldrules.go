@@ -25,6 +25,8 @@ type jlog struct {
 	Time      time.Time
 	Ident     string // SYSLOG_IDENTIFIER, else _COMM
 	Transport string // _TRANSPORT: kernel, syslog, journal, stdout, ...
+	Comm      string // _COMM: the sending process's name, set by journald itself
+	UID       string // _UID: the sender's uid, from the socket credentials
 	Message   string
 	PID       string
 	Host      string
@@ -34,12 +36,14 @@ func jlogFrom(e *journalEntry) jlog {
 	l := jlog{
 		Ident:     e.Get("SYSLOG_IDENTIFIER"),
 		Transport: e.Get("_TRANSPORT"),
+		Comm:      e.Get("_COMM"),
+		UID:       e.Get("_UID"),
 		Message:   e.Get("MESSAGE"),
 		PID:       e.Get("_PID"),
 		Host:      e.Get("_HOSTNAME"),
 	}
 	if l.Ident == "" {
-		l.Ident = e.Get("_COMM")
+		l.Ident = l.Comm
 	}
 	if l.PID == "" {
 		l.PID = e.Get("SYSLOG_PID")
@@ -52,11 +56,33 @@ func jlogFrom(e *journalEntry) jlog {
 
 // --- sshd ------------------------------------------------------------------
 
+// The user name in these messages is whatever the client sent, spaces and all,
+// so it can itself read " from 9.9.9.9 port 1". sshd writes the real peer
+// after it, so the peer is taken from the LAST " from X port N" in the line.
 var (
-	sshFailedRe   = regexp.MustCompile(`^Failed (\S+) for (invalid user )?(\S*) from (\S+) port (\d+)`)
-	sshInvalidRe  = regexp.MustCompile(`^Invalid user (\S*) from (\S+)(?: port (\d+))?`)
-	sshAcceptedRe = regexp.MustCompile(`^Accepted (\S+) for (\S+) from (\S+) port (\d+)`)
+	sshFailedRe   = regexp.MustCompile(`^Failed (\S+) for (invalid user )?(.*)$`)
+	sshInvalidRe  = regexp.MustCompile(`^Invalid user (.*)$`)
+	sshAcceptedRe = regexp.MustCompile(`^Accepted (\S+) for (.*)$`)
+	sshPeerRe     = regexp.MustCompile(` from (\S+) port (\d+)`)
+	sshAddrRe     = regexp.MustCompile(` from (\S+)`)
 )
+
+// sshPeer splits "<user> from <addr> port <port>[ trailer]" at the last peer
+// clause. Older sshd versions omit the port on "Invalid user" lines, so a bare
+// " from <addr>" is accepted when portOptional is set.
+func sshPeer(rest string, portOptional bool) (user, addr, port string, ok bool) {
+	if ms := sshPeerRe.FindAllStringSubmatchIndex(rest, -1); len(ms) > 0 {
+		m := ms[len(ms)-1]
+		return rest[:m[0]], rest[m[2]:m[3]], rest[m[4]:m[5]], true
+	}
+	if portOptional {
+		if ms := sshAddrRe.FindAllStringSubmatchIndex(rest, -1); len(ms) > 0 {
+			m := ms[len(ms)-1]
+			return rest[:m[0]], rest[m[2]:m[3]], "", true
+		}
+	}
+	return "", "", "", false
+}
 
 type sshEvent struct {
 	Kind    string // failed, invalid, accepted
@@ -69,13 +95,19 @@ type sshEvent struct {
 
 func parseSSH(msg string) (sshEvent, bool) {
 	if m := sshFailedRe.FindStringSubmatch(msg); m != nil {
-		return sshEvent{Kind: "failed", Method: m[1], Invalid: m[2] != "", User: m[3], Addr: m[4], Port: m[5]}, true
+		if user, addr, port, ok := sshPeer(m[3], false); ok {
+			return sshEvent{Kind: "failed", Method: m[1], Invalid: m[2] != "", User: user, Addr: addr, Port: port}, true
+		}
 	}
 	if m := sshAcceptedRe.FindStringSubmatch(msg); m != nil {
-		return sshEvent{Kind: "accepted", Method: m[1], User: m[2], Addr: m[3], Port: m[4]}, true
+		if user, addr, port, ok := sshPeer(m[2], false); ok {
+			return sshEvent{Kind: "accepted", Method: m[1], User: user, Addr: addr, Port: port}, true
+		}
 	}
 	if m := sshInvalidRe.FindStringSubmatch(msg); m != nil {
-		return sshEvent{Kind: "invalid", User: m[1], Addr: m[2], Port: m[3], Invalid: true}, true
+		if user, addr, port, ok := sshPeer(m[1], true); ok {
+			return sshEvent{Kind: "invalid", User: user, Addr: addr, Port: port, Invalid: true}, true
+		}
 	}
 	return sshEvent{}, false
 }

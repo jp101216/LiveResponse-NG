@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -147,14 +148,73 @@ func (t *journalTriage) record(kind string, l jlog, fields map[string]any, findi
 	t.kept++
 }
 
+// journalSource names the program a message claims to come from, for the
+// programs whose messages are parsed: "" for anything else.
+func journalSource(l jlog) string {
+	ident := strings.ToLower(l.Ident)
+	switch {
+	case l.Transport == "kernel" || ident == "kernel":
+		return "kernel"
+	case ident == "sshd" || strings.HasPrefix(ident, "sshd-"):
+		return "sshd"
+	case ident == "sudo", ident == "su":
+		return ident
+	case accountTools[ident]:
+		return "account"
+	case ident == "cron" || ident == "crond":
+		return "cron"
+	}
+	return ""
+}
+
+// journalSourceTrusted checks a message's claimed source against what journald
+// records itself. SYSLOG_IDENTIFIER is chosen by the sender — any user can run
+// `logger -t sshd "Accepted password for root from 203.0.113.9 port 1 ssh2"` —
+// but _TRANSPORT, _UID and _COMM come from journald and the kernel. Kernel
+// messages arrive on the kernel transport only; the others run as root when
+// they log (setuid or root daemons), under their own process name. A field the
+// entry doesn't carry (journald couldn't read /proc in time, or an imported
+// journal) isn't held against it.
+func journalSourceTrusted(src string, l jlog) bool {
+	if src == "kernel" {
+		return l.Transport == "kernel" || l.Transport == ""
+	}
+	if l.Transport == "kernel" || (l.UID != "" && l.UID != "0") {
+		return false
+	}
+	if l.Comm == "" {
+		return true
+	}
+	comm := strings.ToLower(l.Comm)
+	switch src {
+	case "sshd":
+		return strings.HasPrefix(comm, "sshd")
+	case "cron":
+		return comm == "cron" || comm == "crond"
+	case "account":
+		return accountTools[comm]
+	default:
+		return comm == src
+	}
+}
+
 func (t *journalTriage) add(l jlog) {
 	if l.Message == "" {
 		return
 	}
-	ident := strings.ToLower(l.Ident)
-	switch {
-	case (l.Transport == "kernel" || ident == "kernel") &&
-		(strings.Contains(l.Message, "module verification failed") || strings.Contains(l.Message, "bpf_probe_write_user")):
+	src := journalSource(l)
+	if src == "" {
+		return
+	}
+	if !journalSourceTrusted(src, l) {
+		t.spoofed(src, l)
+		return
+	}
+	switch src {
+	case "kernel":
+		if !strings.Contains(l.Message, "module verification failed") && !strings.Contains(l.Message, "bpf_probe_write_user") {
+			return
+		}
 		if ev, ok := parseKernel(l); ok {
 			f := map[string]any{"event": ev.Event}
 			if ev.Module != "" {
@@ -165,7 +225,7 @@ func (t *journalTriage) add(l jlog) {
 			}
 			t.record("kernel", l, f, judgeKernel(ev))
 		}
-	case ident == "sshd" || strings.HasPrefix(ident, "sshd-"):
+	case "sshd":
 		ev, ok := parseSSH(l.Message)
 		if !ok {
 			return
@@ -175,7 +235,7 @@ func (t *journalTriage) add(l jlog) {
 			return
 		}
 		t.sshFailure(ev, l.Time)
-	case ident == "sudo":
+	case "sudo":
 		if ev, ok := parseSudo(l.Message); ok {
 			f := map[string]any{"user": ev.User, "run_as": ev.RunAs, "command": ev.Command}
 			if ev.TTY != "" {
@@ -189,7 +249,7 @@ func (t *journalTriage) add(l jlog) {
 			}
 			t.record("sudo", l, f, judgeSudo(ev))
 		}
-	case ident == "su":
+	case "su":
 		if ev, ok := parseSu(l.Message); ok {
 			f := map[string]any{"from_user": ev.From, "to_user": ev.To, "success": ev.OK}
 			if ev.TTY != "" {
@@ -197,7 +257,7 @@ func (t *journalTriage) add(l jlog) {
 			}
 			t.record("su", l, f, judgeSu(ev))
 		}
-	case accountTools[ident]:
+	case "account":
 		if ev, ok := parseAccount(l.Message); ok {
 			f := map[string]any{"action": ev.Action}
 			for k, v := range map[string]string{"user": ev.User, "uid": ev.UID, "group": ev.Group, "home": ev.Home, "shell": ev.Shell, "by": ev.By} {
@@ -207,13 +267,44 @@ func (t *journalTriage) add(l jlog) {
 			}
 			t.record("account", l, f, judgeAccount(ev))
 		}
-	case ident == "cron" || ident == "crond":
+	case "cron":
 		if user, cmd, ok := parseCron(l.Message); ok {
 			if fs := analyzeUnixCommandLine("cron job of "+user, "", cmd); len(fs) > 0 {
 				t.record("cron", l, map[string]any{"user": user, "command": cmd}, fs)
 			}
 		}
 	}
+}
+
+// spoofed records a message that names sshd, sudo, su, an account tool, cron
+// or the kernel as its source while journald saw another sender. Its content
+// isn't parsed — it is the forger's text — but planting such lines is itself
+// worth an analyst's look: fake logons and sudo runs mislead an investigation.
+func (t *journalTriage) spoofed(src string, l jlog) {
+	sender := "a process"
+	if l.Comm != "" {
+		sender = fmt.Sprintf("%q", l.Comm)
+	}
+	if l.UID != "" {
+		sender += " (uid " + l.UID + ")"
+	}
+	via := ""
+	if l.Transport != "" {
+		via = " over the " + l.Transport + " transport"
+	}
+	f := map[string]any{"claimed_source": src}
+	if l.Comm != "" {
+		f["sender_comm"] = l.Comm
+	}
+	if l.UID != "" {
+		f["sender_uid"] = l.UID
+	}
+	t.record("spoofed", l, f, []Finding{{
+		Rule: "defense.log_spoofing", Severity: SevNotable, Technique: "T1036", Confidence: 50,
+		Detail: fmt.Sprintf("a journal message claims to come from %s (identifier %q) but was sent by %s%s — "+
+			"forged log lines (fake logons, sudo runs or account changes) planted to mislead an investigation: %s",
+			src, l.Ident, sender, via, excerpt(l.Message, 160)),
+	}})
 }
 
 // accountTools are the shadow-utils and adduser programs that log account

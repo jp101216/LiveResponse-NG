@@ -415,7 +415,7 @@ func (p persistRecorder) scanPAM() {
 			checked++
 			want, owned := sums[real]
 			have := ""
-			if b, err := os.ReadFile(real); err == nil {
+			if b, _, err := readRegular(real, 256<<20); err == nil {
 				have = fmt.Sprintf("%x", md5.Sum(b))
 			}
 			if fd, ok := pamModuleFinding(f, have, want, owned); ok {

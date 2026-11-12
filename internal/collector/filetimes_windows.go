@@ -11,6 +11,9 @@ import (
 // statTimes returns a file's creation and last-write times (zero when the
 // file can't be read).
 func statTimes(path string) (created, modified time.Time, ok bool) {
+	if remotePath(path) {
+		return time.Time{}, time.Time{}, false
+	}
 	fi, err := os.Stat(path)
 	if err != nil {
 		return time.Time{}, time.Time{}, false

@@ -157,7 +157,25 @@ type sudoRule struct {
 	Who      string
 	Spec     string
 	NoPasswd bool
-	All      bool // any command
+	All      bool   // any command
+	RunAs    string // the runas user list, "" when the rule names none (root)
+}
+
+// asRoot reports whether the rule runs commands as root: no runas list (root
+// is the default), or a list naming ALL, root or uid 0. "(www-data)" or a
+// group-only "(:adm)" runs as someone else.
+func (r sudoRule) asRoot() bool {
+	if r.RunAs == "" {
+		return true
+	}
+	users, _, _ := strings.Cut(r.RunAs, ":")
+	for _, u := range strings.Split(users, ",") {
+		switch u = strings.TrimSpace(u); u {
+		case "ALL", "root", "#0":
+			return true
+		}
+	}
+	return false
 }
 
 // parseSudoers reads user specifications ("who hosts=(runas) TAGS: commands")
@@ -190,9 +208,10 @@ func parseSudoers(file string, data []byte) []sudoRule {
 		}
 		r := sudoRule{File: file, Line: start + 1, Who: wf[0], Spec: strings.TrimSpace(line)}
 		cmds := spec
-		if strings.HasPrefix(strings.TrimSpace(cmds), "(") {
-			if j := strings.IndexByte(cmds, ')'); j >= 0 {
-				cmds = cmds[j+1:]
+		if c := strings.TrimSpace(cmds); strings.HasPrefix(c, "(") {
+			if j := strings.IndexByte(c, ')'); j >= 0 {
+				r.RunAs = strings.TrimSpace(c[1:j]) // "()" stays "": root
+				cmds = c[j+1:]
 			}
 		}
 		// Tags ("NOPASSWD:", "SETENV:"...) come before the commands.
@@ -226,6 +245,10 @@ func judgeSudoRule(r sudoRule, users map[string]passwdEntry) (Finding, bool) {
 		return Finding{}, false
 	}
 	where := fmt.Sprintf("%s line %d", r.File, r.Line)
+	if !r.asRoot() {
+		return Finding{Rule: "persistence.sudo_nopasswd", Severity: SevNotable, Technique: "T1548.003", Confidence: 30,
+			Detail: fmt.Sprintf("%s lets %s run any command as %s without a password (%s)", where, r.Who, r.RunAs, excerpt(r.Spec, 160))}, true
+	}
 	f := Finding{Rule: "persistence.sudo_nopasswd", Severity: SevNotable, Technique: "T1548.003", Confidence: 40,
 		Detail: fmt.Sprintf("%s lets %s run any command as root without a password (%s)", where, r.Who, excerpt(r.Spec, 160))}
 	switch u, known := users[r.Who]; {
@@ -320,6 +343,12 @@ func hiddenPIDs(listed map[int]bool, answering map[int]int) []int {
 	return out
 }
 
+// tcpStateClose is TCP_CLOSE: a TCP socket that is bound (or not even that)
+// but neither listening nor connected. Kernels from 6.8 report such sockets
+// through sock_diag, while /proc/net/tcp only lists hashed (listening or
+// connected) ones, so a CLOSE socket missing from /proc/net is not hidden.
+const tcpStateClose = 7
+
 // diagSocket is a socket as the kernel's socket-diagnostics netlink lists it.
 type diagSocket struct {
 	Proto  string // tcp, udp
@@ -348,6 +377,9 @@ func hiddenSockets(first, second []diagSocket, procKeys map[string]bool) []diagS
 	}
 	var out []diagSocket
 	for _, s := range first {
+		if s.Proto == "tcp" && s.State == tcpStateClose {
+			continue // bound but not in use: /proc/net/tcp never lists these
+		}
 		if again[s.key()] && !procKeys[s.key()] {
 			out = append(out, s)
 		}

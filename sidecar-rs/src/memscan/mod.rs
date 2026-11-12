@@ -343,6 +343,26 @@ fn region_heuristic_with(r: &Region, first: &[u8], exists: &dyn Fn(&str) -> bool
     })
 }
 
+/// What a contained analysis reports instead of its results.
+const CONTAINED: &str =
+    "a panic was contained in this analysis; the other results for this process stand";
+
+/// Runs one analysis of a process behind its own panic boundary.
+fn contain<T>(f: impl FnOnce() -> T) -> Option<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
+}
+
+/// How many unreadable pages in a row the walk probes before skipping the rest
+/// of a chunk.
+const MAX_PAGE_PROBES: usize = 16;
+const PAGE_SIZE: usize = 4096;
+
+/// The distance from addr to the next page boundary (a whole page when addr is
+/// on one), at most max and at least 1.
+fn to_next_page(addr: usize, max: usize) -> usize {
+    (PAGE_SIZE - addr % PAGE_SIZE).min(max).max(1)
+}
+
 fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Response {
     let started = Instant::now();
     let deadline = started + opts.budget;
@@ -387,15 +407,33 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
 
     // Image integrity first: it reads only code mapped from image files, and
     // gets at most a third of the budget so the YARA walk keeps the rest.
-    let integrity = mem.image_integrity(
-        started + opts.budget / 3,
-        opts.max_bytes.min(INTEGRITY_MAX_BYTES),
-    );
+    //
+    // Each analysis is its own panic boundary: they walk structures the target
+    // controls, and a panic in one must not discard the others' results (the
+    // per-PID boundary would lose the YARA and memory scan as well).
+    let integrity = contain(|| {
+        mem.image_integrity(
+            started + opts.budget / 3,
+            opts.max_bytes.min(INTEGRITY_MAX_BYTES),
+        )
+    })
+    .unwrap_or_else(|| integrity::Report {
+        supported: true,
+        stopped: Some(CONTAINED.into()),
+        ..Default::default()
+    });
     // Hardware breakpoints, vectored handlers, system calls, thread starts and
     // stacks: a few small reads per thread, a walk of each waiting thread's
     // stack, and a search of the executable memory no image backs (up to half
     // the budget in all).
-    let (hooks, calls, threads) = match mem.thread_checks(started + opts.budget / 2) {
+    let checks = contain(|| mem.thread_checks(started + opts.budget / 2)).unwrap_or_else(|| {
+        Some(procmem::ThreadChecks {
+            hooks: hooks::Report::unsupported(CONTAINED),
+            calls: syscalls::Report::unsupported(CONTAINED),
+            threads: threads::Report::unsupported(CONTAINED),
+        })
+    });
+    let (hooks, calls, threads) = match checks {
         Some(t) => (Some(t.hooks), Some(t.calls), Some(t.threads)),
         None => (None, None, None),
     };
@@ -416,6 +454,7 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
         let mut off = 0usize;
         let mut carry = 0usize; // bytes at buf[..carry] repeated from the previous chunk
         let mut any = false;
+        let mut probe_failures = 0usize; // unreadable pages in a row
         if is_exec(r) && is_unbacked(r) {
             stats.private_exec += 1;
             if r.protect.to_ascii_lowercase().contains('w') {
@@ -434,13 +473,23 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
             let want = (r.size - off).min(CHUNK);
             let n = mem.read(r.base + off, &mut buf[carry..carry + want]);
             if n == 0 {
-                // Unreadable (decommitted since the walk, or special memory):
-                // skip this chunk rather than probing it page by page.
+                // Unreadable (decommitted since the walk, special memory, or a
+                // file page past a truncated end). Readable pages can follow
+                // in the same region, so step a page at a time, but give up
+                // on the chunk after a run of failures rather than probing a
+                // large dead region page by page.
                 read_failures += 1;
-                off += want;
                 carry = 0;
+                probe_failures += 1;
+                if probe_failures > MAX_PAGE_PROBES {
+                    off += want;
+                    probe_failures = 0;
+                } else {
+                    off += to_next_page(r.base + off, want);
+                }
                 continue;
             }
+            probe_failures = 0;
             let block_base = r.base + off - carry;
             let block = &buf[..carry + n];
 
@@ -527,9 +576,10 @@ fn scan_one(pid: i64, opts: &Opts, rules: Option<&yara::LoadedRules>) -> Respons
             }
             off += n;
             if n < want {
-                // Short read: the rest of this chunk is unreadable.
+                // Short read: the page after the readable prefix failed. Go
+                // on from the page after it (a hole doesn't hide what follows).
                 read_failures += 1;
-                off += want - n;
+                off += to_next_page(r.base + off, want - n);
                 carry = 0;
             } else {
                 let total = carry + n;
@@ -720,6 +770,19 @@ fn thread_context_gaps(
         ));
     }
     gaps
+}
+
+#[cfg(test)]
+mod page_step_tests {
+    use super::to_next_page;
+
+    #[test]
+    fn steps_to_the_next_page() {
+        assert_eq!(to_next_page(0x1000, 1 << 20), 0x1000);
+        assert_eq!(to_next_page(0x1234, 1 << 20), 0xdcc);
+        assert_eq!(to_next_page(0x1234, 16), 16);
+        assert_eq!(to_next_page(0x1000, 0), 1);
+    }
 }
 
 #[cfg(test)]

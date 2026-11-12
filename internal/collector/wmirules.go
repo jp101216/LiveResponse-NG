@@ -243,9 +243,14 @@ func wmiRef(namespace, class, name string) string {
 // relative `CommandLineEventConsumer.Name="x"`. Either may be absent.
 func parseWMIRef(ref string) (class, name string) {
 	ref = strings.TrimSpace(ref)
-	if i := strings.LastIndex(ref, ":"); i >= 0 && i+1 < len(ref) {
-		// Keep only the object path after a namespace prefix, but not the ':'
-		// inside a drive-less path (there is none); the last ':' is the sep.
+	// Drop a namespace prefix (\\.\root\subscription:Class.Name="x"). The
+	// separator is the last ':' before the key values: a ':' inside a quoted
+	// name ("Updater:1") belongs to the name.
+	head := ref
+	if q := strings.IndexByte(ref, '"'); q >= 0 {
+		head = ref[:q]
+	}
+	if i := strings.LastIndex(head, ":"); i >= 0 && i+1 < len(ref) {
 		ref = ref[i+1:]
 	}
 	dot := strings.IndexByte(ref, '.')

@@ -26,6 +26,10 @@ type lnkInfo struct {
 	IconLocation string
 	Description  string
 	ShowCommand  uint32 // 1 normal, 3 maximized, 7 minimized
+	// Conflicts lists the other places the shortcut names whose program
+	// differs from Target ("linkinfo: C:\\...\\notepad.exe"): the shell runs
+	// Target, while a viewer reading another field shows something harmless.
+	Conflicts []string
 }
 
 // Command renders the shortcut as the command line it launches.
@@ -135,17 +139,46 @@ func parseLNK(b []byte) (lnkInfo, error) {
 	}
 	envPath := lnkEnvironmentTarget(b[pos:])
 
-	switch {
-	case infoPath != "":
-		l.Target, l.TargetSource = infoPath, "linkinfo"
-	case envPath != "":
-		l.Target, l.TargetSource = envPath, "environment"
-	case idPath != "":
-		l.Target, l.TargetSource = idPath, "idlist"
-	case l.RelativePath != "":
-		l.Target, l.TargetSource = l.RelativePath, "relative"
+	// The shell launches the environment-variable path when there is one, else
+	// the item ID list; LinkInfo only helps find a target that moved. They are
+	// tried in that order, and any that names a different program is kept.
+	for _, c := range [...]struct{ path, src string }{
+		{envPath, "environment"}, {idPath, "idlist"}, {infoPath, "linkinfo"}, {l.RelativePath, "relative"},
+	} {
+		switch {
+		case c.path == "":
+		case l.Target == "":
+			l.Target, l.TargetSource = c.path, c.src
+		case c.src != "relative" && lnkProgramsDiffer(l.Target, c.path):
+			l.Conflicts = append(l.Conflicts, c.src+": "+c.path)
+		}
 	}
 	return l, nil
+}
+
+// lnkProgramsDiffer reports whether two target paths name different files.
+// Only the file names are compared: the same program is spelled
+// %windir%\System32\cmd.exe in one field and C:\Windows\System32\cmd.exe in
+// another, and a shell-folder ID list item has no file name to compare.
+func lnkProgramsDiffer(a, b string) bool {
+	na, nb := baseName(a), baseName(b)
+	if !strings.Contains(na, ".") || !strings.Contains(nb, ".") {
+		return false
+	}
+	return na != nb
+}
+
+// lnkConflictFinding reports a shortcut whose fields name different programs:
+// how a .lnk is made to show one target in Explorer and run another.
+func lnkConflictFinding(label string, l lnkInfo) (Finding, bool) {
+	if len(l.Conflicts) == 0 {
+		return Finding{}, false
+	}
+	return Finding{
+		Rule: "persistence.lnk_target_mismatch", Severity: SevSuspect, Technique: "T1547.009", Confidence: 60,
+		Detail: fmt.Sprintf("%s runs %s (from its %s data), but also names %s — a shortcut built to display one "+
+			"target and launch another", label, l.Target, l.TargetSource, strings.Join(l.Conflicts, "; ")),
+	}, true
 }
 
 // linkInfoPath resolves the target from a LinkInfo structure: a local base

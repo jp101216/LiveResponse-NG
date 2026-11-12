@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -498,7 +497,7 @@ func checkDriverFile(ctx context.Context, h *FileHasher, set *vulndrivers.Set, f
 }
 
 func authentihashFile(path string) (pehash.Digests, error) {
-	fh, err := os.Open(path)
+	fh, _, err := openRegular(path)
 	if err != nil {
 		return pehash.Digests{}, err
 	}
@@ -548,7 +547,7 @@ func driversReport(ctx context.Context, res *Result, opts RunOptions, files []dr
 			if _, ok := f["image_sha256"]; ok {
 				hashed++
 			}
-		} else if _, err := os.Stat(d.Path); os.IsNotExist(err) && d.DumpCopyOf == "" {
+		} else if d.DumpCopyOf == "" && checkLocalPath(d.Path) == nil && fileMissing(d.Path) {
 			f["image_exists"] = false
 			missing = true
 		}

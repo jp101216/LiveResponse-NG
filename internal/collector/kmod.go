@@ -129,7 +129,13 @@ func scanKmod(ctx context.Context, root string) Result {
 	// Cross-view: a module with a live /sys/module entry that /proc/modules
 	// doesn't list. /proc/modules is read again before judging, so a module
 	// that finished loading meanwhile isn't mistaken for a hidden one.
-	if perr == nil && ctx.Err() == nil {
+	// An empty list can't be compared: no rootkit hides every module, but a
+	// sandbox or a masked /proc (an empty bind mount) shows none, and judging
+	// against it would call every module on the host hidden.
+	if perr == nil && len(loaded) == 0 {
+		res.SetMeta("hidden_module_check", "skipped: /proc/modules lists no modules, so it can't be compared with /sys/module")
+	}
+	if perr == nil && len(loaded) > 0 && ctx.Err() == nil {
 		var hidden []string
 		for _, name := range liveSysfsModules(root) {
 			if !loaded[name] {

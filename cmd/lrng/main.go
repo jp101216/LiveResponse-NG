@@ -161,7 +161,7 @@ func main() {
 					}
 				}
 			},
-			Warn: func(message string) { fmt.Fprintln(os.Stderr, message) },
+			Warn: func(message string) { fmt.Fprintln(os.Stderr, output.TerminalSafe(message)) },
 		}))
 		return
 	case len(caseReports) > 0:
@@ -970,14 +970,15 @@ func splitCSV(s string) []string {
 
 func exitOn(err error) {
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		// Errors can quote host data (a report's file name, a case's content).
+		fmt.Fprintln(os.Stderr, "error:", output.TerminalSafe(err.Error()))
 		os.Exit(exitError)
 	}
 }
 
 func usageErrorOn(err error) {
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr, "error:", output.TerminalSafe(err.Error()))
 		fmt.Fprintln(os.Stderr, "run lrng -h for usage")
 		os.Exit(exitUsage)
 	}

@@ -246,3 +246,16 @@ func TestBuiltinPrefixReported(t *testing.T) {
 		t.Errorf("expected a /24 match for 8.8.8.0/24, got %v", info.Prefix)
 	}
 }
+
+// A mapped prefix is stored as the IPv4 prefix it covers: its length counts
+// the 96 mapping bits.
+func TestMappedV4PrefixKeepsItsCoverage(t *testing.T) {
+	db := loadString(t, "::ffff:192.0.2.0/120\t64500\t\thosting\tMapped\n")
+	info, ok := db.Lookup(mustAddr(t, "192.0.2.77"))
+	if !ok || info.Org != "Mapped" || info.Prefix.Bits() != 24 {
+		t.Fatalf("mapped /120 should cover 192.0.2.0/24: %+v ok=%v", info, ok)
+	}
+	if _, ok := db.Lookup(mustAddr(t, "192.0.3.1")); ok {
+		t.Fatal("the mapped prefix must not cover more than its /24")
+	}
+}

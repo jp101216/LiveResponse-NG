@@ -22,6 +22,9 @@ type autorunEntry struct {
 	// Direct marks a program or script dropped straight into a Startup
 	// folder, rather than a shortcut to one.
 	Direct bool
+	// Findings are raised while reading the entry (a shortcut whose fields
+	// disagree), added to the ones the entry's command earns.
+	Findings []Finding
 }
 
 // autorunKind describes how one kind of autostart point is judged.

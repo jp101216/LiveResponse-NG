@@ -118,13 +118,23 @@ func (c *Client) Call(ctx context.Context, req Request) (*Response, error) {
 // returns once the sidecar exits; a non-nil error means the stream ended
 // early or abnormally.
 func (c *Client) Stream(ctx context.Context, req Request, fn func(*Response)) error {
+	// A memory scan suspends each of a target's threads for a moment to read
+	// its registers. Killing the sidecar at that moment would leave the
+	// target's thread suspended, so cancellation closes stdin instead: the
+	// sidecar stops as soon as no thread is suspended, and is killed only if
+	// it hasn't exited WaitDelay later.
+	req.CancelOnEOF = true
 	line, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("sidecar: marshal request: %w", err)
 	}
 
 	cmd := exec.CommandContext(ctx, c.Path)
-	cmd.Stdin = bytes.NewReader(append(line, '\n'))
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("sidecar: %w", err)
+	}
+	cmd.Cancel = func() error { return stdin.Close() }
 	stderr := &cappedBuffer{max: maxStderrBytes}
 	cmd.Stderr = stderr
 	cmd.WaitDelay = waitDelay
@@ -134,6 +144,11 @@ func (c *Client) Stream(ctx context.Context, req Request, fn func(*Response)) er
 	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("sidecar: start %s: %w", c.Path, err)
+	}
+	if _, err := stdin.Write(append(line, '\n')); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("sidecar: send request: %w", err)
 	}
 
 	sc := bufio.NewScanner(stdout)

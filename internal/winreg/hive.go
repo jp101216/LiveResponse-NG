@@ -314,7 +314,9 @@ func (h *Hive) value(off uint32) (Value, error) {
 	if err != nil {
 		return v, nil // the name is still useful even if the data cell is bad
 	}
-	if len(dc) >= 2 && dc[0] == 'd' && dc[1] == 'b' { // big data: a segment list
+	// Big data (a "db" segment list) is used only for values longer than one
+	// segment; a shorter value whose own bytes start with "db" is plain data.
+	if size > hiveBigDataMax && len(dc) >= 2 && dc[0] == 'd' && dc[1] == 'b' {
 		v.Data = h.readBigData(dc, size)
 		return v, nil
 	}

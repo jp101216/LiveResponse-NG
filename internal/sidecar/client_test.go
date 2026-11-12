@@ -88,3 +88,30 @@ func TestLocateNeverUsesPATH(t *testing.T) {
 		t.Fatal("bare name was resolved via PATH")
 	}
 }
+
+// Cancelling a stream closes the sidecar's stdin rather than killing it, so
+// it can stop at a safe point (never with a target thread suspended).
+func TestStreamCancelClosesStdin(t *testing.T) {
+	mark := filepath.Join(t.TempDir(), "stopped")
+	p := fakeSidecar(t, `
+case "$req" in *'"cancel_on_eof":true'*) ;; *) exit 3 ;; esac
+echo '{"op":"scan_memory","ok":true,"meta":{"pid":1,"status":"scanned"}}'
+cat >/dev/null
+echo stopped > '`+mark+`'
+`)
+	c, _ := New(p)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	var got []*Response
+	start := time.Now()
+	err := c.Stream(ctx, Request{Op: OpScanMemory, PIDs: []int{1, 2}}, func(r *Response) { got = append(got, r) })
+	if err == nil || len(got) != 1 {
+		t.Fatalf("err=%v, %d responses", err, len(got))
+	}
+	if took := time.Since(start); took >= waitDelay {
+		t.Fatalf("the sidecar was killed after WaitDelay (%v) instead of stopping on EOF", took)
+	}
+	if _, err := os.Stat(mark); err != nil {
+		t.Fatal("the sidecar did not see stdin close:", err)
+	}
+}

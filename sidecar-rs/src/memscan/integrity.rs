@@ -82,12 +82,31 @@ pub struct DiffAcc {
     run: Option<(usize, usize)>,
 }
 
+/// Sorts and merges mask ranges, dropping empty ones, so a lookup is a binary
+/// search. The mask comes from the module file's relocations (up to millions,
+/// and the file is the attacker's to write): scanning the whole list for every
+/// 64-byte block made one crafted image cost hours of the sidecar's time.
+fn normalize_mask(mask: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut v: Vec<(usize, usize)> = mask.iter().copied().filter(|&(s, e)| s < e).collect();
+    v.sort_unstable();
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(v.len());
+    for (s, e) in v {
+        match out.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => out.push((s, e)),
+        }
+    }
+    out
+}
+
+/// Whether [a, b) overlaps a range of a normalized mask.
 fn overlaps(a: usize, b: usize, mask: &[(usize, usize)]) -> bool {
-    mask.iter().any(|&(s, e)| s < b && a < e)
+    let i = mask.partition_point(|&(_, e)| e <= a);
+    mask.get(i).is_some_and(|&(s, _)| s < b)
 }
 
 fn masked(off: usize, mask: &[(usize, usize)]) -> bool {
-    mask.iter().any(|&(s, e)| (s..e).contains(&off))
+    overlaps(off, off.saturating_add(1), mask)
 }
 
 impl DiffAcc {
@@ -99,6 +118,7 @@ impl DiffAcc {
     /// stretch (the shorter length is compared). Offsets inside a `mask`
     /// range ([start, end), relative to the stretch) are not compared.
     pub fn feed(&mut self, at: usize, mem: &[u8], disk: &[u8], mask: &[(usize, usize)]) {
+        let mask = &normalize_mask(mask)[..];
         let n = mem.len().min(disk.len());
         let mut i = 0;
         while i < n {
@@ -668,6 +688,35 @@ fn patch_hit(ps: &[&Change]) -> Hit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mask_lookup_is_merged_and_fast() {
+        let m = normalize_mask(&[(10, 12), (0, 4), (3, 6), (20, 20), (11, 15)]);
+        assert_eq!(m, vec![(0, 6), (10, 15)]);
+        assert!(
+            overlaps(5, 8, &m)
+                && overlaps(14, 30, &m)
+                && !overlaps(6, 10, &m)
+                && !overlaps(15, 99, &m)
+        );
+        assert!(masked(0, &m) && !masked(6, &m) && masked(14, &m) && !masked(15, &m));
+
+        // A crafted module can carry millions of unusual relocations, each
+        // a mask entry; comparing must stay linear-ish in the code size.
+        let mask: Vec<(usize, usize)> = (0..1_000_000)
+            .map(|i| (i * 16 + 7, i * 16 + 9))
+            .rev()
+            .collect();
+        let (mem, disk) = (vec![0u8; 1 << 20], vec![1u8; 1 << 20]);
+        let start = std::time::Instant::now();
+        let mut a = DiffAcc::new();
+        a.feed(0, &mem, &disk, &mask);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+    }
 
     fn stats(mem: &[u8], disk: &[u8], mask: &[(usize, usize)]) -> DiffStats {
         let mut a = DiffAcc::new();

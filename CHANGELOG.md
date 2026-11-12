@@ -2,6 +2,78 @@
 
 ## Unreleased
 
+Fixes from a line-by-line review of the whole source tree (agent, sidecar,
+viewer and build). Report schema remains 1.2.
+
+### Security
+
+- Paths the host supplies (dotfiles, autostart entries, units,
+  `authorized_keys`, AI client configs, autorun and driver images, implant
+  candidates) are opened only when they are regular files, without blocking,
+  and read within a size bound. A FIFO planted as `~/.bashrc` or
+  `~/.claude.json` used to hang its collector for the rest of the run.
+- On Windows, those paths are no longer opened, hashed, dated or
+  signature-checked when they name a UNC, WebDAV, device or mapped network
+  location: a persistence entry pointing at `\\attacker\share\x.exe` made the
+  elevated responder authenticate to that host. The record says the file
+  wasn't read.
+- EVTX parsing has a per-record rendering budget. A record of about a
+  kilobyte nesting templates that each render the next twice expanded
+  exponentially (days of CPU and unbounded memory from one crafted log).
+- Cancelling a memory scan (Ctrl+C, a time budget) closes the sidecar's input
+  instead of killing it, and the sidecar stops only when no thread of the
+  scanned process is suspended. A kill at the wrong moment could leave a
+  thread of that process suspended.
+- The console summary and CLI errors escape control and bidirectional
+  characters from host data, so a crafted command line or file name can't
+  drive the analyst's terminal (retitle, rewrite lines, OSC 52 clipboard).
+- Journal messages are attributed to sshd, sudo, su, account tools, cron or
+  the kernel only when journald's own `_UID`/`_COMM`/`_TRANSPORT` agree; forged
+  ones are reported as `defense.log_spoofing`. The SSH peer is taken from the
+  last `from <addr> port <n>`, so a user name containing that text can't frame
+  another address or split a brute-force count.
+
+### Fixed
+
+- No more false *critical* `defense.hidden_socket` on Linux 6.8+: bound but
+  idle TCP sockets, which `sock_diag` now reports and `/proc/net/tcp` never
+  listed, are not compared. An empty `/proc/modules` (a sandbox or masked
+  `/proc`) no longer calls every module hidden.
+- Built-in event-log rules check the provider behind an event id: another
+  application's event 104 or 1102 in `Application.evtx` was reported as a
+  *critical* log clear. Sigma `logsource` categories likewise pair each id
+  with Sysmon, Security or PowerShell. The log-clear detail no longer reads
+  "the an event log", and `Security.EVTX` gets its channel name.
+- `/etc/passwd`'s password column is honoured: an empty one is a passwordless
+  account, and a hash there is reported as `accounts.passwd_hash`.
+- Startup shortcuts resolve to the target the shell launches (environment
+  block, then ID list, then LinkInfo); one whose fields name different
+  programs is `persistence.lnk_target_mismatch`.
+- Linux command lines: `VAR=/path` assignments are not taken for the program,
+  `a || bash x` is not a pipe to a shell, netcat flag clusters such as
+  `-nve /bin/sh` are recognised, and systemd `ExecStart=` lines continued with
+  a backslash are judged whole. Paths like `//tmp/x` and `/usr/../tmp/x` are
+  normalised before the location checks; `memfd:` is only matched as a prefix.
+- AI agent MCP servers and hooks get the Unix command-line and path checks as
+  well as the Windows ones; emoji subdivision flags (England, Scotland, Wales)
+  are not reported as hidden tag text.
+- sudoers rules with a non-root runas list are no longer described as running
+  commands as root. Sysmon's own service binary in `C:\Windows` is *notable*,
+  not PsExec-*suspect*. WMI consumers whose name contains `:` are matched to
+  their bindings. Prefetch files of programs with names over 29 characters
+  resolve their path. A short registry value starting with the bytes `db` is
+  no longer read as big data. IPv4-mapped prefixes in an intel dataset keep
+  their coverage. IPv6 peers are bracketed in Linux network findings.
+- Sigma rules combining `|windash` with `|re` are skipped with a reason
+  instead of running without the dash variants.
+- Sidecar: an unreadable page no longer hides the rest of its 16 MiB chunk
+  from YARA, prompt and beacon scans; a module with millions of unusual
+  relocations no longer stalls the integrity check for hours; pointers forged
+  in the target's handler and JIT lists, and offsets in crafted module files
+  on the 32-bit sidecar, no longer panic and discard the process's results;
+  integrity and thread checks each have their own panic boundary.
+- The LZ4 decoder caps a length run at the output size.
+
 ## 0.18.0
 
 Detection-accuracy release: indicator export, the Sigma engine and the adaptive

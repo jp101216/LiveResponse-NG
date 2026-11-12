@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/netip"
 	"net/url"
@@ -210,24 +211,22 @@ func collectAIAgents(ctx context.Context, homes []string, configs []aiClientConf
 
 // readBounded reads a whole file of at most max bytes.
 func readBounded(path string, max int64) ([]byte, error) {
-	f, err := os.Open(path)
+	f, st, err := openRegular(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
 	if st.Size() > max {
 		return nil, fmt.Errorf("%d bytes, larger than the %d-byte cap", st.Size(), max)
 	}
-	b := make([]byte, st.Size())
-	n, err := f.Read(b)
-	if err != nil && n == 0 && st.Size() > 0 {
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
 		return nil, err
 	}
-	return b[:n], nil
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("larger than the %d-byte cap", max)
+	}
+	return b, nil
 }
 
 // projectConfigKind recognises the MCP and settings files a project carries.
@@ -747,8 +746,8 @@ func judgeMCPServer(s mcpServer) []Finding {
 	var out []Finding
 	if s.Command != "" {
 		line := joinCommand(s.Command, s.Args)
-		out = append(out, analyzeCommandLine(where+" runs a command that", s.Command, line)...)
-		if lvl, why := pathRisk(s.Command); lvl == riskHigh {
+		out = append(out, aiCommandFindings(where+" runs a command that", s.Command, line)...)
+		if lvl, why := aiPathRisk(s.Command); lvl == riskHigh {
 			out = append(out, Finding{Rule: "ai.mcp_server_unusual_path", Severity: SevSuspect, Technique: "T1546", Confidence: 65,
 				Detail: fmt.Sprintf("%s starts %s, in %s: the client runs it with the user's rights every time it starts", where, s.Command, why)})
 		}
@@ -791,12 +790,34 @@ func judgeMCPURL(where, raw string) (Finding, bool) {
 // from a temporary or downloads folder.
 func judgeAgentHook(h agentHook) []Finding {
 	where := fmt.Sprintf("%s hook %s in %s", h.Client, h.Event, h.Config)
-	out := analyzeCommandLine(where+" runs a command that", "", h.Command)
-	if lvl, why, culprit := commandPathRisk(h.Command); lvl == riskHigh {
+	out := aiCommandFindings(where+" runs a command that", "", h.Command)
+	lvl, why, culprit := commandPathRisk(h.Command)
+	if prog := firstProgram(h.Command); strings.HasPrefix(prog, "/") {
+		lvl, why = unixPathRisk(prog)
+		culprit = prog
+	}
+	if lvl == riskHigh {
 		out = append(out, Finding{Rule: "ai.agent_hook_unusual_path", Severity: SevSuspect, Technique: "T1546", Confidence: 60,
 			Detail: fmt.Sprintf("%s runs code from %s (%s) whenever the agent reaches that event", where, why, culprit)})
 	}
 	return out
+}
+
+// aiCommandFindings runs the Windows and the Unix command analytics both: AI
+// client configs look the same on every OS, and nothing in an MCP server or
+// hook entry says which shell will run it ("bash -c 'curl x | sh'" and a
+// /dev/tcp reverse shell are Unix-only patterns; encoded PowerShell is not).
+func aiCommandFindings(source, image, line string) []Finding {
+	return mergeFindings(analyzeCommandLine(source, image, line), analyzeUnixCommandLine(source, image, line)...)
+}
+
+// aiPathRisk grades a program path by its shape: a POSIX path by the Unix
+// rules (/tmp, /dev/shm, hidden home folders), anything else by Windows ones.
+func aiPathRisk(p string) (riskLevel, string) {
+	if strings.HasPrefix(p, "/") {
+		return unixPathRisk(p)
+	}
+	return pathRisk(p)
 }
 
 // hiddenText is text in a file that a person reading it can't see.
@@ -822,7 +843,13 @@ func findHiddenText(s string) hiddenText {
 		}
 		run = run[:0]
 	}
-	for i, r := range runes {
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if end := flagTagSequenceEnd(runes, i); end > 0 {
+			flush()
+			i = end // a subdivision flag (England, Scotland, Wales): tag characters by design
+			continue
+		}
 		switch {
 		case r >= 0xFE00 && r <= 0xFE0F:
 			run = append(run, byte(r-0xFE00))
@@ -857,6 +884,24 @@ func findHiddenText(s string) hiddenText {
 	}
 	flush()
 	return h
+}
+
+// flagTagSequenceEnd returns the index of the CANCEL TAG that closes a
+// well-formed emoji tag sequence starting at i — WAVING BLACK FLAG, two to
+// seven tag letters or digits, CANCEL TAG — or 0 when there is none. These are
+// how the England, Scotland and Wales flags are spelled, not hidden text.
+func flagTagSequenceEnd(runes []rune, i int) int {
+	if runes[i] != 0x1F3F4 {
+		return 0
+	}
+	j := i + 1
+	for j < len(runes) && j-i-1 < 8 && (runes[j] >= 0xE0061 && runes[j] <= 0xE007A || runes[j] >= 0xE0030 && runes[j] <= 0xE0039) {
+		j++
+	}
+	if n := j - i - 1; n >= 2 && n <= 7 && j < len(runes) && runes[j] == 0xE007F {
+		return j
+	}
+	return 0
 }
 
 // joinerContext reports whether a character is one next to which a

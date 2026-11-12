@@ -114,13 +114,13 @@ impl UnwindTable {
         let entry = |o: usize| {
             Some(Function {
                 begin: u32_at(file, o)?,
-                end: u32_at(file, o + 4)?,
-                info: u32_at(file, o + 8)?,
+                end: u32_at(file, o.checked_add(4)?)?,
+                info: u32_at(file, o.checked_add(8)?)?,
             })
         };
         let mut t = UnwindTable::default();
         for i in 0..(size as usize / 12).min(MAX_FUNCTIONS) {
-            let Some(mut f) = entry(off + 12 * i) else {
+            let Some(mut f) = off.checked_add(12 * i).and_then(entry) else {
                 break;
             };
             if f.info & 1 != 0 {
@@ -149,13 +149,13 @@ impl UnwindTable {
         let Some(o) = pe.rva_to_off(rva) else {
             return;
         };
-        let Some(h) = file.get(o..o + 4) else {
+        let Some(h) = o.checked_add(4).and_then(|e| file.get(o..e)) else {
             return;
         };
         let codes = 2 * (h[2] as usize + (h[2] as usize & 1));
         let chained = (h[0] >> 3) & UNW_FLAG_CHAININFO != 0;
         let len = 4 + codes + if chained { 12 } else { 0 };
-        let Some(b) = file.get(o..o + len) else {
+        let Some(b) = o.checked_add(len).and_then(|e| file.get(o..e)) else {
             return;
         };
         let mut b = b.to_vec();
@@ -165,7 +165,7 @@ impl UnwindTable {
             if info & 1 != 0 {
                 info = pe
                     .rva_to_off(info & !1)
-                    .and_then(|o| u32_at(file, o + 8))
+                    .and_then(|o| u32_at(file, o.checked_add(8)?))
                     .unwrap_or(0);
                 b[4 + codes + 8..4 + codes + 12].copy_from_slice(&info.to_le_bytes());
             }

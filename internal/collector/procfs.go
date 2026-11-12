@@ -123,11 +123,12 @@ func parseCmdline(data []byte) string {
 
 // passwdEntry is one /etc/passwd row.
 type passwdEntry struct {
-	Name  string
-	UID   int
-	GID   int
-	Home  string
-	Shell string
+	Name   string
+	Passwd string // the second column: "x" defers to /etc/shadow; anything else is used as the hash itself
+	UID    int
+	GID    int
+	Home   string
+	Shell  string
 }
 
 // parsePasswd parses /etc/passwd into entries, skipping malformed lines.
@@ -147,7 +148,7 @@ func parsePasswd(data []byte) []passwdEntry {
 			continue
 		}
 		gid, _ := strconv.Atoi(f[3])
-		out = append(out, passwdEntry{Name: f[0], UID: uid, GID: gid, Home: f[5], Shell: f[6]})
+		out = append(out, passwdEntry{Name: f[0], Passwd: f[1], UID: uid, GID: gid, Home: f[5], Shell: f[6]})
 	}
 	return out
 }
@@ -198,6 +199,26 @@ func passwordState(hash string) string {
 		return pwLocked
 	default:
 		return pwUsable
+	}
+}
+
+// effectivePasswordState is the password state login really sees for an
+// account. The passwd column wins unless it is "x": an empty column means no
+// password at all, and any other value is the hash itself (pam_unix and shadow
+// utils only consult /etc/shadow for "x"). shadow is nil when /etc/shadow was
+// unreadable; the state is then "" (unknown) for an "x" account only.
+func effectivePasswordState(u passwdEntry, shadow map[string]string) string {
+	switch u.Passwd {
+	case "x":
+		if shadow == nil {
+			return ""
+		}
+		if h, ok := shadow[u.Name]; ok {
+			return passwordState(h)
+		}
+		return pwNone
+	default:
+		return passwordState(u.Passwd)
 	}
 }
 

@@ -41,6 +41,9 @@ jobs:
       - name: go test -race
         shell: bash # -o pipefail: go test's own exit status counts too
         run: go test -race -json ./... 2>&1 | python3 .github/scripts/ci-annotate.py go-test
+      - name: go test on 32-bit (parsers of hostile input must not overflow int)
+        shell: bash
+        run: GOARCH=386 go test -count=1 -json ./internal/... 2>&1 | python3 .github/scripts/ci-annotate.py go-test
       - name: cross-compile release agents
         run: |
           for arch in amd64 386 arm64; do

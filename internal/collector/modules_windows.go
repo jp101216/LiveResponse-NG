@@ -171,6 +171,9 @@ func collectModules(ctx context.Context, opts RunOptions) (Result, error) {
 }
 
 func boundedSignatureFile(path string) bool {
+	if remotePath(path) {
+		return false
+	}
 	st, err := os.Stat(path)
 	return err == nil && st.Mode().IsRegular() && st.Size() <= 8<<20
 }

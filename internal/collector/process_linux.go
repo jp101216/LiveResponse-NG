@@ -279,11 +279,17 @@ func looksLikeKernelThreadName(comm string) bool {
 
 // readFileSafe reads a file, returning nil (not an error) when it can't be read:
 // /proc entries vanish and permission is denied for other users' files, and in
-// both cases a missing field is better than a failed run.
+// both cases a missing field is better than a failed run. Many of the paths are
+// user-controlled (dotfiles, autostart entries, user units), so only a regular
+// file is read, without blocking, and at most readFileSafeMax bytes of it.
 func readFileSafe(path string) []byte {
-	b, err := os.ReadFile(path)
+	b, _, err := readRegular(path, readFileSafeMax)
 	if err != nil {
 		return nil
 	}
 	return b
 }
+
+// readFileSafeMax bounds one readFileSafe read: far above any configuration or
+// /proc file it is used for, far below what would strain the collector.
+const readFileSafeMax = 32 << 20

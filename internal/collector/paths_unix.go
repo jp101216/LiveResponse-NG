@@ -1,6 +1,9 @@
 package collector
 
-import "strings"
+import (
+	"path"
+	"strings"
+)
 
 // Unix path heuristics — the Linux counterpart to paths.go. No build tag:
 // pure string handling, unit-tested on any OS. The Windows pathRisk works on
@@ -40,6 +43,11 @@ func unixPathRisk(p string) (riskLevel, string) {
 	if strings.HasSuffix(p, deletedSuffix) {
 		return riskHigh, "a deleted executable that is still running (self-deleting malware)"
 	}
+	if strings.HasPrefix(p, "/") {
+		// "//tmp/x", "/./dev/shm/x" and "/usr/../tmp/x" all run /tmp or
+		// /dev/shm files; judge the path the kernel resolves, not its spelling.
+		p = path.Clean(p)
+	}
 	for _, m := range unixHighRiskPrefixes {
 		if hasPathPrefix(p, m.marker) {
 			return riskHigh, m.reason
@@ -68,7 +76,9 @@ const deletedSuffix = " (deleted)"
 
 // isMemfdPath reports whether an exe link or mapping names an anonymous
 // in-memory file (memfd_create) rather than anything on disk.
-func isMemfdPath(p string) bool { return strings.Contains(p, "memfd:") }
+func isMemfdPath(p string) bool {
+	return strings.HasPrefix(p, "/memfd:") || strings.HasPrefix(p, "memfd:")
+}
 
 // systemPackagePrefixes are the root-owned trees distribution packages (and
 // vendor installers) put programs and libraries in.

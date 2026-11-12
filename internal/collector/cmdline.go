@@ -507,7 +507,7 @@ func analyzeCommandLine(source, image, cmd string) []Finding {
 			Detail:     source + " " + d + ": " + excerpt(cmd, 240),
 		})
 	}
-	return append(out, modernCommandFindings(source, image, cmd)...)
+	return append(out, modernCommandFindings(source, image, cmd, c)...)
 }
 
 // prepareCommand lower-cases a command line, recognises PowerShell and

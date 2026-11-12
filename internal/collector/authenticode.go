@@ -120,7 +120,12 @@ func (v *SignatureVerifier) Verify(_ context.Context, path string) SignatureResu
 	}
 	v.mu.Unlock()
 
-	r := verifyAuthenticode(path)
+	var r SignatureResult
+	if err := checkLocalPath(path); err != nil {
+		r = SignatureResult{State: SigError, Detail: err.Error()}
+	} else {
+		r = verifyAuthenticode(path)
+	}
 
 	v.mu.Lock()
 	v.cache[key] = r

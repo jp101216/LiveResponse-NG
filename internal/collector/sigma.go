@@ -53,8 +53,11 @@ var builtinSigmaFS embed.FS
 //     and fires if any window crosses the threshold (burst/spray/volume);
 //   - the temporal "<expr> | near <expr>" with a detection "timeframe:" window.
 //
-// Not supported, so the rule is skipped: the plain |base64 and |utf16/|wide
-// encoding modifiers, a "| near" with no timeframe, and a timeframe on
+// The encoding modifiers |base64 and |wide/|utf16/|utf16le/|utf16be are
+// supported together with |base64 or |base64offset.
+//
+// Not supported, so the rule is skipped: |wide or |utf16 without a base64
+// modifier, |windash with |re, a "| near" with no timeframe, and a timeframe on
 // min/max/avg or with an operator other than >/>= (no sound sliding-window
 // meaning). logsource narrows a rule to a channel/event when its service or
 // category is one we map; otherwise the rule is tried against every event.
@@ -1370,6 +1373,11 @@ func compileFieldMatch(key string, val *yamlNode) (fieldMatch, string) {
 	if b64 && b64Plain {
 		return fm, "|base64 cannot combine with |base64offset"
 	}
+	if windash && (op == opRegex || op == opGt || op == opGte || op == opLt || op == opLte) {
+		// A regex is used as written, so the dash variants would silently
+		// not be tried: the rule would match less than its author meant.
+		return fm, "|windash cannot combine with |re or a numeric comparison"
+	}
 	if wide != "" && !b64 && !b64Plain {
 		// Event values are already decoded text, so a UTF-16 pattern can only
 		// ever match inside an encoded blob.
@@ -1751,30 +1759,53 @@ func serviceChannelPred(service string) func(winEvent) bool {
 }
 
 func categoryPred(category string) func(winEvent) bool {
-	eid := func(ids ...int) func(winEvent) bool {
-		set := map[int]bool{}
+	// Each category is a set of (event id, source) pairs: event ids are only
+	// unique within a provider (event 1 is Sysmon's process creation, and
+	// countless other providers' anything), so a Sysmon id must come from
+	// Sysmon. The source is matched against the provider and channel names; an
+	// event that names neither is given the benefit of the doubt.
+	pairs := func(src string, ids ...int) map[int]string {
+		m := map[int]string{}
 		for _, i := range ids {
-			set[i] = true
+			m[i] = src
 		}
-		return func(ev winEvent) bool { return set[ev.EventID] }
+		return m
+	}
+	join := func(ms ...map[int]string) func(winEvent) bool {
+		all := map[int]string{}
+		for _, m := range ms {
+			for k, v := range m {
+				all[k] = v
+			}
+		}
+		return func(ev winEvent) bool {
+			src, ok := all[ev.EventID]
+			if !ok {
+				return false
+			}
+			if ev.Provider == "" && ev.Channel == "" {
+				return true
+			}
+			return strings.Contains(strings.ToLower(ev.Provider+" "+ev.Channel), src)
+		}
 	}
 	switch category {
 	case "":
 		return nil
 	case "process_creation":
-		return eid(4688, 1)
+		return join(pairs("security", 4688), pairs("sysmon", 1))
 	case "network_connection":
-		return eid(3, 5156)
+		return join(pairs("sysmon", 3), pairs("security", 5156))
 	case "image_load":
-		return eid(7)
+		return join(pairs("sysmon", 7))
 	case "pipe_created":
-		return eid(17, 18)
+		return join(pairs("sysmon", 17, 18))
 	case "registry_set", "registry_add", "registry_event", "registry_delete":
-		return eid(12, 13, 14)
+		return join(pairs("sysmon", 12, 13, 14))
 	case "ps_script":
-		return eid(4104)
+		return join(pairs("powershell", 4104))
 	case "ps_module":
-		return eid(4103)
+		return join(pairs("powershell", 4103))
 	}
 	return nil // unknown category: don't narrow
 }

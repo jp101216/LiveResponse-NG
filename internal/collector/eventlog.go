@@ -280,7 +280,10 @@ func boundedList(list []string, max int) []string {
 // channelName turns a log file name into its channel: drop .evtx and decode the
 // "%4" that stands in for "/" in the on-disk file name.
 func channelName(fname string) string {
-	return strings.ReplaceAll(strings.TrimSuffix(fname, ".evtx"), "%4", "/")
+	if n := len(fname) - len(".evtx"); n > 0 && strings.EqualFold(fname[n:], ".evtx") {
+		fname = fname[:n]
+	}
+	return strings.ReplaceAll(fname, "%4", "/")
 }
 
 // eventlog.go — turn parsed EVTX records (evtx.go) into normalized Windows
@@ -438,7 +441,7 @@ func classifyWinEvent(ev winEvent, sigma *SigmaRuleset) (fields map[string]any, 
 // service and virtual accounts, which Windows writes at every service logon and
 // which on a busy server is the bulk of the Security log.
 func recordUnflagged(ev winEvent) bool {
-	if !alwaysRecord(ev.EventID) {
+	if !alwaysRecord(ev.EventID) || !builtinProviderMatches(ev) {
 		return false
 	}
 	return ev.EventID != 4672 || !systemLogonAccount(evData(ev, "SubjectUserSid"), evData(ev, "SubjectUserName"))
@@ -496,8 +499,41 @@ func trackChannelRange(ranges map[string]*channelRange, ev winEvent) {
 	}
 }
 
+// builtinProviders names, for the event ids the built-in rules key on, the
+// provider that writes them (a lower-case substring of its name). Event ids
+// are only unique within a provider: Application.evtx is collected too, and
+// any application may log an event 104 or 1102 of its own. Ids whose rules
+// already check the provider themselves (Sysmon, Code Integrity, KDC, the
+// Defender configuration events) aren't listed.
+var builtinProviders = func() map[int]string {
+	m := map[int]string{104: "eventlog", 1100: "eventlog", 1102: "eventlog",
+		7045: "service control manager", 7030: "service control manager",
+		4104: "powershell", 400: "powershell",
+		1116: "windows defender", 1117: "windows defender",
+		106: "taskscheduler", 140: "taskscheduler", 200: "taskscheduler", 201: "taskscheduler"}
+	for _, id := range []int{4624, 4625, 4662, 4672, 4688, 4697, 4698, 4699, 4702, 4720, 4722, 4725, 4726,
+		4728, 4732, 4738, 4742, 4756, 4765, 4766, 4768, 4794, 4887, 4888, 4889, 4898, 4899, 5136, 5137} {
+		m[id] = "security-auditing"
+	}
+	return m
+}()
+
+// builtinProviderMatches reports whether an event comes from the provider the
+// built-in rule for its id is written for. A record that names no provider is
+// given the benefit of the doubt, as before.
+func builtinProviderMatches(ev winEvent) bool {
+	want, ok := builtinProviders[ev.EventID]
+	if !ok || ev.Provider == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(ev.Provider), want)
+}
+
 // eventFindings raises findings for one normalized event.
 func eventFindings(ev winEvent) []Finding {
+	if !builtinProviderMatches(ev) {
+		return nil
+	}
 	var out []Finding
 	switch ev.EventID {
 	case 1102: // Security audit log cleared
@@ -506,10 +542,13 @@ func eventFindings(ev winEvent) []Finding {
 			Detail: "the Security audit log was cleared" + whoBy(ev),
 		})
 	case 104: // an event log file was cleared
-		logName := firstNonEmpty(evData(ev, "Channel"), "an event")
+		what := "an event log was cleared"
+		if logName := evData(ev, "Channel"); logName != "" {
+			what = fmt.Sprintf("the %s log was cleared", logName)
+		}
 		out = append(out, Finding{
 			Rule: "defense.clear_event_logs", Severity: SevCritical, Technique: "T1070.001", Confidence: 80,
-			Detail: fmt.Sprintf("the %s log was cleared", logName) + whoBy(ev),
+			Detail: what + whoBy(ev),
 		})
 	case 7045: // a service was installed
 		out = append(out, serviceInstallFindings(ev)...)

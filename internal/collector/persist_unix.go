@@ -86,7 +86,7 @@ func isEnvAssignment(line string) bool {
 // lines from a systemd unit file, with systemd's "-@+!" exec prefixes stripped.
 func parseUnitExecStarts(data []byte) []string {
 	var out []string
-	for _, line := range strings.Split(string(data), "\n") {
+	for _, line := range joinContinuations(string(data)) {
 		line = strings.TrimSpace(line)
 		key, val, ok := strings.Cut(line, "=")
 		if !ok {
@@ -101,6 +101,29 @@ func parseUnitExecStarts(data []byte) []string {
 				out = append(out, val)
 			}
 		}
+	}
+	return out
+}
+
+// joinContinuations splits a unit file into logical lines: systemd joins a line
+// ending in a backslash with the next one, so "ExecStart=/bin/true \\" followed
+// by "  ; curl x | sh" is one command, and must be judged as one.
+func joinContinuations(text string) []string {
+	var out []string
+	var cur strings.Builder
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimRight(line, " \t\r")
+		if strings.HasSuffix(line, "\\") {
+			cur.WriteString(strings.TrimSuffix(line, "\\"))
+			cur.WriteByte(' ')
+			continue
+		}
+		cur.WriteString(line)
+		out = append(out, cur.String())
+		cur.Reset()
+	}
+	if cur.Len() > 0 {
+		out = append(out, cur.String())
 	}
 	return out
 }
@@ -161,7 +184,7 @@ func parseLdPreload(data []byte) []string {
 func firstProgram(cmd string) string {
 	for _, f := range strings.Fields(cmd) {
 		f = strings.Trim(f, `"'`) // ExecStart="/opt/x/run" and quoted crontab programs
-		if f == "" || strings.HasPrefix(f, "-") || (strings.ContainsRune(f, '=') && !strings.ContainsRune(f, '/')) {
+		if f == "" || strings.HasPrefix(f, "-") || isEnvAssignment(f) {
 			continue
 		}
 		if cmdWrappers[unixBaseName(f)] {

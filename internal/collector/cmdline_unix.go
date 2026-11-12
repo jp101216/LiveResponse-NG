@@ -129,13 +129,32 @@ var cmdWrappers = map[string]bool{
 // the real program is examined, without treating a mere argument ("| grep
 // python") as an interpreter.
 func pipesToShell(lc string) bool {
-	parts := strings.Split(lc, "|")
-	for _, seg := range parts[1:] {
+	for _, seg := range pipeTargets(lc) {
 		if prog := pipelineProgram(seg); prog != "" && shellInterps[prog] {
 			return true
 		}
 	}
 	return false
+}
+
+// pipeTargets returns the text after each pipe operator ("|", or bash's "|&"
+// that also pipes stderr). "||" is a logical OR, not a pipe: "make || bash
+// fix.sh" runs bash on its own, so the stage after it isn't returned.
+func pipeTargets(lc string) []string {
+	var out []string
+	for i := 0; i < len(lc); i++ {
+		if lc[i] != '|' {
+			continue
+		}
+		if i+1 < len(lc) && lc[i+1] == '|' {
+			i++ // skip both bars of "||"
+			continue
+		}
+		rest := lc[i+1:]
+		rest = strings.TrimPrefix(rest, "&")
+		out = append(out, rest)
+	}
+	return out
 }
 
 // pipelineProgram returns the base name of the program a pipeline stage runs,
@@ -150,7 +169,7 @@ func pipelineProgram(seg string) string {
 			continue
 		case strings.HasPrefix(f, "-"): // a flag
 			continue
-		case strings.ContainsRune(f, '=') && !strings.ContainsRune(f, '/'): // VAR=val
+		case isEnvAssignment(f): // VAR=val, including VAR=/some/path
 			continue
 		}
 		base := unixBaseName(f)
@@ -170,10 +189,32 @@ func netcatExec(lc string) bool {
 	for _, seg := range splitCommandSegments(lc) {
 		switch pipelineProgram(seg) {
 		case "nc", "ncat", "netcat":
-			if strings.Contains(seg, " -e ") || strings.Contains(seg, "--exec") ||
-				strings.Contains(seg, "--sh-exec") || strings.Contains(seg, " -c ") {
+			if strings.Contains(seg, "--exec") || strings.Contains(seg, "--sh-exec") || strings.Contains(seg, "--lua-exec") {
 				return true
 			}
+			for _, f := range strings.Fields(seg) {
+				if netcatExecFlag(f) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// netcatExecFlag reports whether one argument is a short-option cluster that
+// carries netcat's -e (execute) or -c (shell command) flag: "-e", "-c", but
+// also "-nve /bin/sh" and "-e/bin/sh", which getopt reads the same way.
+func netcatExecFlag(f string) bool {
+	if len(f) < 2 || f[0] != '-' || f[1] == '-' {
+		return false
+	}
+	for _, r := range f[1:] {
+		switch {
+		case r == 'e' || r == 'c':
+			return true
+		case r < 'a' || r > 'z':
+			return false // the cluster ended: what follows is an option argument
 		}
 	}
 	return false

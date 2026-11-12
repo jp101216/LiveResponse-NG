@@ -89,6 +89,8 @@ fn capture(thread: HANDLE, flags: u32) -> Result<AlignedContext, CaptureError> {
     // SAFETY: CONTEXT is plain data; its alignment is enforced by the wrapper.
     let mut context: AlignedContext = unsafe { core::mem::zeroed() };
     context.0.ContextFlags = flags;
+    // Declared before the suspension, so it is released after the resume.
+    let _cancel_waits = super::procmem::suspension_guard();
     if unsafe { SuspendThread(thread) } == u32::MAX {
         return Err(CaptureError::last("suspend"));
     }

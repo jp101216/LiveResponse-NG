@@ -52,11 +52,18 @@ func judgeService(s serviceConfig, sysRoot string) []Finding {
 	// a binary to ADMIN$ and start it as a service.
 	if !driver && s.Image != "" && sysRoot != "" &&
 		dirName(s.Image) == strings.ToLower(strings.TrimRight(sysRoot, `\`)) {
-		out = append(out, Finding{
+		f := Finding{
 			Rule: "lateral.service_in_windows_dir", Severity: SevSuspect, Technique: "T1569.002", Confidence: 65,
 			Detail: fmt.Sprintf("%s runs %s directly from the Windows directory — PsExec and Impacket copy their service binary to ADMIN$ and start it this way",
 				label, s.Image),
-		})
+		}
+		if sysmonImages[progName(s.Image)] {
+			// Sysmon installs itself there too: on a monitored host this is
+			// the sensor, unless a payload borrowed its name.
+			f.Severity, f.Confidence = SevNotable, 25
+			f.Detail += " — but Sysmon installs its service binary there under this name; confirm it is Sysinternals' (signed by Microsoft)"
+		}
+		out = append(out, f)
 	}
 
 	// A shell as the service binary: smbexec and many droppers run commands
@@ -87,3 +94,7 @@ func judgeService(s serviceConfig, sysRoot string) []Finding {
 	}
 	return out
 }
+
+// sysmonImages are the names Sysmon's installer gives its service binary in
+// the Windows directory (x86, x64 and ARM64 builds).
+var sysmonImages = map[string]bool{"sysmon.exe": true, "sysmon64.exe": true, "sysmon64a.exe": true}

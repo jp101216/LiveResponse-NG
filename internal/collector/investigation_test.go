@@ -156,6 +156,25 @@ func writeTraceFixture(t *testing.T, text string) string {
 const traceOne = `{"trace_id":"11111111111111111111111111111111","span_id":"1111111111111111","operation":"invoke_agent","agent":"lab-agent","timestamp":"2026-11-01T12:00:00Z","input":"secret original prompt","headers":{"Authorization":"secret authorization"},"environment":{"TOKEN":"secret env"}}`
 const traceTwo = `{"trace_id":"11111111111111111111111111111111","span_id":"2222222222222222","parent_span_id":"1111111111111111","operation":"execute_tool","tool":"read_file","arguments":{"path":"secret argument"},"output":"secret output"}`
 
+func TestTraceLimitReportsCoverageGap(t *testing.T) {
+	for _, count := range []int{traceMaxRecords, traceMaxRecords + 1} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			text := strings.Repeat(traceOne+"\n", count)
+			r := ParseAgentTraceFiles(context.Background(), []string{writeTraceFixture(t, text)})
+			truncated := count > traceMaxRecords
+			if len(r.Records) != traceMaxRecords || r.Meta["truncated"] != truncated {
+				t.Fatalf("unexpected retained trace count: %d, meta=%+v", len(r.Records), r.Meta)
+			}
+			if truncated && (len(r.Errors) == 0 || !strings.Contains(strings.Join(r.Errors, " "), "limit")) {
+				t.Fatal("trace limit did not reach the report's coverage errors")
+			}
+			if !truncated && len(r.Errors) != 0 {
+				t.Fatalf("complete trace import marked incomplete: %v", r.Errors)
+			}
+		})
+	}
+}
+
 func TestTraceImportPreservesSourcesButOmitsContent(t *testing.T) {
 	text := traceOne + "\n" + traceTwo + "\ninvalid secret malformed payload\n"
 	p := writeTraceFixture(t, text)

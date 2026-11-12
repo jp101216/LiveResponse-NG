@@ -265,49 +265,65 @@ func WriteFile(path string, rep Report, format string, pretty, overwrite bool) (
 // WriteArtifact applies the report's permissions, overwrite policy and checksum
 // handling to another evidence artifact, such as an offline case workspace.
 func WriteArtifact(path string, overwrite bool, write func(io.Writer) error) (string, error) {
-	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
-	if overwrite {
-		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-	}
-	f, err := os.OpenFile(path, flags, 0o600)
-	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return "", fmt.Errorf("%s already exists; refusing to overwrite (use -force)", path)
-		}
-		return "", err
-	}
-
 	h := sha256.New()
-	werr := write(io.MultiWriter(f, h))
-	if werr == nil {
-		werr = f.Sync()
-	}
-	if cerr := f.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr != nil {
-		return "", werr
+	if err := writeEvidenceFile(path, overwrite, func(w io.Writer) error {
+		return write(io.MultiWriter(w, h))
+	}); err != nil {
+		return "", err
 	}
 
 	sum := hex.EncodeToString(h.Sum(nil))
 	line := sum + "  " + filepath.Base(path) + "\n"
-	// The checksum is evidence too: use the same overwrite policy as the
-	// report, including refusing an existing symlink when -force is absent.
-	checksum, err := os.OpenFile(path+".sha256", flags, 0o600)
-	if err != nil {
-		return sum, fmt.Errorf("report written, but checksum file failed: %w", err)
-	}
-	_, err = checksum.WriteString(line)
-	if err == nil {
-		err = checksum.Sync()
-	}
-	if cerr := checksum.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
+	if err := writeEvidenceFile(path+".sha256", overwrite, func(w io.Writer) error {
+		_, err := io.WriteString(w, line)
+		return err
+	}); err != nil {
 		return sum, fmt.Errorf("report written, but checksum file failed: %w", err)
 	}
 	return sum, nil
+}
+
+// Forced replacement is staged beside the destination. It cannot truncate an
+// earlier artifact on a failed write, follow a destination link, or inherit a
+// previous file's public Unix permissions. New files still use O_EXCL, which
+// also works on removable filesystems that do not support hard links.
+func writeEvidenceFile(path string, overwrite bool, write func(io.Writer) error) error {
+	var f *os.File
+	var err error
+	if overwrite {
+		f, err = os.CreateTemp(filepath.Dir(path), ".lrng-evidence-*")
+	} else {
+		f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	}
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("%s already exists; refusing to overwrite (use -force)", path)
+		}
+		return err
+	}
+	committed := false
+	defer func() {
+		_ = f.Close()
+		if !committed {
+			_ = os.Remove(f.Name())
+		}
+	}()
+	if err := write(f); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if overwrite {
+		if err := os.Rename(f.Name(), path); err != nil {
+			return err
+		}
+	}
+	committed = true
+	return nil
 }
 
 // FileSHA256 hashes a file, e.g. the running agent binary for the report.

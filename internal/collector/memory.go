@@ -132,6 +132,20 @@ func (c *memoryCollector) Collect(ctx context.Context) (Result, error) {
 	for _, r := range recs {
 		res.Add(r.Fields, r.Findings...)
 	}
+	// Per-process budgets and access failures can leave an incomplete scan
+	// even when every sidecar exits normally and the collector has time left.
+	// Surface those gaps where report summaries and the console look for them.
+	var gaps []string
+	for status, count := range counts {
+		if count > 0 && status != "scanned" && status != "skipped" {
+			gaps = append(gaps, fmt.Sprintf("%s=%d", status, count))
+		}
+	}
+	if len(gaps) > 0 {
+		sort.Strings(gaps)
+		res.SetMeta("partial", true)
+		res.Fail("memory coverage incomplete: " + strings.Join(gaps, ", ") + "; see per-process records for details")
+	}
 	// A rules problem fails every PID identically; surface it once. Rule
 	// files that didn't compile are a coverage gap, so they count as errors
 	// too (details in meta.yara.rules_failed).
@@ -263,14 +277,20 @@ func memoryRecords(targets []procInfo, skipped []memSkip, responses map[int]*sid
 	var rows []row
 
 	for _, s := range skipped {
-		f := map[string]any{"pid": s.proc.PID, "status": "skipped", "reason": s.reason}
+		status := "skipped"
+		if s.reason == "no such process" {
+			// An explicitly requested PID that disappeared was not scanned;
+			// unlike a deliberate exclusion, it is a coverage gap.
+			status = "not_found"
+		}
+		f := map[string]any{"pid": s.proc.PID, "status": status, "reason": s.reason}
 		if s.proc.Name != "" {
 			f["name"] = s.proc.Name
 		}
 		if s.proc.Path != "" {
 			f["image_path"] = s.proc.Path
 		}
-		counts["skipped"]++
+		counts[status]++
 		rows = append(rows, row{s.proc.PID, Record{Fields: f}})
 	}
 

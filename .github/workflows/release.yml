@@ -4,7 +4,8 @@ name: release
 # Makefile's own `make release` recipes, checks them, runs the Windows ones on
 # a Windows runner, and attaches per-platform archives and checksums to the
 # release. A manual run (Actions > release > Run workflow), or a pull request
-# that changes this file or the Makefile, does everything except the upload;
+# that changes this file, the Makefile or Rust dependencies, does everything
+# except the upload;
 # its archives are kept as the run's "release-set" artifact.
 #
 # Publish the release from the commit you want to ship (normally main): the
@@ -18,6 +19,8 @@ on:
     paths:
       - .github/workflows/release.yml
       - Makefile
+      - sidecar-rs/Cargo.toml
+      - sidecar-rs/Cargo.lock
 
 permissions:
   contents: read

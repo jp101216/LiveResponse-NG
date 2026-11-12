@@ -157,6 +157,15 @@ func (d *Dispatcher) runOne(ctx context.Context, c Collector) Result {
 	if o.err != nil {
 		res.Fail(o.err.Error())
 	}
+	if err := cctx.Err(); err != nil {
+		// A collector may honor cancellation by returning the records it has
+		// with a nil error. Its private deadline does not cancel the run, so
+		// run.interrupted alone cannot expose this loss of coverage.
+		res.SetMeta("partial", true)
+		if len(res.Errors) == 0 {
+			res.Fail("collection interrupted: " + err.Error() + "; results may be incomplete")
+		}
+	}
 	return finalize(res, name, start)
 }
 

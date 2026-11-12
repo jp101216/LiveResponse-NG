@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Update YARA-X to 1.23 and refresh its locked dependencies for upstream parser,
+  scanner and security fixes. The dependency audit now finds no known
+  vulnerabilities and runs in CI. Building the sidecar requires Rust 1.95+.
+- Forced report/checksum replacement now stages a private file before replacing
+  the destination. Failed writes preserve previous evidence, and destination
+  symlinks/hard links cannot redirect writes into another file. Unix output
+  permissions no longer inherit a previous file's public access bits.
+- Offline registry-hive parsing now rejects cell offsets/sizes that overflow
+  on 32-bit builds, avoids repeated/cyclic list expansion, and rejects
+  impossible big-data allocations. CI now executes parser tests on Windows x86.
+- Linux memory image comparisons now check their time/byte budgets within each
+  mapping. Windows image-file reads stay bounded if a file grows during a scan.
+- Collector deadlines and cancellation now mark returned evidence as partial
+  even when the collector returns its records without an error. Existing
+  collector errors and partial evidence are preserved.
+- Partial, denied, failed and unreached process-memory scans now contribute a
+  coverage error to report summaries and analyst handoffs. Intentional process
+  exclusions remain separate from failures; available findings are retained.
+- Agent-trace imports that reach an input limit now report a coverage error,
+  rather than leaving truncated telemetry visible only in collector metadata.
+
 ## 0.17.2
 
 Windows memory-scan reliability release. Report schema remains 1.2.

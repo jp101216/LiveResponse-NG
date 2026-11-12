@@ -100,7 +100,16 @@ impl ProcessMemory for LinuxProcess {
             let len = m.end - m.start;
             let mut off = 0;
             while off < len {
-                let want = (len - off).min(CMP_CHUNK);
+                if Instant::now() >= deadline {
+                    rep.stopped = Some("time budget exhausted".into());
+                    break;
+                }
+                let remaining = max_bytes.saturating_sub(rep.bytes + off as u64);
+                if remaining == 0 {
+                    rep.stopped = Some("byte cap reached".into());
+                    break;
+                }
+                let want = (len - off).min(remaining.min(CMP_CHUNK as u64) as usize);
                 // Past the end of the file the mapping is zero fill: stop there.
                 let nf = read_full_at(&file, &mut file_buf[..want], m.offset + off as u64);
                 if nf == 0 {
@@ -276,6 +285,14 @@ mod tests {
     const PROT_WRITE: i32 = 2;
     const PROT_EXEC: i32 = 4;
     const MAP_PRIVATE: i32 = 2;
+
+    #[test]
+    fn integrity_respects_small_byte_budget() {
+        let me = open(std::process::id()).unwrap();
+        let r = me.image_integrity(Instant::now() + Duration::from_secs(60), 1);
+        assert!(r.bytes <= 1, "byte budget exceeded: {}", r.bytes);
+        assert_eq!(r.stopped.as_deref(), Some("byte cap reached"));
+    }
 
     #[test]
     fn parses_mappings_with_offset_and_inode() {

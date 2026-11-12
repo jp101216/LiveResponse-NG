@@ -112,6 +112,33 @@ func TestDispatcherKeepsPartialResultsOnTimeout(t *testing.T) {
 	}
 }
 
+func TestDispatcherReportsCancellationWithoutCollectorError(t *testing.T) {
+	for _, mode := range []string{"timeout", "parent_cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			partial := fakeCollector{"partial", func(ctx context.Context) (Result, error) {
+				r := NewResult("partial")
+				r.Add(map[string]any{"kept": true})
+				if mode == "parent_cancel" {
+					cancel()
+				}
+				<-ctx.Done()
+				return r.Finish(), nil // several real collectors return partial data this way
+			}}
+			var progress Result
+			res := (&Dispatcher{Timeout: 20 * time.Millisecond, OnResult: func(r Result) { progress = r }}).
+				Run(ctx, []Collector{partial})[0]
+			if len(res.Records) != 1 || len(res.Errors) == 0 || res.Meta["partial"] != true {
+				t.Fatalf("interrupted evidence presented as complete: %+v", res)
+			}
+			if !strings.Contains(strings.Join(res.Errors, " "), "context ") || len(progress.Errors) == 0 {
+				t.Fatalf("cancellation missing from report or console progress: %+v / %+v", res, progress)
+			}
+		})
+	}
+}
+
 // ---- TCP table parsing ------------------------------------------------
 
 func tcp4Row(state uint32, local [4]byte, lport uint16, remote [4]byte, rport uint16, pid uint32) []byte {

@@ -65,21 +65,24 @@ func (h *Hive) cell(off uint32) ([]byte, error) {
 	if off == hiveCellNil {
 		return nil, errors.New("hive: nil cell offset")
 	}
-	start := hiveBaseBlock + int(off)
-	if start < hiveBaseBlock || start+4 > len(h.data) {
+	// Keep hostile offsets and sizes wide until they are proven to fit.
+	// Adding either one as int can wrap on the 32-bit agent.
+	start64 := int64(hiveBaseBlock) + int64(off)
+	if start64+4 > int64(len(h.data)) {
 		return nil, fmt.Errorf("hive: cell offset 0x%x out of range", off)
 	}
-	size := int32(binary.LittleEndian.Uint32(h.data[start : start+4]))
+	start := int(start64)
+	size := int64(int32(binary.LittleEndian.Uint32(h.data[start : start+4])))
 	if size < 0 {
 		size = -size // negative size marks an allocated (in-use) cell
 	}
 	if size < 4 {
 		return nil, fmt.Errorf("hive: cell 0x%x has bad size %d", off, size)
 	}
-	end := start + int(size)
-	if end > len(h.data) {
+	if size > int64(len(h.data)-start) {
 		return nil, fmt.Errorf("hive: cell 0x%x runs past the file", off)
 	}
+	end := start + int(size)
 	return h.data[start+4 : end], nil
 }
 
@@ -151,7 +154,7 @@ func (k *HiveKey) SubKeys() ([]*HiveKey, error) {
 		return nil, nil
 	}
 	var offs []uint32
-	if err := k.h.subkeyOffsets(k.subkeyListOff, &offs, 0); err != nil {
+	if err := k.h.subkeyOffsets(k.subkeyListOff, &offs, 0, map[uint32]bool{}); err != nil {
 		return nil, err
 	}
 	out := make([]*HiveKey, 0, len(offs))
@@ -163,10 +166,16 @@ func (k *HiveKey) SubKeys() ([]*HiveKey, error) {
 	return out, nil
 }
 
-func (h *Hive) subkeyOffsets(listOff uint32, out *[]uint32, depth int) error {
+func (h *Hive) subkeyOffsets(listOff uint32, out *[]uint32, depth int, seen map[uint32]bool) error {
 	if depth > hiveMaxDepth {
 		return errors.New("hive: subkey list nested too deep")
 	}
+	// A depth cap alone still permits exponential work when an ri list
+	// repeatedly references the same nested list. Visit every cell once.
+	if seen[listOff] || len(seen) >= hiveMaxList || len(*out) > hiveMaxList {
+		return errors.New("hive: repeated subkey list or traversal limit reached")
+	}
+	seen[listOff] = true
 	c, err := h.cell(listOff)
 	if err != nil {
 		return err
@@ -197,7 +206,7 @@ func (h *Hive) subkeyOffsets(listOff uint32, out *[]uint32, depth int) error {
 		}
 		for i := 0; i < count; i++ {
 			sub := binary.LittleEndian.Uint32(c[4+i*4 : 8+i*4])
-			if err := h.subkeyOffsets(sub, out, depth+1); err != nil {
+			if err := h.subkeyOffsets(sub, out, depth+1, seen); err != nil {
 				continue // skip a bad branch, keep the rest
 			}
 		}
@@ -317,7 +326,9 @@ func (h *Hive) value(off uint32) (Value, error) {
 }
 
 func (h *Hive) readBigData(db []byte, total int) []byte {
-	if len(db) < 8 {
+	// Registry data is not compressed: a value cannot exceed the whole hive.
+	// Reject impossible lengths before allocating from an untrusted size.
+	if len(db) < 8 || total <= 0 || total > len(h.data) {
 		return nil
 	}
 	count := int(binary.LittleEndian.Uint16(db[2:4]))
@@ -325,7 +336,7 @@ func (h *Hive) readBigData(db []byte, total int) []byte {
 	if err != nil {
 		return nil
 	}
-	buf := make([]byte, 0, total)
+	buf := make([]byte, 0, min(total, count*hiveBigDataMax))
 	for i := 0; i < count && i*4+4 <= len(lc); i++ {
 		seg, err := h.cell(binary.LittleEndian.Uint32(lc[i*4 : i*4+4]))
 		if err != nil {
@@ -335,6 +346,7 @@ func (h *Hive) readBigData(db []byte, total int) []byte {
 		if take > hiveBigDataMax {
 			take = hiveBigDataMax
 		}
+		take = min(take, total-len(buf))
 		buf = append(buf, seg[:take]...)
 		if len(buf) >= total {
 			break

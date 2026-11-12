@@ -291,14 +291,39 @@ pub(super) fn read_image_file(path: &str) -> std::io::Result<Vec<u8>> {
     } else {
         path.to_string()
     };
-    let mut f = std::fs::File::open(open)?;
+    let f = std::fs::File::open(open)?;
     let size = f.metadata()?.len();
-    if size > MAX_IMAGE_FILE {
+    read_image_limited(f, size, MAX_IMAGE_FILE)
+}
+
+// A metadata size check alone does not bound a file that grows while read.
+fn read_image_limited(reader: impl Read, size: u64, limit: u64) -> std::io::Result<Vec<u8>> {
+    if size > limit {
         return Err(std::io::Error::other("image file too large to compare"));
     }
     let mut data = Vec::with_capacity(size as usize);
-    f.read_to_end(&mut data)?;
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut data)?;
+    if data.len() as u64 > limit {
+        return Err(std::io::Error::other(
+            "image file grew past comparison limit",
+        ));
+    }
     Ok(data)
+}
+
+#[cfg(test)]
+mod image_file_tests {
+    use super::*;
+
+    #[test]
+    fn growing_image_cannot_bypass_byte_limit() {
+        let reader = std::io::repeat(0).take(65);
+        assert!(read_image_limited(reader, 2, 64).is_err());
+        let data = read_image_limited(std::io::Cursor::new(b"image"), 2, 64).unwrap();
+        assert_eq!(data, b"image");
+    }
 }
 
 /// NT device names (\Device\HarddiskVolume3) and the drive letters (C:) they

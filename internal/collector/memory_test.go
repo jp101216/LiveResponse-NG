@@ -64,6 +64,10 @@ func TestSelectMemoryTargets(t *testing.T) {
 	if len(skipped) != 1 || skipped[0].proc.PID != 999 || skipped[0].reason != "no such process" {
 		t.Fatalf("skipped %+v", skipped)
 	}
+	records, counts, _ := memoryRecords(nil, skipped, nil)
+	if records[0].Fields["status"] != "not_found" || counts["not_found"] != 1 || counts["skipped"] != 0 {
+		t.Fatalf("missing requested PID treated as an intentional exclusion: %+v / %+v", records, counts)
+	}
 }
 
 func TestMemoryRecordsCoverEveryProcess(t *testing.T) {

@@ -165,8 +165,9 @@ func TestJournalHostileInput(t *testing.T) {
 			x ^= x >> 17
 			x ^= x << 5
 			b := append([]byte(nil), good...)
-			b[int(x)%len(b)] = byte(x >> 8)
-			b[int(x>>11)%len(b)] = 0xFF
+			// Reduce in uint32: int(x) is negative on 32-bit builds.
+			b[x%uint32(len(b))] = byte(x >> 8)
+			b[(x>>11)%uint32(len(b))] = 0xFF
 			walk(b)
 		}
 	}

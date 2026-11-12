@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.18.0
+
+Detection-accuracy release: indicator export, the Sigma engine and the adaptive
+follow-up pass. Rules using several Sigma modifiers that were previously skipped
+now load. Updates YARA-X to 1.23; building the sidecar requires Rust 1.95+.
+Report schema remains 1.2.
+
 ### Fixed
 
 - Update YARA-X to 1.23 and refresh its locked dependencies for upstream parser,

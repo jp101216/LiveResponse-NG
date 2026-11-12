@@ -88,7 +88,8 @@ func directoryAccessFindings(ev winEvent) []Finding {
 
 // directoryInfrastructure reports whether the subject of a directory event
 // is a party that replicates or acts as the directory itself: a computer
-// account (domain controllers replicate as their NAME$), the system, the
+// account (domain controllers replicate as their NAME$; which machine
+// accounts aren't DCs is worked out over the run by machineReplTracker), the system, the
 // Window Manager virtual accounts, or Azure AD Connect's MSOL_ connector
 // account, which replicates password hashes to Entra ID by design.
 func directoryInfrastructure(ev winEvent) bool {
@@ -903,23 +904,31 @@ func certTemplateFindings(ev winEvent) []Finding {
 }
 
 // Kerberoasting shows in a domain controller's log as one account asking,
-// within minutes, for RC4-encrypted service tickets to many services that run
-// as user accounts: each ticket is encrypted with that account's password
-// hash and cracks offline. One RC4 ticket proves nothing — domains that still
-// allow RC4 issue them all day — so the tracker counts distinct services per
-// account and client address in a sliding window, across the whole log.
+// within minutes, for service tickets to many services that run as user
+// accounts: each ticket is encrypted with that account's password hash and
+// cracks offline. One ticket proves nothing, so the tracker counts distinct
+// services per account and client address in a sliding window, across the
+// whole log. RC4 tickets are what roasting tools ask for (they crack fastest),
+// and a burst of four is enough. Where RC4 is switched off, roasting asks for
+// AES tickets (Rubeus kerberoast /aes, or any tool in an AES-only domain);
+// those are what every client gets every day, so only a much bigger burst
+// counts, at lower severity.
 const (
 	kerberoastWindow       = 15 * time.Minute
-	kerberoastMin          = 4  // distinct services within the window to report
+	kerberoastMin          = 4  // distinct services (RC4) within the window to report
 	kerberoastCritical     = 10 // … to report as critical
+	kerberoastAESMin       = 12 // distinct services (any etype) to report an AES burst
+	kerberoastAESSuspect   = 25 // … to report it as suspect
 	kerberoastMaxPerClient = 20000
 	kerberoastMaxClients   = 20000
+	kerberoastMaxTickets   = 2000000 // across all clients
 	kerberoastListMax      = 50
 )
 
 type roastTicket struct {
 	when    time.Time
 	service string
+	rc4     bool
 }
 
 type roastClient struct {
@@ -927,33 +936,52 @@ type roastClient struct {
 	tickets          []roastTicket
 }
 
-// kerberoastTracker gathers RC4 service-ticket requests (4769) over a run.
+// kerberoastTracker gathers service-ticket requests (4769) over a run.
 type kerberoastTracker struct {
 	clients map[string]*roastClient
 	names   map[string]string // service names, interned
+	total   int
 }
 
 func newKerberoastTracker() *kerberoastTracker {
 	return &kerberoastTracker{clients: map[string]*roastClient{}, names: map[string]string{}}
 }
 
-// roastable reports whether a 4769 is a successful RC4 ticket, requested by a
-// user, for a service that runs as a user account (not krbtgt, not a
-// computer's NAME$).
-func roastable(ev winEvent) bool {
-	if ev.EventID != 4769 || !kerberosOK(evData(ev, "Status")) || !rc4(evData(ev, "TicketEncryptionType")) {
-		return false
+// roastable reports whether a 4769 is a successful RC4 or AES ticket,
+// requested by a user, for a service that runs as a user account (not
+// krbtgt, not a computer's NAME$), and whether it is RC4.
+func roastable(ev winEvent) (ok, isRC4 bool) {
+	if ev.EventID != 4769 || !builtinProviderMatches(ev) || !kerberosOK(evData(ev, "Status")) {
+		return false, false
+	}
+	etype := evData(ev, "TicketEncryptionType")
+	isRC4 = rc4(etype)
+	if !isRC4 && !aes(etype) {
+		return false, false
 	}
 	svc := strings.ToLower(strings.TrimSpace(evData(ev, "ServiceName")))
 	if svc == "" || svc == "krbtgt" || strings.HasSuffix(svc, "$") {
-		return false
+		return false, false
 	}
-	return !strings.Contains(evData(ev, "TargetUserName"), "$@")
+	return !strings.Contains(evData(ev, "TargetUserName"), "$@"), isRC4
+}
+
+// aes reports whether a ticket encryption type is AES (0x11, 0x12).
+func aes(etype string) bool {
+	switch parseMask(etype) {
+	case 0x11, 0x12:
+		return true
+	}
+	return false
 }
 
 // observe folds one event in.
 func (t *kerberoastTracker) observe(ev winEvent) {
-	if t == nil || ev.EventID != 4769 || ev.TimeCreated.IsZero() || !roastable(ev) {
+	if t == nil || ev.EventID != 4769 || ev.TimeCreated.IsZero() || t.total >= kerberoastMaxTickets {
+		return
+	}
+	ok, isRC4 := roastable(ev)
+	if !ok {
 		return
 	}
 	account := strings.TrimSpace(evData(ev, "TargetUserName"))
@@ -977,11 +1005,40 @@ func (t *kerberoastTracker) observe(ev winEvent) {
 	} else {
 		t.names[low] = svc
 	}
-	c.tickets = append(c.tickets, roastTicket{when: ev.TimeCreated, service: svc})
+	c.tickets = append(c.tickets, roastTicket{when: ev.TimeCreated, service: svc, rc4: isRC4})
+	t.total++
+}
+
+// busiestWindow finds the kerberoastWindow-long stretch of tickets (sorted by
+// time, those keep() accepts) holding the most distinct services: their
+// count, and the first and last ticket of the stretch.
+func busiestWindow(tickets []roastTicket, keep func(roastTicket) bool) (best, bi, bj int) {
+	var sel []int
+	for i, tk := range tickets {
+		if keep(tk) {
+			sel = append(sel, i)
+		}
+	}
+	counts := map[string]int{}
+	for i, j := 0, 0; j < len(sel); j++ {
+		counts[strings.ToLower(tickets[sel[j]].service)]++
+		for tickets[sel[j]].when.Sub(tickets[sel[i]].when) > kerberoastWindow {
+			s := strings.ToLower(tickets[sel[i]].service)
+			if counts[s]--; counts[s] == 0 {
+				delete(counts, s)
+			}
+			i++
+		}
+		if len(counts) > best {
+			best, bi, bj = len(counts), sel[i], sel[j]
+		}
+	}
+	return best, bi, bj
 }
 
 // flush reports each account and address whose busiest window held enough
-// distinct services, as one synthetic record.
+// distinct services — RC4 tickets first; failing that, a bigger burst of any
+// tickets — as one synthetic record.
 func (t *kerberoastTracker) flush() []Record {
 	if t == nil {
 		return nil
@@ -995,27 +1052,24 @@ func (t *kerberoastTracker) flush() []Record {
 	for _, k := range keys {
 		c := t.clients[k]
 		sort.SliceStable(c.tickets, func(i, j int) bool { return c.tickets[i].when.Before(c.tickets[j].when) })
-		counts := map[string]int{}
-		best, bi, bj := 0, 0, 0
-		for i, j := 0, 0; j < len(c.tickets); j++ {
-			counts[strings.ToLower(c.tickets[j].service)]++
-			for c.tickets[j].when.Sub(c.tickets[i].when) > kerberoastWindow {
-				s := strings.ToLower(c.tickets[i].service)
-				if counts[s]--; counts[s] == 0 {
-					delete(counts, s)
-				}
-				i++
-			}
-			if len(counts) > best {
-				best, bi, bj = len(counts), i, j
-			}
-		}
+		onlyRC4 := func(tk roastTicket) bool { return tk.rc4 }
+		best, bi, bj := busiestWindow(c.tickets, onlyRC4)
+		encryption := "RC4"
 		if best < kerberoastMin {
-			continue
+			best, bi, bj = busiestWindow(c.tickets, func(roastTicket) bool { return true })
+			encryption = "AES"
+			if best < kerberoastAESMin {
+				continue
+			}
 		}
 		var services []string
 		seen := map[string]bool{}
+		tickets := 0
 		for _, tk := range c.tickets[bi : bj+1] {
+			if encryption == "RC4" && !tk.rc4 {
+				continue
+			}
+			tickets++
 			if low := strings.ToLower(tk.service); !seen[low] {
 				seen[low] = true
 				services = append(services, tk.service)
@@ -1028,28 +1082,215 @@ func (t *kerberoastTracker) flush() []Record {
 		}
 		first, last := c.tickets[bi].when.UTC(), c.tickets[bj].when.UTC()
 		addr := firstNonEmpty(c.address, "an unrecorded address")
-		f := Finding{Rule: "cred.kerberoasting", Severity: SevSuspect, Technique: "T1558.003", Confidence: 70,
-			Detail: fmt.Sprintf("%s (from %s) asked for RC4-encrypted tickets to %d different services that run as user accounts "+
-				"between %s and %s: each ticket cracks offline to its service account's password, and a burst of them is "+
-				"Kerberoasting (Rubeus kerberoast, Impacket GetUserSPNs). Services: %s", c.account, addr, best,
-				first.Format(time.RFC3339), last.Format(time.RFC3339), strings.Join(listed, ", "))}
-		if best >= kerberoastCritical {
-			f.Severity, f.Confidence = SevCritical, 80
+		var f Finding
+		if encryption == "RC4" {
+			f = Finding{Rule: "cred.kerberoasting", Severity: SevSuspect, Technique: "T1558.003", Confidence: 70,
+				Detail: fmt.Sprintf("%s (from %s) asked for RC4-encrypted tickets to %d different services that run as user accounts "+
+					"between %s and %s: each ticket cracks offline to its service account's password, and a burst of them is "+
+					"Kerberoasting (Rubeus kerberoast, Impacket GetUserSPNs). Services: %s", c.account, addr, best,
+					first.Format(time.RFC3339), last.Format(time.RFC3339), strings.Join(listed, ", "))}
+			if best >= kerberoastCritical {
+				f.Severity, f.Confidence = SevCritical, 80
+			}
+		} else {
+			f = Finding{Rule: "cred.kerberoasting", Severity: SevNotable, Technique: "T1558.003", Confidence: 45,
+				Detail: fmt.Sprintf("%s (from %s) asked for tickets to %d different services that run as user accounts between %s "+
+					"and %s, AES-encrypted. Clients get AES tickets all day, but rarely to this many service accounts in minutes: "+
+					"where RC4 is switched off, this is what Kerberoasting looks like (Rubeus kerberoast /aes, Impacket "+
+					"GetUserSPNs in an AES-only domain); the tickets crack offline, more slowly. Services: %s", c.account, addr, best,
+					first.Format(time.RFC3339), last.Format(time.RFC3339), strings.Join(listed, ", "))}
+			if best >= kerberoastAESSuspect {
+				f.Severity, f.Confidence = SevSuspect, 60
+			}
 		}
 		out = append(out, Record{
 			Fields: map[string]any{
 				"aggregation":    "kerberoasting",
+				"encryption":     encryption,
 				"account":        c.account,
 				"client_address": c.address,
 				"services":       listed,
 				"service_count":  best,
-				"tickets":        bj - bi + 1,
+				"tickets":        tickets,
 				"time_created":   first,
 				"last":           last,
 				"window":         kerberoastWindow.String(),
 			},
 			Findings: []Finding{f},
 		})
+	}
+	return out
+}
+
+// DCSync with a machine account. Domain controllers replicate as their
+// computer accounts (NAME$), so a 4662 replication check by a NAME$ is
+// normally another DC pulling changes; and it is just what DCSync looks like
+// when it runs as a machine account: a relayed domain controller's or
+// Exchange server's account, a computer someone granted replication rights,
+// a silver ticket. A log doesn't say which computers are DCs, so the tracker
+// learns it from the logs themselves: a computer that wrote a KDC event
+// (4768-4771) or a directory-service access check (4662) is one. At the end
+// of the run, each machine account that used the password-returning rights
+// and never showed up as a DC is reported once: suspect when the logs came
+// from two or more DCs and it is none of them, notable when they came from
+// one (it may be a DC whose logs aren't here, so check it against the
+// Domain Controllers OU).
+const machineReplMax = 5000
+
+type machineRepl struct {
+	account, domain string
+	rights          map[string]bool
+	loggedBy        map[string]bool
+	first, last     time.Time
+	count           int
+}
+
+type machineReplTracker struct {
+	dcs      map[string]string // short upper-case name -> as logged
+	accounts map[string]*machineRepl
+}
+
+func newMachineReplTracker() *machineReplTracker {
+	return &machineReplTracker{dcs: map[string]string{}, accounts: map[string]*machineRepl{}}
+}
+
+// shortHost upper-cases a computer name to its NetBIOS form, the first label
+// cut to 15 characters: "dc01.corp.local" and the account "DC01$" both
+// become "DC01".
+func shortHost(s string) string {
+	s = strings.TrimSuffix(strings.TrimSpace(s), "$")
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 15 {
+		s = s[:15]
+	}
+	return strings.ToUpper(s)
+}
+
+func (t *machineReplTracker) observe(ev winEvent) {
+	if t == nil || !builtinProviderMatches(ev) {
+		return
+	}
+	switch ev.EventID {
+	case 4768, 4769, 4770, 4771, 4662:
+	default:
+		return
+	}
+	host := shortHost(ev.Computer)
+	if os := evData(ev, "ObjectServer"); ev.EventID == 4662 && os != "" && !strings.EqualFold(os, "DS") {
+		host = "" // an access check by another object server: not a directory
+	}
+	if host != "" && len(t.dcs) < machineReplMax {
+		if _, ok := t.dcs[host]; !ok {
+			t.dcs[host] = strings.TrimSpace(ev.Computer)
+		}
+	}
+	if ev.EventID != 4662 {
+		return
+	}
+	user := strings.TrimSpace(evData(ev, "SubjectUserName"))
+	if !strings.HasSuffix(user, "$") || len(user) < 2 {
+		return
+	}
+	switch evData(ev, "SubjectUserSid") {
+	case "S-1-5-18", "S-1-5-19", "S-1-5-20":
+		return
+	}
+	props := strings.ToLower(evData(ev, "Properties"))
+	var rights []string
+	for _, r := range replicationRights {
+		if r.secrets && strings.Contains(props, r.guid) {
+			rights = append(rights, r.name)
+		}
+	}
+	if len(rights) == 0 {
+		return
+	}
+	key := strings.ToUpper(evData(ev, "SubjectDomainName")) + "\\" + strings.ToUpper(user)
+	m := t.accounts[key]
+	if m == nil {
+		if len(t.accounts) >= machineReplMax {
+			return
+		}
+		m = &machineRepl{account: user, domain: evData(ev, "SubjectDomainName"), rights: map[string]bool{}, loggedBy: map[string]bool{}}
+		t.accounts[key] = m
+	}
+	for _, r := range rights {
+		m.rights[r] = true
+	}
+	if ev.Computer != "" && len(m.loggedBy) < 64 {
+		m.loggedBy[strings.TrimSpace(ev.Computer)] = true
+	}
+	if !ev.TimeCreated.IsZero() {
+		if m.first.IsZero() || ev.TimeCreated.Before(m.first) {
+			m.first = ev.TimeCreated
+		}
+		if ev.TimeCreated.After(m.last) {
+			m.last = ev.TimeCreated
+		}
+	}
+	m.count++
+}
+
+func (t *machineReplTracker) flush() []Record {
+	if t == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(t.accounts))
+	for k := range t.accounts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	dcNames := make([]string, 0, len(t.dcs))
+	for _, n := range t.dcs {
+		dcNames = append(dcNames, n)
+	}
+	sort.Strings(dcNames)
+	var out []Record
+	for _, k := range keys {
+		m := t.accounts[k]
+		if _, isDC := t.dcs[shortHost(m.account)]; isDC {
+			continue
+		}
+		who := m.account
+		if m.domain != "" {
+			who = m.domain + "\\" + m.account
+		}
+		rights := sortedKeys(m.rights)
+		logged := sortedKeys(m.loggedBy)
+		when := ""
+		if !m.first.IsZero() {
+			when = fmt.Sprintf(" between %s and %s", m.first.UTC().Format(time.RFC3339), m.last.UTC().Format(time.RFC3339))
+		}
+		f := Finding{Rule: "cred.dcsync_machine_account", Severity: SevNotable, Technique: "T1003.006", Confidence: 45,
+			Detail: fmt.Sprintf("the computer account %s used %s on the domain %d time(s)%s (logged by %s). Domain controllers "+
+				"replicate as their computer accounts, but %s never showed up in these logs as a domain controller; if it isn't one "+
+				"(check the Domain Controllers OU), this is DCSync run as a machine account — a relayed DC or Exchange server, a "+
+				"computer granted replication rights, a forged ticket — and every password hash, krbtgt's included, is out",
+				who, strings.Join(rights, " and "), m.count, when, firstNonEmpty(strings.Join(logged, ", "), "an unrecorded computer"),
+				shortHost(m.account))}
+		if len(t.dcs) >= 2 {
+			listed := dcNames
+			if len(listed) > 20 {
+				listed = append(append([]string(nil), listed[:20]...), fmt.Sprintf("… and %d more", len(dcNames)-20))
+			}
+			f.Severity, f.Confidence = SevSuspect, 60
+			f.Detail += fmt.Sprintf(". These logs came from %d domain controllers (%s), and it is none of them", len(t.dcs), strings.Join(listed, ", "))
+		}
+		fields := map[string]any{
+			"aggregation": "machine_replication",
+			"account":     who,
+			"rights":      rights,
+			"count":       m.count,
+			"logged_by":   logged,
+			"known_dcs":   dcNames,
+		}
+		if !m.first.IsZero() {
+			fields["time_created"] = m.first.UTC()
+			fields["last"] = m.last.UTC()
+		}
+		out = append(out, Record{Fields: fields, Findings: []Finding{f}})
 	}
 	return out
 }

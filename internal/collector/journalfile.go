@@ -13,9 +13,12 @@ import (
 // written files as well as archived ones, and stops at the first object that
 // doesn't fit. Both entry layouts are handled — regular, and the compact one
 // systemd 252+ writes by default — and DATA payloads compressed with LZ4 are
-// decoded here; zstd (the modern default) and XZ payloads are counted as
+// and zstd (the modern default) are decoded here; XZ payloads are counted as
 // undecoded rather than guessed at. journald only compresses payloads above a
 // threshold (512 bytes by default), so ordinary log fields read in full.
+// Decompression is bounded per field (journalMaxPayload) and per file
+// (journalInflateBudget): a crafted file of tiny zstd frames that each expand
+// to megabytes can't make the reader balloon.
 // No build tag: pure parsing, unit-tested on any OS.
 
 const (
@@ -29,6 +32,7 @@ const (
 	journalCompressZstd    = 1 << 2
 	journalIncompatCompact = 1 << 4 // header incompatible_flags
 	journalMaxPayload      = 16 << 20
+	journalInflateBudget   = 128 << 20 // decompressed bytes per file
 	journalDataCacheMax    = 1 << 18
 )
 
@@ -46,8 +50,9 @@ type journalFile struct {
 
 	cache map[uint64]journalField
 	// Counters over everything read.
-	undecoded int // DATA payloads compressed with zstd/XZ, or undecodable
-	badRefs   int // entry items that don't point at a valid DATA object
+	undecoded   int // DATA payloads compressed with XZ, or undecodable
+	inflateLeft int // decompressed bytes still allowed (journalInflateBudget)
+	badRefs     int // entry items that don't point at a valid DATA object
 }
 
 // journalField is one decoded DATA payload.
@@ -96,7 +101,7 @@ func openJournal(data []byte) (*journalFile, error) {
 	if len(data) < journalMinHeader || string(data[:8]) != journalSignature {
 		return nil, errors.New("not a journal file (bad signature)")
 	}
-	j := &journalFile{data: data, cache: map[uint64]journalField{}}
+	j := &journalFile{data: data, cache: map[uint64]journalField{}, inflateLeft: journalInflateBudget}
 	j.incompat, _ = le32(data, 12)
 	j.compact = j.incompat&journalIncompatCompact != 0
 	j.state = data[16]
@@ -197,13 +202,24 @@ func (j *journalFile) readData(off uint64) (journalField, bool) {
 	payload := j.data[off+payloadAt : off+size]
 	var f journalField
 	switch flags := j.data[off+1]; {
-	case flags&journalCompressLZ4 != 0:
-		if raw, err := journalLZ4(payload); err == nil {
+	case flags&(journalCompressLZ4|journalCompressZstd) != 0:
+		var raw []byte
+		err := errZstdTooBig
+		if room := min(journalMaxPayload, j.inflateLeft); room > 0 {
+			if flags&journalCompressLZ4 != 0 {
+				raw, err = journalLZ4(payload, room)
+			} else {
+				raw, err = zstdDecompress(payload, room)
+			}
+		}
+		if err == nil {
+			j.inflateLeft -= len(raw)
 			f = splitJournalField(raw)
 		} else {
 			j.undecoded++
+			f.name = fieldNameGuess(flags)
 		}
-	case flags&(journalCompressZstd|journalCompressXZ) != 0:
+	case flags&journalCompressXZ != 0:
 		j.undecoded++
 		f.name = fieldNameGuess(flags)
 	default:
@@ -216,8 +232,11 @@ func (j *journalFile) readData(off uint64) (journalField, bool) {
 }
 
 func fieldNameGuess(flags byte) string {
-	if flags&journalCompressZstd != 0 {
+	switch {
+	case flags&journalCompressZstd != 0:
 		return "(zstd-compressed field)"
+	case flags&journalCompressLZ4 != 0:
+		return "(lz4-compressed field)"
 	}
 	return "(xz-compressed field)"
 }
@@ -232,13 +251,13 @@ func splitJournalField(b []byte) journalField {
 }
 
 // journalLZ4 decodes journald's LZ4 payload: the uncompressed size as a
-// little-endian 64-bit integer, then one LZ4 block.
-func journalLZ4(p []byte) ([]byte, error) {
+// little-endian 64-bit integer, then one LZ4 block of at most max bytes.
+func journalLZ4(p []byte, max int) ([]byte, error) {
 	if len(p) < 8 {
 		return nil, errors.New("lz4: short payload")
 	}
 	n := binary.LittleEndian.Uint64(p)
-	if n > journalMaxPayload {
+	if n > uint64(max) {
 		return nil, errors.New("lz4: implausible size")
 	}
 	return lz4Block(p[8:], int(n))

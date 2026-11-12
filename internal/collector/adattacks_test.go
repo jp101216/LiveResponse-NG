@@ -392,3 +392,121 @@ func TestKerberoastingOffline(t *testing.T) {
 		t.Errorf("want only the aggregate record, got %d", len(res.Records))
 	}
 }
+
+func TestKerberoastingWithAES(t *testing.T) {
+	base := time.Date(2026, 10, 30, 3, 0, 0, 0, time.UTC)
+	tgs := func(at time.Duration, account, service, etype string) winEvent {
+		ev := dcEvent(4769, "TargetUserName", account, "ServiceName", service, "IpAddress", "::ffff:10.0.0.5",
+			"Status", "0x0", "TicketEncryptionType", etype)
+		ev.TimeCreated = base.Add(at)
+		return ev
+	}
+	tr := newKerberoastTracker()
+	for i := 0; i < 30; i++ { // thirty AES tickets in five minutes
+		tr.observe(tgs(time.Duration(i)*10*time.Second, "jdoe@CORP.LOCAL", "svc_"+itoa(i), "0x12"))
+	}
+	for i := 0; i < 13; i++ { // thirteen, mixed AES-128/256: notable
+		tr.observe(tgs(time.Duration(i)*time.Minute, "amy@CORP.LOCAL", "svc_"+itoa(i), []string{"0x11", "0x12"}[i%2]))
+	}
+	for i := 0; i < 11; i++ { // eleven: below the AES bar
+		tr.observe(tgs(time.Duration(i)*time.Minute, "bob@CORP.LOCAL", "svc_"+itoa(i), "0x12"))
+	}
+	for i := 0; i < 20; i++ { // twenty, but over hours
+		tr.observe(tgs(time.Duration(i)*20*time.Minute, "carl@CORP.LOCAL", "svc_"+itoa(i), "0x12"))
+	}
+	for i := 0; i < 15; i++ { // RC4 and AES mixed: the five RC4 decide it
+		etype := "0x12"
+		if i < 5 {
+			etype = "0x17"
+		}
+		tr.observe(tgs(time.Duration(i)*time.Second, "eve@CORP.LOCAL", "svc_"+itoa(i), etype))
+	}
+	spoofed := tgs(0, "zed@CORP.LOCAL", "svc_1", "0x17")
+	spoofed.Provider = "SomeApp"
+	tr.observe(spoofed)
+	recs := tr.flush()
+	if len(recs) != 3 {
+		t.Fatalf("records: %+v", recs)
+	}
+	amy, eve, jdoe := recs[0], recs[1], recs[2]
+	if amy.Fields["encryption"] != "AES" || amy.Findings[0].Severity != SevNotable || amy.Fields["service_count"] != 13 {
+		t.Errorf("amy: %+v %+v", amy.Fields, amy.Findings)
+	}
+	if eve.Fields["encryption"] != "RC4" || eve.Findings[0].Severity != SevSuspect || eve.Fields["service_count"] != 5 || eve.Fields["tickets"] != 5 {
+		t.Errorf("eve: %+v %+v", eve.Fields, eve.Findings)
+	}
+	if jdoe.Fields["encryption"] != "AES" || jdoe.Findings[0].Severity != SevSuspect || jdoe.Fields["service_count"] != 30 ||
+		!strings.Contains(jdoe.Findings[0].Detail, "AES-encrypted") {
+		t.Errorf("jdoe: %+v %+v", jdoe.Fields, jdoe.Findings)
+	}
+}
+
+func TestDCSyncByMachineAccount(t *testing.T) {
+	props := "%%7688 {1131f6ad-9c07-11d1-f79f-00c04fc2dcd2} {19195a5b-6da0-11d0-afd3-00c04fd930c9}"
+	repl := func(computer, account string) winEvent {
+		ev := dcEvent(4662, "SubjectUserName", account, "SubjectDomainName", "CORP", "SubjectUserSid", "S-1-5-21-1-2-3-1000",
+			"ObjectServer", "DS", "Properties", props)
+		ev.Computer = computer
+		return ev
+	}
+	kdc := func(computer string) winEvent {
+		ev := dcEvent(4769, "TargetUserName", "x@CORP", "ServiceName", "svc", "Status", "0x0", "TicketEncryptionType", "0x12")
+		ev.Computer = computer
+		return ev
+	}
+
+	// One DC's log: DC02 replicates from it, so does WS17. Neither is known.
+	tr := newMachineReplTracker()
+	tr.observe(repl("DC01.corp.local", "DC02$"))
+	tr.observe(repl("DC01.corp.local", "WS17$"))
+	tr.observe(repl("DC01.corp.local", "WS17$"))
+	tr.observe(repl("DC01.corp.local", "DC01$")) // the DC itself
+	getChanges := repl("DC01.corp.local", "SYNC01$")
+	getChanges.Data["Properties"] = "%%7688 {1131f6aa-9c07-11d1-f79f-00c04fc2dcd2}"
+	tr.observe(getChanges) // Get-Changes alone returns no secrets
+	recs := tr.flush()
+	if len(recs) != 2 || recs[0].Fields["account"] != `CORP\DC02$` || recs[1].Fields["account"] != `CORP\WS17$` ||
+		recs[1].Fields["count"] != 2 || recs[1].Findings[0].Severity != SevNotable || recs[1].Findings[0].Rule != "cred.dcsync_machine_account" {
+		t.Fatalf("one DC's log: %+v", recs)
+	}
+
+	// Two DCs' logs: DC02 shows up as a DC; WS17 doesn't, and is suspect.
+	tr = newMachineReplTracker()
+	tr.observe(repl("DC01.corp.local", "DC02$"))
+	tr.observe(repl("DC01.corp.local", "WS17$"))
+	tr.observe(kdc("DC02.corp.local"))
+	recs = tr.flush()
+	if len(recs) != 1 || recs[0].Fields["account"] != `CORP\WS17$` || recs[0].Findings[0].Severity != SevSuspect ||
+		!strings.Contains(recs[0].Findings[0].Detail, "DC01.corp.local, DC02.corp.local") {
+		t.Fatalf("two DCs' logs: %+v", recs)
+	}
+
+	// A long DNS name: the account carries its 15-character NetBIOS name.
+	tr = newMachineReplTracker()
+	tr.observe(kdc("VERYLONGDCNAME01.corp.local"))
+	tr.observe(repl("DC01.corp.local", "VERYLONGDCNAME0$"))
+	if recs := tr.flush(); len(recs) != 0 {
+		t.Fatalf("NetBIOS-truncated DC: %+v", recs)
+	}
+
+	// The system, users (cred.dcsync's), other providers and object servers.
+	tr = newMachineReplTracker()
+	sys := repl("DC01.corp.local", "DC01$")
+	sys.Data["SubjectUserSid"] = "S-1-5-18"
+	tr.observe(sys)
+	tr.observe(repl("DC01.corp.local", "jdoe"))
+	spoof := repl("DC01.corp.local", "WS17$")
+	spoof.Provider = "SomeApp"
+	tr.observe(spoof)
+	other := kdc("FILESRV.corp.local")
+	other.EventID, other.Data["ObjectServer"] = 4662, "Security Account Manager"
+	tr.observe(other)
+	if recs := tr.flush(); len(recs) != 0 || len(tr.dcs) != 1 {
+		t.Fatalf("not machine replication: %+v (dcs %v)", recs, tr.dcs)
+	}
+	var nilTracker *machineReplTracker
+	nilTracker.observe(sys)
+	if nilTracker.flush() != nil {
+		t.Error("nil tracker")
+	}
+}

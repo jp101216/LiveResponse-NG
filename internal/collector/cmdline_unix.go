@@ -41,9 +41,15 @@ func analyzeUnixCommandLine(source, image, cmd string) []Finding {
 	downloader := containsWord(lc, "curl") || containsWord(lc, "wget") || containsWord(lc, "fetch")
 
 	// Fetch-and-run: a downloader piped into a shell/interpreter.
-	if downloader && pipesToShell(lc) {
+	switch {
+	case downloader && pipesToShell(lc):
 		add("exec.download_pipe_shell", SevSuspect, "T1059.004", 80,
 			"downloads and pipes straight into a shell — fetch-and-run, nothing lands on disk to inspect")
+	case downloader && runsDownloadedSubstitution(lc):
+		// The same fetch-and-run without a pipe: bash -c "$(curl …)",
+		// bash <(curl …), eval "$(wget -O- …)", source <(curl …).
+		add("exec.download_pipe_shell", SevSuspect, "T1059.004", 80,
+			"runs a download as code through command or process substitution — fetch-and-run, nothing lands on disk to inspect")
 	}
 
 	// Anti-forensics: wiping system logs, vacuuming the journal, clearing
@@ -113,6 +119,68 @@ func analyzeUnixCommandLine(source, image, cmd string) []Finding {
 	}
 
 	return out
+}
+
+// downloaders are the programs whose output is a fetched file.
+var downloaders = map[string]bool{"curl": true, "wget": true, "fetch": true}
+
+// substitutionRunners take their code from an argument or a file: a shell or
+// interpreter (with -c, or reading a <(…) file), and the shell builtins that
+// run text as commands.
+var substitutionRunners = map[string]bool{"eval": true, "source": true, ".": true}
+
+// runsDownloadedSubstitution reports whether a command line runs a download's
+// output as code without a pipe: a $(…), `…` or <(…) whose own program is a
+// downloader, handed to a shell, an interpreter, eval, source or "." — or
+// standing as the command itself. A download only assigned to a variable
+// (V=$(curl …)) or passed to another program is not.
+func runsDownloadedSubstitution(lc string) bool {
+	for i := 0; i < len(lc); i++ {
+		var inner string
+		switch {
+		case strings.HasPrefix(lc[i:], "$(") || strings.HasPrefix(lc[i:], "<("):
+			inner = substitutionBody(lc[i+2:])
+		case lc[i] == '`':
+			end := strings.IndexByte(lc[i+1:], '`')
+			if end < 0 {
+				return false
+			}
+			inner = lc[i+1 : i+1+end]
+		default:
+			continue
+		}
+		if !downloaders[pipelineProgram(inner)] {
+			continue
+		}
+		prefix := lc[:i]
+		if j := strings.LastIndexAny(prefix, ";&|\n"); j >= 0 {
+			prefix = prefix[j+1:]
+		}
+		if strings.Trim(prefix, " \t\"'(") == "" {
+			return true // the substitution is the command: its output runs
+		}
+		if outer := pipelineProgram(prefix); shellInterps[outer] || substitutionRunners[outer] {
+			return true
+		}
+	}
+	return false
+}
+
+// substitutionBody returns the text of a $(…) or <(…) up to its matching
+// parenthesis (or the end of the line, for an unterminated one).
+func substitutionBody(s string) string {
+	depth := 1
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth--; depth == 0 {
+				return s[:i]
+			}
+		}
+	}
+	return s
 }
 
 // cmdWrappers run another program and so may stand in front of the real

@@ -446,7 +446,7 @@ func scanJournald(ctx context.Context, root string) Result {
 	res.SetMeta("events", t.byKind)
 	if undecoded > 0 {
 		res.SetMeta("undecoded_fields", undecoded)
-		res.SetMeta("undecoded_note", "fields journald compressed with zstd or xz (only payloads over its threshold, 512 bytes by default) aren't decoded; journalctl shows them")
+		res.SetMeta("undecoded_note", "fields journald compressed with xz, or past the reader's size limits (16 MiB a field, 128 MiB a file), aren't decoded; journalctl shows them")
 	}
 	if !oldest.IsZero() {
 		res.SetMeta("covers_from", oldest)

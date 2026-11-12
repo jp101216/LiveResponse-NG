@@ -93,6 +93,7 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 	ranges := map[string]*channelRange{}
 	agg := sigma.newAggregator() // nil unless a Sigma rule has an aggregation or a "near"
 	roast := newKerberoastTracker()
+	machineRepl := newMachineReplTracker()
 	tunnels := newDNSTunnelTracker()
 	cancelled := false
 
@@ -143,7 +144,8 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 			}
 			trackChannelRange(ranges, ev) // every scanned record, for log-clear correlation
 			agg.observe(ev)               // feed Sigma aggregations and "near" rules (no-op if none)
-			roast.observe(ev)             // RC4 service tickets, for Kerberoasting
+			roast.observe(ev)             // service tickets, for Kerberoasting
+			machineRepl.observe(ev)       // machine accounts replicating, and which computers are DCs
 			tunnels.observe(ev)           // Sysmon DNS queries, for DNS tunnels
 			fields, findings, keepIt := classifyWinEvent(ev, sigma)
 			if !keepIt {
@@ -205,9 +207,10 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 		res.Add(r.Fields, r.Findings...)
 		keptFlagged++
 	}
-	// The built-in aggregations: bursts of RC4 service tickets
-	// (Kerberoasting), and many data-like names under one domain (DNS tunnels).
-	for _, r := range append(roast.flush(), tunnels.flush()...) {
+	// The built-in aggregations: bursts of service tickets (Kerberoasting),
+	// machine accounts replicating that never showed up as a domain controller
+	// (DCSync), and many data-like names under one domain (DNS tunnels).
+	for _, r := range append(append(roast.flush(), machineRepl.flush()...), tunnels.flush()...) {
 		if keptFlagged >= evtxMaxFlagged {
 			dropped++
 			continue
@@ -512,7 +515,7 @@ var builtinProviders = func() map[int]string {
 		1116: "windows defender", 1117: "windows defender",
 		106: "taskscheduler", 140: "taskscheduler", 200: "taskscheduler", 201: "taskscheduler"}
 	for _, id := range []int{4624, 4625, 4662, 4672, 4688, 4697, 4698, 4699, 4702, 4720, 4722, 4725, 4726,
-		4728, 4732, 4738, 4742, 4756, 4765, 4766, 4768, 4794, 4887, 4888, 4889, 4898, 4899, 5136, 5137} {
+		4728, 4732, 4738, 4742, 4756, 4765, 4766, 4768, 4769, 4770, 4771, 4794, 4887, 4888, 4889, 4898, 4899, 5136, 5137} {
 		m[id] = "security-auditing"
 	}
 	return m

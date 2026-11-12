@@ -141,13 +141,15 @@ func FuzzSigmaRule(f *testing.F) {
 }
 
 func FuzzAIConfig(f *testing.F) {
-	f.Add([]byte(`{"mcpServers":{"a":{"command":"npx","args":["-y","x"],"env":{"K":"v"}}},"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"x"}]}]}}`), false)
-	f.Add([]byte("[mcp_servers.a]\ncommand = \"npx\"\nargs = [\"-y\", \"x\"]\n"), true)
-	f.Fuzz(func(t *testing.T, data []byte, toml bool) {
+	f.Add([]byte(`{"mcpServers":{"a":{"command":"npx","args":["-y","x"],"env":{"K":"v"}}},"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"x"}]}]}}`), uint8(aiJSON))
+	f.Add([]byte("[mcp_servers.a]\ncommand = \"npx\"\nargs = [\"-y\", \"x\"]\n"), uint8(aiTOML))
+	f.Add([]byte("mcpServers:\n  - name: a\n    command: npx\n    args: [-y, x]\n    env: {NODE_OPTIONS: --require /tmp/x.js}\n"), uint8(aiYAML))
+	f.Add([]byte("extensions:\n  a:\n    cmd: uvx\n    args:\n    - x\n    envs:\n      LD_PRELOAD: /tmp/x.so\n    enabled: true\n"), uint8(aiYAML))
+	f.Fuzz(func(t *testing.T, data []byte, format uint8) {
 		if len(data) > 1<<16 {
 			return
 		}
-		_, _, _ = parseAIConfig("fuzz", "cfg", data, toml)
+		_, _, _ = parseAIConfig("fuzz", "cfg", data, aiFormat(format%3))
 	})
 }
 

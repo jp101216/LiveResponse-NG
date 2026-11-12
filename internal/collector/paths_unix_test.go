@@ -74,6 +74,34 @@ func TestReplacedSystemFile(t *testing.T) {
 	}
 }
 
+func TestDevToolFoldersAreNotHiddenPayloads(t *testing.T) {
+	for _, p := range []string{
+		"/home/dev/.cargo/bin/rg",
+		"/home/dev/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc",
+		"/root/.nvm/versions/node/v22.4.0/bin/node",
+		"/home/dev/.vscode-server/cli/servers/Stable-abc/server/node",
+		"/home/dev/.vscode-server/extensions/rust-lang.rust-analyzer-0.3.1/server/rust-analyzer",
+		"/Users/dev/.pyenv/versions/3.12.4/bin/python3.12",
+		"/home/dev/.local/share/JetBrains/Toolbox/apps/goland/bin/goland",
+	} {
+		if lvl, why := unixPathRisk(p); lvl != riskNone {
+			t.Errorf("%s: %v (%s)", p, lvl, why)
+		}
+	}
+	for _, p := range []string{
+		"/home/dev/.cargo/bin/.x/payload", // a hidden folder inside one
+		"/home/dev/.cargo/env-payload",    // beside the toolchain's own folder
+		"/home/dev/.cargobin/x",           // not the folder at all
+		"/home/dev/src/.cargo/bin/x",      // not under the home itself
+		"/home/dev/.local/share/mise/x",   // only installs/
+		"/tmp/.cargo/bin/x",               // high, whatever it's called
+	} {
+		if lvl, _ := unixPathRisk(p); lvl == riskNone {
+			t.Errorf("%s: no longer flagged", p)
+		}
+	}
+}
+
 func TestHomePathRiskRootIsAComponent(t *testing.T) {
 	if lvl, _ := unixPathRisk("/rootfs/.cache/x"); lvl != riskNone {
 		t.Errorf("/rootfs is not root's home, got %v", lvl)

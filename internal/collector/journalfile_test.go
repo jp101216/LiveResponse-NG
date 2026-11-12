@@ -43,7 +43,7 @@ func TestLZ4Vectors(t *testing.T) {
 		}
 		// journald's framing: a little-endian 64-bit size, then the block.
 		framed := binary.LittleEndian.AppendUint64(nil, uint64(len(raw)))
-		if got, err := journalLZ4(append(framed, block...)); err != nil || !bytes.Equal(got, raw) {
+		if got, err := journalLZ4(append(framed, block...), journalMaxPayload); err != nil || !bytes.Equal(got, raw) {
 			t.Fatalf("vector %d framed: %v", i, err)
 		}
 		// Truncated or mis-sized input fails cleanly.
@@ -198,7 +198,7 @@ func TestJournalHostileInput(t *testing.T) {
 // reference implementation, on real journald-written files: every entry's
 // sequence number and timestamps and every field value must agree, and each
 // field journalctl shows that this reader can't decode must be one it
-// counted as undecoded (zstd/XZ). Point LRNG_JOURNAL_SAMPLES at a directory
+// counted as undecoded (XZ). Point LRNG_JOURNAL_SAMPLES at a directory
 // of journal files; skipped when unset or without journalctl.
 func TestJournalMatchesJournalctl(t *testing.T) {
 	dir := os.Getenv("LRNG_JOURNAL_SAMPLES")
@@ -287,7 +287,7 @@ func TestJournalMatchesJournalctl(t *testing.T) {
 		totalEntries += n
 		t.Logf("%s: %d entries agree", filepath.Base(filepath.Dir(f))+"/"+filepath.Base(f), n)
 	}
-	t.Logf("%d files, %d entries, %d field values identical to journalctl, %d undecoded (zstd/xz) as counted",
+	t.Logf("%d files, %d entries, %d field values identical to journalctl, %d undecoded (xz) as counted",
 		len(files), totalEntries, totalFields, totalUndecoded)
 }
 

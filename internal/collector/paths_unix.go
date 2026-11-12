@@ -109,13 +109,14 @@ func replacedSystemFile(p string, exists func(string) bool) bool {
 }
 
 // homePathRisk flags a hidden directory or a Downloads folder inside a home
-// directory — common spots for user-level persistence and dropped payloads.
+// directory — common spots for user-level persistence and dropped payloads —
+// except the folders developer toolchains install into (devToolHomeDirs).
 func homePathRisk(p string) (riskLevel, string) {
 	if !strings.HasPrefix(p, "/home/") && !hasPathPrefix(p, "/root") && !strings.HasPrefix(p, "/Users/") {
 		return riskNone, ""
 	}
 	// A hidden component (/.foo/) anywhere under the home dir.
-	if strings.Contains(p, "/.") {
+	if strings.Contains(p, "/.") && !inDevToolHomeDir(p) {
 		return riskLow, "a hidden directory in a home folder"
 	}
 	lower := strings.ToLower(p)
@@ -123,6 +124,50 @@ func homePathRisk(p string) (riskLevel, string) {
 		return riskLow, "a Downloads folder"
 	}
 	return riskNone, ""
+}
+
+// devToolHomeDirs are the hidden folders under a home that language
+// toolchains, version managers and editors' remote servers install their
+// programs into: rustc and cargo-installed tools, nvm/pyenv/rbenv/asdf/mise
+// runtimes, the VS Code server and extensions' language servers. On a
+// developer's machine every compiler and editor process runs from one, so
+// grading them as hidden-folder payloads would bury real findings. A further
+// hidden folder inside one ("~/.cargo/bin/.x/y") is still flagged, and the
+// programs are hashed and checked by every other rule as before.
+var devToolHomeDirs = []string{
+	".cargo/bin", ".rustup/toolchains",
+	".nvm/versions", ".volta/bin", ".volta/tools", ".bun/bin", ".deno/bin", ".local/share/pnpm",
+	".pyenv/versions", ".pyenv/shims", ".local/share/uv/python", ".local/share/uv/tools", ".local/share/pipx/venvs",
+	".rbenv/versions", ".rbenv/shims", ".asdf/installs", ".asdf/shims", ".local/share/mise/installs",
+	".sdkman/candidates", ".gradle/jdks", ".gradle/wrapper/dists", ".dotnet",
+	".nix-profile/bin",
+	".vscode-server/bin", ".vscode-server/cli/servers", ".vscode-server/extensions", ".vscode/extensions",
+	".cursor-server", ".cursor/extensions", ".windsurf-server",
+	".local/share/JetBrains/Toolbox/apps",
+}
+
+// inDevToolHomeDir reports whether p lies in one of devToolHomeDirs under its
+// home (/home/<user>, /Users/<user> or /root), with no hidden folder below it.
+func inDevToolHomeDir(p string) bool {
+	var rel string
+	switch {
+	case strings.HasPrefix(p, "/root/"):
+		rel = p[len("/root/"):]
+	case strings.HasPrefix(p, "/home/"), strings.HasPrefix(p, "/Users/"):
+		parts := strings.SplitN(p, "/", 4) // "", "home", user, rest
+		if len(parts) < 4 {
+			return false
+		}
+		rel = parts[3]
+	default:
+		return false
+	}
+	for _, d := range devToolHomeDirs {
+		if hasPathPrefix(rel, d) {
+			return !strings.Contains(rel[len(d):], "/.")
+		}
+	}
+	return false
 }
 
 // hasPathPrefix reports whether path is dir itself or lies beneath it, matching

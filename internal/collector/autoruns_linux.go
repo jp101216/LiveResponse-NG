@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -34,7 +35,7 @@ func collectAutoruns(ctx context.Context, opts RunOptions) (Result, error) {
 
 	res.SetMeta("platform", "linux")
 	res.SetMeta("note", "Linux persistence surfaces: ld.so.preload, cron, systemd (units, drop-ins and timers; "+
-		"system, vendor and user), rc.local, XDG autostart, shell startup files, PAM, sudoers, udev rules in /etc. "+
+		"system, vendor and user; every Exec key), anacron, at jobs, rc.local, XDG autostart, shell startup files, PAM, sudoers, udev rules in /etc. "+
 		"Vendor systemd units, shell startup files, PAM lines and sudo rules are recorded only when they trip a heuristic")
 	return res.Finish(), nil
 }
@@ -119,12 +120,65 @@ func (p persistRecorder) scanCron() {
 			scanCrontabFile(f, false, filepath.Base(f), addCron)
 		}
 	}
+	// anacron runs jobs that were due while the machine was off: the same
+	// persistence with another schedule format.
+	if data := readFileSafe("/etc/anacrontab"); data != nil {
+		for _, j := range parseAnacrontab(data) {
+			p.add(map[string]any{"kind": "anacron", "source": "/etc/anacrontab", "schedule": j.Period + "d+" + j.Delay + "m",
+				"job": j.ID, "command": j.Command}, j.Command, persistenceFindings("anacron job "+j.ID, j.Command))
+		}
+	}
+	p.scanAtJobs()
 	// cron.{hourly,daily,weekly,monthly} hold scripts, not crontab rows.
 	for _, d := range []string{"hourly", "daily", "weekly", "monthly"} {
 		dir := "/etc/cron." + d
 		for _, f := range dirFiles(dir) {
 			p.add(map[string]any{"kind": "cron_script", "source": dir, "schedule": "@" + d, "command": f},
 				f, persistenceFindings("cron ("+dir+")", f))
+		}
+	}
+}
+
+// scanAtJobs reads the jobs queued with at(1): one-shot commands that run
+// later, often as a way to outlive the session that planted them. Debian keeps
+// the spool in /var/spool/cron/atjobs, Red Hat in /var/spool/at.
+func (p persistRecorder) scanAtJobs() {
+	uidNames := uidNameMap(parsePasswd(readFileSafe("/etc/passwd")))
+	for _, dir := range []string{"/var/spool/cron/atjobs", "/var/spool/at"} {
+		for _, f := range dirFiles(dir) {
+			name := filepath.Base(f)
+			if strings.HasPrefix(name, ".") {
+				continue // .SEQ: the job-number counter
+			}
+			data := readFileSafe(f)
+			if data == nil {
+				continue
+			}
+			j := parseAtJob(name, data)
+			if len(j.Commands) == 0 {
+				continue
+			}
+			cmd := strings.Join(j.Commands, "; ")
+			fields := map[string]any{"kind": "at_job", "source": dir, "file": f, "command": excerpt(cmd, 2000)}
+			if strings.HasPrefix(name, "=") {
+				fields["running"] = true
+			}
+			if !j.RunAt.IsZero() {
+				fields["run_at"] = j.RunAt
+			}
+			if j.UID != "" {
+				fields["uid"] = j.UID
+				if uid, err := strconv.Atoi(j.UID); err == nil {
+					if u, ok := uidNames[uid]; ok {
+						fields["user"] = u
+					}
+				}
+			}
+			var findings []Finding
+			for _, c := range j.Commands {
+				findings = mergeFindings(findings, persistenceFindings("at job "+name, c)...)
+			}
+			p.add(fields, j.Commands[0], findings)
 		}
 	}
 }
@@ -225,13 +279,23 @@ func (p persistRecorder) systemdUnit(path, dir, unit string, user, vendor, dropi
 	case user:
 		kind, label = "systemd_user_unit", "systemd user unit "+unit
 	}
-	execs := parseUnitExecStarts(readFileSafe(path))
+	all := parseUnitExecs(readFileSafe(path))
+	var execs, others []string
 	var findings []Finding
 	culprit := ""
-	for _, ex := range execs {
-		fs := persistenceFindings(label, ex)
+	for _, ex := range all {
+		where := label
+		if strings.HasPrefix(ex.Key, "ExecStart") {
+			execs = append(execs, ex.Command)
+		} else {
+			// ExecStop, ExecReload and ExecCondition run too, just at other
+			// moments: a payload there survives a review of ExecStart.
+			others = append(others, ex.Key+"="+ex.Command)
+			where = label + " (" + ex.Key + ")"
+		}
+		fs := persistenceFindings(where, ex.Command)
 		if len(fs) > 0 && culprit == "" {
-			culprit = ex
+			culprit = ex.Command
 		}
 		findings = mergeFindings(findings, fs...)
 	}
@@ -247,6 +311,9 @@ func (p persistRecorder) systemdUnit(path, dir, unit string, user, vendor, dropi
 	}
 	if len(execs) > 0 {
 		fields["exec_start"] = execs
+	}
+	if len(others) > 0 {
+		fields["exec_other"] = others
 	}
 	if t, err := os.Readlink(path); err == nil && t == "/dev/null" {
 		fields["masked"] = true

@@ -103,7 +103,7 @@ func TestLinuxModuleFindingNamesTheRealLocation(t *testing.T) {
 		}
 		return fs[0].Detail
 	}
-	if d := detail("/home/dev/.rustup/toolchains/stable/bin/rustc"); strings.Contains(d, "world-writable") || !strings.Contains(d, "hidden directory in a home folder") {
+	if d := detail("/home/dev/.hidden/lib/libx.so"); strings.Contains(d, "world-writable") || !strings.Contains(d, "hidden directory in a home folder") {
 		t.Errorf("hidden home directory described as: %s", d)
 	}
 	if d := detail("/tmp/a.so", "/dev/shm/b.so"); !strings.Contains(d, "world-writable temporary directory") || !strings.Contains(d, "shared memory") {

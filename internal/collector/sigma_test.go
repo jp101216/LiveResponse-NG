@@ -801,3 +801,60 @@ level: low
 		t.Fatal("a near expression naming an undefined selection must be skipped")
 	}
 }
+
+// A process_creation rule written in Sysmon's field names runs on a Security
+// 4688 from a host without Sysmon.
+func TestSigmaProcessCreationOn4688WithSysmonNames(t *testing.T) {
+	rs := mustRuleset(t, `title: Office spawning a shell at high integrity
+logsource: {category: process_creation, product: windows}
+detection:
+    selection:
+        ParentImage|endswith: '\WINWORD.EXE'
+        Image|endswith: '\cmd.exe'
+        IntegrityLevel: High
+        User|contains: 'CORP\'
+        ParentProcessId: 6700
+    condition: selection
+level: high
+`)
+	sec := ev(4688, "Security",
+		"NewProcessName", `C:\Windows\System32\cmd.exe`,
+		"ParentProcessName", `C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE`,
+		"NewProcessId", "0x1f40", "ProcessId", "0x1a2c",
+		"SubjectUserName", "jdoe", "SubjectDomainName", "CORP", "SubjectLogonId", "0x3e7",
+		"TargetUserName", "-", "TargetDomainName", "-",
+		"MandatoryLabel", "S-1-16-12288", "CommandLine", `cmd.exe /c whoami`)
+	sec.Provider = "Microsoft-Windows-Security-Auditing"
+	if f := rs.match(sec); len(f) != 1 {
+		t.Fatalf("4688 with Sysmon names: %+v", f)
+	}
+	fields := sec.sigmaFields()
+	for k, want := range map[string]string{"image": `C:\Windows\System32\cmd.exe`, "processid": "8000", "parentprocessid": "6700",
+		"user": `CORP\jdoe`, "logonid": "0x3e7", "integritylevel": "High", "newprocessname": `C:\Windows\System32\cmd.exe`} {
+		if fields[k] != want {
+			t.Errorf("%s = %q, want %q", k, fields[k], want)
+		}
+	}
+	// Windows 10+ names the new process's own account: that's the User.
+	sec.Data["TargetUserName"], sec.Data["TargetDomainName"], sec.Data["TargetLogonId"] = "svc_x", "CORP", "0x99"
+	if f := sec.sigmaFields(); f["user"] != `CORP\svc_x` || f["logonid"] != "0x99" {
+		t.Errorf("target account: %q %q", f["user"], f["logonid"])
+	}
+	// Medium integrity: the rule doesn't match.
+	sec.Data["MandatoryLabel"] = "S-1-16-8192"
+	if f := rs.match(sec); len(f) != 0 {
+		t.Errorf("medium integrity matched: %+v", f)
+	}
+	// A Sysmon event 1 keeps its own fields untouched.
+	sys := ev(1, "Microsoft-Windows-Sysmon/Operational", "Image", `C:\x.exe`, "ProcessId", "42", "ParentProcessId", "7")
+	sys.Provider = "Microsoft-Windows-Sysmon"
+	if f := sys.sigmaFields(); f["processid"] != "42" || f["parentprocessid"] != "7" {
+		t.Errorf("sysmon fields changed: %v", f)
+	}
+	// Another provider's 4688 gets no aliases.
+	app := ev(4688, "Application", "NewProcessName", `C:\x.exe`)
+	app.Provider = "SomeApp"
+	if f := app.sigmaFields(); f["image"] != "" {
+		t.Errorf("aliased another provider's event: %v", f)
+	}
+}

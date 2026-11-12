@@ -864,7 +864,82 @@ func (ev winEvent) sigmaFields() map[string]string {
 	for k, v := range ev.UserData {
 		put(k, v)
 	}
+	if ev.EventID == 4688 && builtinProviderMatches(ev) {
+		aliasProcessCreation(f)
+	}
 	return f
+}
+
+// aliasProcessCreation gives a Security 4688 the field names Sigma's
+// process_creation rules are written in (Sysmon event 1's), so the same rules
+// run on hosts that audit process creation without Sysmon: Image,
+// ParentImage, ProcessId and ParentProcessId (decimal, as Sysmon writes them;
+// 4688 has them in hex, and its own ProcessId is the parent's), User (the
+// account the new process runs as, DOMAIN\user), LogonId and IntegrityLevel
+// (from the mandatory label's SID). The original names stay, so rules written
+// for 4688 itself still match — except ProcessId, which takes Sysmon's
+// meaning, as Sigma's own Windows-audit mapping gives it (the creator's id is
+// ParentProcessId; NewProcessId is unchanged); a field the event doesn't have (Hashes,
+// OriginalFileName, ParentCommandLine, CurrentDirectory) stays absent, and a
+// rule that needs one doesn't match.
+func aliasProcessCreation(f map[string]string) {
+	alias := func(to, v string) {
+		if v != "" && v != "-" {
+			f[to] = v
+		}
+	}
+	alias("image", f["newprocessname"])
+	alias("parentimage", f["parentprocessname"])
+	parentPID, hasParent := f["processid"] // 4688's ProcessId is the creator's
+	delete(f, "processid")
+	alias("processid", hexToDecimal(f["newprocessid"]))
+	if hasParent {
+		alias("parentprocessid", hexToDecimal(parentPID))
+	}
+	user, domain, logon := f["targetusername"], f["targetdomainname"], f["targetlogonid"]
+	if user == "" || user == "-" { // before Windows 10, 4688 names only the creator
+		user, domain, logon = f["subjectusername"], f["subjectdomainname"], f["subjectlogonid"]
+	}
+	if user != "" && user != "-" {
+		if domain != "" && domain != "-" {
+			user = domain + `\` + user
+		}
+		alias("user", user)
+	}
+	alias("logonid", logon)
+	alias("integritylevel", integrityLevelName(f["mandatorylabel"]))
+}
+
+// hexToDecimal renders "0x1a2c" as "6700"; anything else is returned as is.
+func hexToDecimal(s string) string {
+	t := strings.TrimSpace(s)
+	if h, ok := strings.CutPrefix(strings.ToLower(t), "0x"); ok {
+		if n, err := strconv.ParseUint(h, 16, 64); err == nil {
+			return strconv.FormatUint(n, 10)
+		}
+	}
+	return t
+}
+
+// integrityLevelName names a mandatory label SID the way Sysmon does.
+func integrityLevelName(sid string) string {
+	switch strings.ToUpper(strings.TrimSpace(sid)) {
+	case "S-1-16-0":
+		return "Untrusted"
+	case "S-1-16-4096":
+		return "Low"
+	case "S-1-16-8192":
+		return "Medium"
+	case "S-1-16-8448":
+		return "MediumPlus"
+	case "S-1-16-12288":
+		return "High"
+	case "S-1-16-16384":
+		return "System"
+	case "S-1-16-20480":
+		return "Protected"
+	}
+	return ""
 }
 
 // LoadSigmaSpec compiles a comma-separated spec of rule sources, merged into

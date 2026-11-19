@@ -16,10 +16,11 @@ modules, eBPF and the systemd journal behind the same interface.
 *The [report viewer](#report-viewer) on a lab VM seeded with harmless
 lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 
-> **Status:** v0.19.0. On **Linux**, a default run covers processes, network
+> **Status:** v0.19.1. On **Linux**, a default run covers processes, network
 > (TCP + UDP, with per-socket process attribution via `/proc`), loaded modules,
-> local accounts, persistence (cron, anacron, `at`, systemd, ld.so.preload, rc.local, XDG
-> autostart, PAM, sudo rules, udev), kernel modules (with a cross-view that
+> local accounts (with SSH keys' forced commands), persistence (cron, anacron, `at`,
+> systemd, ld.so.preload, rc.local, XDG autostart, shell startup files, PAM, sudo
+> rules, udev), kernel modules (with a cross-view that
 > exposes a module hidden from the list), processes and sockets a rootkit hides
 > from `/proc`, the eBPF programs loaded in the kernel, the systemd journal (SSH
 > brute force, sudo and su, account changes, kernel warnings), read without

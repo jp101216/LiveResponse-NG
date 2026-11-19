@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.19.1
+
 Fixes from a bug check of 0.19.0: two ways a crafted log could stall the
 agent, false findings on every `su` and on Red Hat's default accounts, and
 several ways a Linux payload could slip past the persistence and command-line

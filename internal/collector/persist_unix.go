@@ -1,6 +1,8 @@
 package collector
 
 import (
+	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -338,6 +340,118 @@ func unixCommandPathRisk(cmd string) (lvl riskLevel, why, what string) {
 	return lvl, why, what
 }
 
+// judgeShellProfileLine grades one line of a shell startup file (.bashrc,
+// /etc/profile.d/x.sh ...) for the ways such a file keeps code running beyond
+// the download and reverse-shell patterns the command-line rules know: a
+// program or sourced script in /tmp, /dev/shm and the like ("nohup
+// /dev/shm/.a &", ". /tmp/x"), LD_PRELOAD or LD_AUDIT set for everything the
+// shell starts, and an alias that swaps sudo, su, ssh or passwd for something
+// else (the classic way to catch the user's password).
+func judgeShellProfileLine(file, line string) []Finding {
+	var out []Finding
+	where := "shell startup file " + file
+	for _, seg := range shellSegments(line) {
+		if lvl, why, what := shellSegmentPathRisk(seg); lvl == riskHigh {
+			out = mergeFindings(out, Finding{Rule: "persistence.unusual_path", Severity: SevSuspect, Technique: "T1546.004", Confidence: 55,
+				Detail: fmt.Sprintf("%s runs %s from %s, every time a shell starts", where, what, why)})
+		}
+	}
+	for _, m := range profilePreloadRe.FindAllStringSubmatch(line, -1) {
+		value := strings.Trim(m[2], `"'`)
+		f := Finding{Rule: "persistence.ld_preload", Severity: SevNotable, Technique: "T1574.006", Confidence: 40,
+			Detail: fmt.Sprintf("%s sets %s=%s, loading that library into every program the shell starts", where, m[1], value)}
+		for _, lib := range strings.FieldsFunc(value, func(r rune) bool { return r == ':' || r == ' ' }) {
+			if lvl, why := unixPathRisk(lib); lvl == riskHigh {
+				f.Severity, f.Confidence = SevSuspect, 70
+				f.Detail += " (" + lib + " is in " + why + ")"
+				break
+			}
+		}
+		out = mergeFindings(out, f)
+	}
+	for _, m := range profileAliasRe.FindAllStringSubmatch(line, -1) {
+		name, value := m[1], strings.Trim(m[2], `"'`)
+		if !aliasTargets[name] {
+			continue
+		}
+		prog := ""
+		for _, w := range dropShellModifiers(strings.Fields(value)) {
+			if !isEnvAssignment(w) {
+				prog = strings.Trim(w, `"'`)
+				break
+			}
+		}
+		lvl, why, what := shellSegmentPathRisk(value)
+		// The same program: by name ("alias sudo='sudo '", "alias
+		// ssh='TERM=xterm ssh'") or the system's copy (/usr/bin/sudo) — not
+		// another file that happens to be called sudo.
+		same := prog == name || systemProgram(prog, name)
+		if same && lvl != riskHigh {
+			continue
+		}
+		detail := fmt.Sprintf("%s makes %s run %q instead: a wrapper that sees what the user types, passwords included", where, name, value)
+		if lvl == riskHigh {
+			detail += fmt.Sprintf(" (%s is in %s)", what, why)
+		}
+		out = mergeFindings(out, Finding{Rule: "persistence.alias_hijack", Severity: SevSuspect, Technique: "T1546.004", Confidence: 60, Detail: detail})
+	}
+	return out
+}
+
+var (
+	profilePreloadRe = regexp.MustCompile(`(?:^|[\s;&|(])(?:export\s+|declare\s+-x\s+)?(LD_PRELOAD|LD_AUDIT)=("[^"]*"|'[^']*'|\S+)`)
+	profileAliasRe   = regexp.MustCompile(`(?:^|[\s;&|(])alias\s+([A-Za-z0-9_.-]+)=("[^"]*"|'[^']*'|\S+)`)
+)
+
+// aliasTargets are the commands whose replacement by an alias would hand the
+// user's password, or their session, to someone else.
+var aliasTargets = map[string]bool{"sudo": true, "su": true, "doas": true, "ssh": true, "scp": true, "passwd": true, "pkexec": true}
+
+// dropShellModifiers removes the shell's own precommand words (zsh's
+// nocorrect and noglob, command, builtin, exec) from the front of a command.
+func dropShellModifiers(words []string) []string {
+	for len(words) > 0 {
+		switch strings.Trim(words[0], `"'`) {
+		case "nocorrect", "noglob", "command", "builtin":
+			words = words[1:]
+			continue
+		}
+		break
+	}
+	return words
+}
+
+// shellSegments splits a shell line into its simple commands: on ; & | and
+// parentheses, and inside quoted strings too, so the "/tmp/x" of
+// PROMPT_COMMAND='history -a; /tmp/x' is a command of its own.
+func shellSegments(line string) []string {
+	var out []string
+	for _, seg := range strings.FieldsFunc(line, func(r rune) bool {
+		return r == ';' || r == '&' || r == '|' || r == '(' || r == ')' || r == '`' || r == '{' || r == '}'
+	}) {
+		if seg = strings.Trim(strings.TrimSpace(seg), `"'$`); seg != "" {
+			out = append(out, seg)
+		}
+	}
+	return out
+}
+
+// shellSegmentPathRisk grades where one simple command's code lives: its
+// program, the script an interpreter runs, or the file ". x" or "source x"
+// reads into the shell.
+func shellSegmentPathRisk(seg string) (riskLevel, string, string) {
+	words := dropShellModifiers(strings.Fields(seg))
+	if len(words) >= 2 && (words[0] == "." || words[0] == "source") {
+		script := strings.Trim(words[1], `"'`)
+		if strings.HasPrefix(script, "/") {
+			lvl, why := unixPathRisk(script)
+			return lvl, why, script
+		}
+		return riskNone, "", ""
+	}
+	return unixCommandPathRisk(strings.Join(words, " "))
+}
+
 // joinContinuations splits a unit file into logical lines the way systemd's
 // config parser does: a line ending in an unescaped backslash is joined with
 // the next one (the backslash becomes a space), so "ExecStart=/bin/true \\"
@@ -392,27 +506,33 @@ type desktopEntry struct {
 // parseDesktopFile reads the Exec line and disabled state from a .desktop file.
 func parseDesktopFile(data []byte) desktopEntry {
 	var d desktopEntry
+	var hidden, disabled bool
+	inEntry := false
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
-		key, val, ok := strings.Cut(line, "=")
-		if !ok {
+		if strings.HasPrefix(line, "[") {
+			// Only the [Desktop Entry] group says what starts: a [Desktop
+			// Action x] group has an Exec (and could have a Hidden) of its own.
+			inEntry = line == "[Desktop Entry]"
 			continue
 		}
+		key, val, ok := strings.Cut(line, "=")
+		if !inEntry || !ok || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// A key given twice takes its last value, as GLib's key-file parser
+		// does: an early "Exec=/usr/bin/true" mustn't stand in for a later one.
+		val = strings.TrimSpace(val)
 		switch strings.TrimSpace(key) {
 		case "Exec":
-			if d.Exec == "" {
-				d.Exec = strings.TrimSpace(val)
-			}
+			d.Exec = val
 		case "Hidden":
-			if strings.EqualFold(strings.TrimSpace(val), "true") {
-				d.Hidden = true
-			}
+			hidden = strings.EqualFold(val, "true")
 		case "X-GNOME-Autostart-enabled":
-			if strings.EqualFold(strings.TrimSpace(val), "false") {
-				d.Hidden = true
-			}
+			disabled = strings.EqualFold(val, "false")
 		}
 	}
+	d.Hidden = hidden || disabled
 	return d
 }
 

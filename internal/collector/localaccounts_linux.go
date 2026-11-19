@@ -101,6 +101,12 @@ func collectLocalAccounts(ctx context.Context) (Result, error) {
 		}
 
 		var findings []Finding
+		if len(ev.Keys.Commands) > 0 {
+			fields["ssh_forced_commands"] = ev.Keys.Commands
+			for _, cmd := range ev.Keys.Commands {
+				findings = mergeFindings(findings, judgeForcedCommand(u.Name, cmd)...)
+			}
+		}
 		if u.UID == 0 && u.Name != "root" {
 			findings = append(findings, Finding{
 				Rule: "accounts.uid0_nonroot", Severity: SevSuspect, Technique: "T1136.001", Confidence: 80,
@@ -287,6 +293,9 @@ func readAuthorizedKeys(paths []string) (sshKeyCount, bool) {
 		c := parseAuthorizedKeys(data)
 		total.Total += c.Total
 		total.Unrestricted += c.Unrestricted
+		for _, cmd := range c.Commands {
+			total.addCommand(cmd)
+		}
 	}
 	return total, denied && total.Total == 0
 }

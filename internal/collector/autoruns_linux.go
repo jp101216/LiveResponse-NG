@@ -371,9 +371,10 @@ var systemShellStartupFiles = []string{
 	"/etc/zsh/zshrc", "/etc/zshrc", "/etc/zsh/zlogin", "/etc/zlogin",
 }
 
-// userShellStartupFiles are the per-user startup files bash and zsh read.
+// userShellStartupFiles are the per-user startup files bash and zsh read
+// (.bash_aliases through the .bashrc Debian and Ubuntu install).
 var userShellStartupFiles = []string{
-	".bashrc", ".bash_profile", ".bash_login", ".profile", ".bash_logout",
+	".bashrc", ".bash_profile", ".bash_login", ".profile", ".bash_logout", ".bash_aliases",
 	".zshenv", ".zprofile", ".zshrc", ".zlogin",
 }
 
@@ -400,6 +401,7 @@ func (p persistRecorder) scanShellProfiles() {
 				continue
 			}
 			findings = mergeFindings(findings, analyzeUnixCommandLine("shell profile "+path, "", line)...)
+			findings = mergeFindings(findings, judgeShellProfileLine(path, line)...)
 		}
 		if len(findings) > 0 {
 			p.res.Add(map[string]any{"kind": "shell_profile", "source": path}, findings...)

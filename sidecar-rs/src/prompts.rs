@@ -123,7 +123,7 @@ const DEFS: &[Def] = &[
         technique: "",
         weight: 15,
         secret: None,
-        pattern: r"(?i-u)\b(?:gpt-(?:3\.5|[4-9])|gpt-oss|claude-(?:[1-9](?:\.[0-9])?\b|instant|opus|sonnet|haiku)|gemini-[1-9](?:\.[0-9])?\b|mixtral|llama-?[1-9]|mistral-(?:large|medium|small)|deepseek-(?:chat|coder|reasoner|r1|v[1-9])|grok-[1-9]|qwen-?[1-9](?:\.[0-9])?\b|qwen-(?:max|plus|turbo|coder))",
+        pattern: r"(?i-u)\b(?:gpt-(?:3\.5|[4-9])|gpt-oss|claude-(?:[1-9](?:\.[0-9])?\b|instant|opus|sonnet|haiku|fable|mythos)|gemini-[1-9](?:\.[0-9])?\b|mixtral|llama-?[1-9]|mistral-(?:large|medium|small)|deepseek-(?:chat|coder|reasoner|r1|v[1-9])|grok-[1-9]|qwen-?[1-9](?:\.[0-9])?\b|qwen-(?:max|plus|turbo|coder))",
     },
     Def {
         rule: "api.endpoint",
@@ -631,6 +631,8 @@ mod tests {
             "claude-3-opus",
             "claude-2.1",
             "claude-sonnet-4-5",
+            "claude-fable-5-2",
+            "claude-mythos-5",
             "gemini-1.5-pro",
             "gpt-4o",
         ] {

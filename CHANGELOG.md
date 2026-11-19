@@ -5,7 +5,9 @@
 Fixes from a bug check of 0.19.0: two ways a crafted log could stall the
 agent, false findings on every `su` and on Red Hat's default accounts, and
 several ways a Linux payload could slip past the persistence and command-line
-checks. Report schema remains 1.2.
+checks (shell startup files, SSH forced commands and autostart files among
+them). Report schema remains 1.2; account records may carry a new
+`ssh_forced_commands` field.
 
 ### Fixed
 
@@ -52,6 +54,22 @@ checks. Report schema remains 1.2.
   target is a UNC path (`C:\Users\x\.claude` → `\\host\share`) was followed
   when the file was opened, defeating the UNC check. Each path is now walked
   from its volume root and refused when a link on the way leads off the host.
+- **Shell startup files.** `.bashrc`, `/etc/profile.d` and the rest were
+  only checked for download and reverse-shell patterns. A line that runs or
+  sources a file from `/tmp`, `/dev/shm` and the like (`nohup /dev/shm/.a &`,
+  `. /tmp/x`, a `PROMPT_COMMAND` that does), sets `LD_PRELOAD` or `LD_AUDIT`,
+  or aliases `sudo`, `su`, `ssh` or `passwd` to another program is now
+  reported (`persistence.unusual_path`, `persistence.ld_preload`,
+  `persistence.alias_hijack`). `~/.bash_aliases` is read too.
+- **SSH forced commands.** A key pinned to `command="…"` was taken as
+  harmless; the command runs on every login with the key, so
+  `command="/tmp/.x/r; exec $SHELL"` is a backdoor. Forced commands are now
+  recorded and judged (`persistence.ssh_forced_command`).
+- **XDG autostart files.** Only the `[Desktop Entry]` group is read now, and
+  a key given twice takes its last value as GLib does: a `Hidden=true` in an
+  action group, or a decoy first `Exec=`, used to hide the real entry.
+- **Model names.** The prompt-artifact scanner recognises the
+  `claude-fable` and `claude-mythos` model families.
 - **Smaller evasions.** A lone or escaped backtick no longer stops the
   download-substitution check; netcat `-e` is recognised after upper-case or
   digit flags (`-Ce`, `-4e`); `LD_PRELOAD` in an MCP server's environment is

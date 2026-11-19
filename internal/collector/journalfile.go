@@ -265,7 +265,8 @@ func journalLZ4(p []byte, max int) ([]byte, error) {
 
 // lz4Block decodes one LZ4 block (the frame-less format) of known output size.
 func lz4Block(src []byte, size int) ([]byte, error) {
-	dst := make([]byte, 0, size)
+	dst := make([]byte, 0, min(size, inflateReserve(len(src)))) // size is the payload's claim
+
 	ext := func(i int, v int) (int, int, error) {
 		for {
 			if i >= len(src) {

@@ -20,8 +20,25 @@ import (
 
 // sshKeyCount summarises one or more authorized_keys files.
 type sshKeyCount struct {
-	Total        int // key lines
-	Unrestricted int // keys without a forced command — usable for an arbitrary login
+	Total        int      // key lines
+	Unrestricted int      // keys without a forced command — usable for an arbitrary login
+	Commands     []string // the distinct forced commands (command="…"), at most maxForcedCommands
+}
+
+// maxForcedCommands bounds the forced commands kept from one account's keys.
+const maxForcedCommands = 32
+
+// addCommand keeps a forced command once, up to the bound.
+func (c *sshKeyCount) addCommand(cmd string) {
+	if cmd == "" || len(c.Commands) >= maxForcedCommands {
+		return
+	}
+	for _, have := range c.Commands {
+		if have == cmd {
+			return
+		}
+	}
+	c.Commands = append(c.Commands, cmd)
 }
 
 // parseAuthorizedKeys counts the keys in an authorized_keys file and how many are
@@ -41,7 +58,9 @@ func parseAuthorizedKeys(data []byte) sshKeyCount {
 			continue // no key type on the line: not a key
 		}
 		c.Total++
-		if !hasForcedCommand(opts) {
+		if cmd, ok := forcedCommand(opts); ok {
+			c.addCommand(cmd)
+		} else {
 			c.Unrestricted++
 		}
 	}
@@ -63,16 +82,42 @@ func authorizedKeyOptions(line string) (string, bool) {
 
 // hasForcedCommand reports whether an options string sets command="…".
 func hasForcedCommand(opts string) bool {
+	_, ok := forcedCommand(opts)
+	return ok
+}
+
+// forcedCommand returns the command="…" an options string sets, unquoted.
+func forcedCommand(opts string) (string, bool) {
 	if opts == "" {
-		return false
+		return "", false
 	}
 	for _, o := range splitQuoted(opts, func(r rune) bool { return r == ',' }) {
-		name, _, _ := strings.Cut(o, "=")
+		name, value, _ := strings.Cut(o, "=")
 		if strings.EqualFold(strings.TrimSpace(name), "command") {
-			return true
+			value = strings.TrimSpace(value)
+			if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+				value = strings.ReplaceAll(value[1:len(value)-1], `\"`, `"`)
+			}
+			return value, true
 		}
 	}
-	return false
+	return "", false
+}
+
+// judgeForcedCommand grades the command an SSH key is pinned to. A forced
+// command runs on every login with the key, so "command=\"/tmp/.x/r; exec
+// $SHELL\"" is a backdoor that also gives the attacker a shell; the command
+// is judged like any other the account runs.
+func judgeForcedCommand(user, cmd string) []Finding {
+	where := fmt.Sprintf("an SSH key of %q is pinned to a command that", user)
+	out := analyzeUnixCommandLine(where, "", cmd)
+	for _, seg := range shellSegments(cmd) {
+		if lvl, why, what := shellSegmentPathRisk(seg); lvl == riskHigh {
+			out = mergeFindings(out, Finding{Rule: "persistence.ssh_forced_command", Severity: SevSuspect, Technique: "T1098.004", Confidence: 65,
+				Detail: fmt.Sprintf("an SSH key of %q is pinned to command=%q, which runs %s from %s on every login with that key", user, cmd, what, why)})
+		}
+	}
+	return out
 }
 
 // isSSHKeyType reports whether a token is an OpenSSH public-key type, including

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jp101216/liveresponse-ng/internal/collector"
 )
@@ -56,36 +57,43 @@ func truncate(s string, n int) string {
 // overwrite or hide earlier lines, and on some terminals set the clipboard
 // (OSC 52). Bidirectional-override characters can reorder what is shown
 // ("exe.txt" displayed for "txt.exe"). Each such character is written as a
-// visible \xNN or \uNNNN escape instead; everything else is unchanged.
+// visible \xNN or \uNNNN escape instead, and so is each byte that isn't valid
+// UTF-8 (a raw 0x9b is CSI to a terminal reading 8-bit controls, as one in a
+// Latin-1 locale does); everything else is unchanged.
 func TerminalSafe(s string) string {
 	clean := true
-	for _, r := range s {
-		if terminalUnsafe(r) {
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if terminalUnsafe(r) || r == utf8.RuneError && n == 1 {
 			clean = false
 			break
 		}
+		i += n
 	}
 	if clean {
 		return s
 	}
 	var b strings.Builder
-	for _, r := range s {
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
 		switch {
+		case r == utf8.RuneError && n == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[i])
 		case !terminalUnsafe(r):
-			b.WriteRune(r)
+			b.WriteString(s[i : i+n])
 		case r < 0x100:
 			fmt.Fprintf(&b, `\x%02x`, r)
 		default:
 			fmt.Fprintf(&b, `\u%04x`, r)
 		}
+		i += n
 	}
 	return b.String()
 }
 
 // terminalUnsafe reports whether a character changes how a terminal shows
 // text rather than being shown: C0 and C1 controls (ESC, BEL, CSI, OSC...),
-// DEL, invalid UTF-8 (decoded as U+FFFD by range, so not here), and the
-// bidirectional formatting characters.
+// DEL, and the bidirectional formatting characters.
 func terminalUnsafe(r rune) bool {
 	switch {
 	case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:

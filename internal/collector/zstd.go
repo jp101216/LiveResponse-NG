@@ -136,7 +136,10 @@ func (d *zstdDecoder) frame() ([]byte, error) {
 		if size > uint64(d.max) {
 			return nil, errZstdTooBig
 		}
-		d.out = make([]byte, 0, int(size))
+		// The size is the frame's claim: reserve at most a few times the
+		// input up front and let a real expansion grow the buffer, so a
+		// 12-byte frame claiming 16 MiB doesn't cost a 16 MiB allocation.
+		d.out = make([]byte, 0, min(int(size), inflateReserve(len(d.src))))
 	}
 
 	for {
@@ -191,6 +194,10 @@ func (d *zstdDecoder) frame() ([]byte, error) {
 	}
 	return d.out, nil
 }
+
+// inflateReserve is how much output buffer a decompressor reserves up front
+// for n bytes of input, whatever size the input claims to expand to.
+func inflateReserve(n int) int { return 4*n + 4<<10 }
 
 func (d *zstdDecoder) emit(b []byte) error {
 	if len(d.out)+len(b) > d.max {

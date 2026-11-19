@@ -168,18 +168,34 @@ type bxml struct {
 	subs  []substVal
 	depth int
 	err   error
-	// budget is the number of elements, template instances and embedded
-	// fragments the record may still render, shared by every cursor the
-	// record nests (nil: unlimited). Depth alone doesn't bound the work: a
-	// template body that references an embedded-BinXML substitution k times
-	// renders it k times, so nesting d levels renders k^d elements from a
-	// record of a few hundred bytes.
-	budget *int
+	// budget bounds what the record may still render, shared by every cursor
+	// the record nests (nil: unlimited). Depth alone doesn't bound the work: a
+	// template body that references a substitution k times renders it k
+	// times, so nesting d levels renders k^d elements from a record of a few
+	// hundred bytes, and one element that names a long string substitution k
+	// times holds k copies of it.
+	budget *bxmlBudget
 }
 
-// bxmlRecordBudget bounds one record's rendering. Real events have tens to a
-// few hundred elements.
-const bxmlRecordBudget = 1 << 16
+// bxmlBudget is what one record may still render: elements, template
+// instances and embedded fragments, and bytes of text.
+type bxmlBudget struct {
+	nodes int
+	text  int
+}
+
+// bxmlRecordBudget and bxmlRecordTextBudget bound one record's rendering.
+// Real events have tens to a few hundred elements, and their text is at most
+// a few tens of kilobytes (a 4104 script block is cut into 32K-character
+// pieces).
+const (
+	bxmlRecordBudget     = 1 << 16
+	bxmlRecordTextBudget = 4 << 20
+)
+
+func newBxmlBudget() *bxmlBudget {
+	return &bxmlBudget{nodes: bxmlRecordBudget, text: bxmlRecordTextBudget}
+}
 
 // spend takes one unit of the record's rendering budget, failing the record
 // when it runs out.
@@ -187,12 +203,39 @@ func (b *bxml) spend() bool {
 	if b.budget == nil {
 		return true
 	}
-	if *b.budget <= 0 {
+	if b.budget.nodes <= 0 {
 		b.fail("record renders too many elements (nested template expansion)")
 		return false
 	}
-	*b.budget--
+	b.budget.nodes--
 	return true
+}
+
+// textRoom reports whether the record may still render text, failing it
+// when its text budget is spent. Checked before a substitution is rendered,
+// so nothing is decoded once the record is over its budget.
+func (b *bxml) textRoom() bool {
+	if b.budget == nil || b.budget.text > 0 {
+		return true
+	}
+	b.fail("record renders too much text (repeated substitutions)")
+	return false
+}
+
+// addText appends rendered text to sb, charging the record's text budget.
+func (b *bxml) addText(sb *strings.Builder, s string) {
+	if s == "" || b.err != nil {
+		return
+	}
+	if b.budget != nil {
+		if len(s) > b.budget.text {
+			b.budget.text = 0
+			b.fail("record renders too much text (repeated substitutions)")
+			return
+		}
+		b.budget.text -= len(s)
+	}
+	sb.WriteString(s)
 }
 
 func (b *bxml) fail(msg string) {
@@ -431,8 +474,7 @@ func parseChunkRecords(chunk []byte, warnings *[]string, emit func(evtxRecord) b
 			RecordID: le.Uint64(chunk[off+8:]),
 			Written:  fileTimeToTime(le.Uint64(chunk[off+16:])),
 		}
-		budget := bxmlRecordBudget
-		r := &bxml{chunk: chunk, pos: off + 24, budget: &budget}
+		r := &bxml{chunk: chunk, pos: off + 24, budget: newBxmlBudget()}
 		rec.Root = r.parseFragment()
 		if r.err != nil {
 			warn(warnings, fmt.Sprintf("evtx: record %d: %v", rec.RecordID, r.err))
@@ -542,16 +584,16 @@ func (b *bxml) parseAttrValue(attrEnd int) string {
 		switch b.peek() & 0x0f {
 		case tokValue:
 			b.u8()
-			sb.WriteString(b.parseValueToken())
+			b.addText(&sb, b.parseValueToken())
 		case tokNormalSubst, tokOptionalSubst:
 			b.u8()
-			sb.WriteString(b.readSubstText())
+			b.addText(&sb, b.readSubstText())
 		case tokCharRef:
 			b.u8()
-			sb.WriteRune(rune(b.u16()))
+			b.addText(&sb, string(rune(b.u16())))
 		case tokEntityRef:
 			b.u8()
-			sb.WriteString(b.readEntityRef())
+			b.addText(&sb, b.readEntityRef())
 		default:
 			return sb.String() // an attribute or close token: value done
 		}
@@ -559,8 +601,14 @@ func (b *bxml) parseAttrValue(attrEnd int) string {
 	return sb.String()
 }
 
-// parseContent reads an element's content until its EndElement.
+// parseContent reads an element's content until its EndElement. The text is
+// gathered in a builder: appending to a string piece by piece copies it each
+// time, so an element naming a long substitution thousands of times took
+// minutes before any budget was reached.
 func (b *bxml) parseContent(parent *bxmlElement) {
+	var text strings.Builder
+	text.WriteString(parent.Text)
+	defer func() { parent.Text = text.String() }()
 	for b.err == nil {
 		t := b.u8()
 		switch t & 0x0f {
@@ -571,19 +619,19 @@ func (b *bxml) parseContent(parent *bxmlElement) {
 				parent.Children = append(parent.Children, c)
 			}
 		case tokValue:
-			parent.Text += b.parseValueToken()
+			b.addText(&text, b.parseValueToken())
 		case tokNormalSubst, tokOptionalSubst:
-			b.applySubst(parent)
+			b.applySubst(parent, &text)
 		case tokTemplateInst:
 			if c := b.parseTemplateInstance(); c != nil {
 				parent.Children = append(parent.Children, c)
 			}
 		case tokCharRef:
-			parent.Text += string(rune(b.u16()))
+			b.addText(&text, string(rune(b.u16())))
 		case tokEntityRef:
-			parent.Text += b.readEntityRef()
+			b.addText(&text, b.readEntityRef())
 		case tokCDATA:
-			parent.Text += b.parseCDATA()
+			b.addText(&text, b.parseCDATA())
 		default:
 			b.fail(fmt.Sprintf("unknown content token 0x%02x", t))
 			return
@@ -592,20 +640,20 @@ func (b *bxml) parseContent(parent *bxmlElement) {
 }
 
 // applySubst resolves a substitution token in content position: a scalar value
-// is appended to the parent's text; an embedded-BinXML value is parsed and its
-// element attached as a child.
-func (b *bxml) applySubst(parent *bxmlElement) {
+// is appended to the element's text; an embedded-BinXML value is parsed and
+// its element attached as a child.
+func (b *bxml) applySubst(parent *bxmlElement, text *strings.Builder) {
 	idx := int(b.u16())
 	_ = b.u8() // declared value type (the array entry's type is authoritative)
 	if idx < 0 || idx >= len(b.subs) {
 		return
 	}
-	text, el := b.renderValue(b.subs[idx])
+	s, el := b.renderValue(b.subs[idx])
 	if el != nil {
 		parent.Children = append(parent.Children, el)
 		return
 	}
-	parent.Text += text
+	b.addText(text, s)
 }
 
 // readSubstText resolves a substitution token to its scalar text (used for
@@ -714,6 +762,8 @@ func (b *bxml) renderValue(sv substVal) (string, *bxmlElement) {
 		}
 		sub := &bxml{chunk: b.chunk, pos: sv.absOff, depth: b.depth + 1, budget: b.budget}
 		return "", sub.parseFragment()
+	case !b.textRoom():
+		return "", nil
 	case sv.typ&valArrayFlag != 0:
 		return renderArray(sv.typ&^valArrayFlag, sv.data), nil
 	default:

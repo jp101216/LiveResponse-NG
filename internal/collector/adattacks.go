@@ -934,13 +934,22 @@ type roastTicket struct {
 type roastClient struct {
 	account, address string
 	tickets          []roastTicket
+	aes              int // how many of tickets are AES
 }
 
 // kerberoastTracker gathers service-ticket requests (4769) over a run.
+//
+// AES tickets are what every client gets all day, so on a busy domain
+// controller they alone could fill the tracker's bounds (tickets, clients,
+// tickets per client) and crowd out the RC4 tickets that are the strong
+// signal. AES tickets may therefore take only half of each bound; the other
+// half is kept for RC4.
 type kerberoastTracker struct {
-	clients map[string]*roastClient
-	names   map[string]string // service names, interned
-	total   int
+	clients  map[string]*roastClient
+	names    map[string]string // service names, interned
+	total    int
+	aesTotal int
+	dropped  int // tickets not tracked because a bound was reached
 }
 
 func newKerberoastTracker() *kerberoastTracker {
@@ -977,11 +986,27 @@ func aes(etype string) bool {
 
 // observe folds one event in.
 func (t *kerberoastTracker) observe(ev winEvent) {
-	if t == nil || ev.EventID != 4769 || ev.TimeCreated.IsZero() || t.total >= kerberoastMaxTickets {
+	if t == nil || ev.EventID != 4769 || ev.TimeCreated.IsZero() {
 		return
 	}
 	ok, isRC4 := roastable(ev)
 	if !ok {
+		return
+	}
+	// within reports whether n is under a bound: the whole bound for RC4,
+	// half of it for AES.
+	within := func(n, bound int) bool {
+		if !isRC4 {
+			bound /= 2
+		}
+		return n < bound
+	}
+	aesSoFar := t.total
+	if !isRC4 {
+		aesSoFar = t.aesTotal
+	}
+	if t.total >= kerberoastMaxTickets || !within(aesSoFar, kerberoastMaxTickets) {
+		t.dropped++
 		return
 	}
 	account := strings.TrimSpace(evData(ev, "TargetUserName"))
@@ -989,13 +1014,19 @@ func (t *kerberoastTracker) observe(ev winEvent) {
 	key := strings.ToLower(account) + "|" + addr
 	c := t.clients[key]
 	if c == nil {
-		if len(t.clients) >= kerberoastMaxClients {
+		if !within(len(t.clients), kerberoastMaxClients) {
+			t.dropped++
 			return
 		}
 		c = &roastClient{account: account, address: addr}
 		t.clients[key] = c
 	}
-	if len(c.tickets) >= kerberoastMaxPerClient {
+	perClient := len(c.tickets)
+	if !isRC4 {
+		perClient = c.aes
+	}
+	if len(c.tickets) >= kerberoastMaxPerClient || !within(perClient, kerberoastMaxPerClient) {
+		t.dropped++
 		return
 	}
 	svc := strings.TrimSpace(evData(ev, "ServiceName"))
@@ -1007,6 +1038,10 @@ func (t *kerberoastTracker) observe(ev winEvent) {
 	}
 	c.tickets = append(c.tickets, roastTicket{when: ev.TimeCreated, service: svc, rc4: isRC4})
 	t.total++
+	if !isRC4 {
+		c.aes++
+		t.aesTotal++
+	}
 }
 
 // busiestWindow finds the kerberoastWindow-long stretch of tickets (sorted by
@@ -1070,6 +1105,11 @@ func (t *kerberoastTracker) flush() []Record {
 				continue
 			}
 			tickets++
+			if encryption != "RC4" && tk.rc4 {
+				// The bigger burst counts every ticket: say so when a few of
+				// them (fewer than kerberoastMin services) were RC4.
+				encryption = "AES and RC4"
+			}
 			if low := strings.ToLower(tk.service); !seen[low] {
 				seen[low] = true
 				services = append(services, tk.service)
@@ -1095,10 +1135,10 @@ func (t *kerberoastTracker) flush() []Record {
 		} else {
 			f = Finding{Rule: "cred.kerberoasting", Severity: SevNotable, Technique: "T1558.003", Confidence: 45,
 				Detail: fmt.Sprintf("%s (from %s) asked for tickets to %d different services that run as user accounts between %s "+
-					"and %s, AES-encrypted. Clients get AES tickets all day, but rarely to this many service accounts in minutes: "+
+					"and %s, %s-encrypted. Clients get AES tickets all day, but rarely to this many service accounts in minutes: "+
 					"where RC4 is switched off, this is what Kerberoasting looks like (Rubeus kerberoast /aes, Impacket "+
 					"GetUserSPNs in an AES-only domain); the tickets crack offline, more slowly. Services: %s", c.account, addr, best,
-					first.Format(time.RFC3339), last.Format(time.RFC3339), strings.Join(listed, ", "))}
+					first.Format(time.RFC3339), last.Format(time.RFC3339), encryption, strings.Join(listed, ", "))}
 			if best >= kerberoastAESSuspect {
 				f.Severity, f.Confidence = SevSuspect, 60
 			}

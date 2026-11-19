@@ -847,18 +847,19 @@ func doPromptScan(ctx context.Context, cfg config.Config, path string) error {
 		return err
 	}
 	if !resp.OK {
-		return fmt.Errorf("scan failed: %s", resp.Error)
+		return fmt.Errorf("scan failed: %s", output.TerminalSafe(resp.Error))
 	}
 	m := resp.Meta
 	fmt.Printf("prompt scan of %s — verdict %v (score %v), %d hit(s), %v bytes scanned",
-		path, m["verdict"], m["score"], len(resp.Hits), m["bytes_scanned"])
+		output.TerminalSafe(path), m["verdict"], m["score"], len(resp.Hits), m["bytes_scanned"])
 	if t, _ := m["truncated"].(bool); t {
 		fmt.Print(" [TRUNCATED: file larger than scan cap]")
 	}
 	fmt.Println()
 	for _, h := range resp.Hits {
 		fmt.Printf("  [%-8s] %-24s @%-9d %-8s conf=%-3d %s\n",
-			h.Severity, h.Rule, h.Offset, h.Encoding, h.Confidence, h.Context)
+			output.TerminalSafe(h.Severity), output.TerminalSafe(h.Rule), h.Offset, output.TerminalSafe(h.Encoding),
+			h.Confidence, output.TerminalSafe(h.Context))
 	}
 	return nil
 }
@@ -907,14 +908,16 @@ func doMemScan(ctx context.Context, cfg config.Config, pid int) error {
 		return err
 	}
 	if !resp.OK {
-		return fmt.Errorf("%s (%s)", resp.Error, resp.MetaString("status"))
+		return fmt.Errorf("%s (%s)", resp.Error, resp.MetaString("status")) // exitOn makes it terminal-safe
 	}
 	m := resp.Meta
+	// The image, mapped file names and hit contexts come from the scanned
+	// process: an attacker's choice of bytes, escape sequences included.
 	fmt.Printf("memory scan of pid %d %s — %s, %d of %d bytes (%v%%) in %d ms, %d hit(s)\n",
-		pid, resp.MetaString("image"), resp.MetaString("status"), resp.MetaInt("bytes_scanned"),
+		pid, output.TerminalSafe(resp.MetaString("image")), output.TerminalSafe(resp.MetaString("status")), resp.MetaInt("bytes_scanned"),
 		resp.MetaInt("bytes_total"), m["coverage_pct"], resp.MetaInt("elapsed_ms"), len(resp.Hits))
 	if s, _ := m["stopped_early"].(string); s != "" {
-		fmt.Printf("  stopped early: %s\n", s)
+		fmt.Printf("  stopped early: %s\n", output.TerminalSafe(s))
 	}
 	if y, ok := m["yara"].(map[string]any); ok {
 		fmt.Printf("  yara: %v rules from %v file(s)", y["rules_loaded"], y["rule_files"])
@@ -933,9 +936,11 @@ func doMemScan(ctx context.Context, cfg config.Config, pid int) error {
 			if r.File != "" {
 				where += " " + r.File
 			}
+			where = output.TerminalSafe(where)
 		}
 		fmt.Printf("  [%-8s] %-28s 0x%-14x%s conf=%d  %s\n",
-			h.Severity, h.Rule, uint64(h.Offset), where, h.Confidence, h.Context)
+			output.TerminalSafe(h.Severity), output.TerminalSafe(h.Rule), uint64(h.Offset), where, h.Confidence,
+			output.TerminalSafe(h.Context))
 	}
 	// Keep the result already received, but do not turn a broken stream or a
 	// sidecar that failed on exit into a successful scan.

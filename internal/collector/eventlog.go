@@ -220,6 +220,11 @@ func collectEventLogSources(ctx context.Context, res *Result, sources []eventLog
 		keptFlagged++
 	}
 
+	if roast.dropped > 0 {
+		res.SetMeta("kerberoast_tickets_untracked", roast.dropped)
+		res.SetMeta("kerberoast_note", "the service-ticket tracker reached its bounds, so some older tickets weren't counted "+
+			"(half of each bound is kept for RC4 tickets, so AES volume can't crowd them out)")
+	}
 	res.SetMeta("logs_read", logsRead)
 	res.SetMeta("logs_missing", logsMissing)
 	res.SetMeta("records_scanned", scanned)

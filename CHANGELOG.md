@@ -74,6 +74,9 @@ them). Report schema remains 1.2; account records may carry a new
   download-substitution check; netcat `-e` is recognised after upper-case or
   digit flags (`-Ce`, `-4e`); `LD_PRELOAD` in an MCP server's environment is
   split on spaces as well as colons.
+- **Dependencies.** wasmtime (used by YARA-X in the sidecar) 48.0.8 → 48.0.9
+  for RUSTSEC-2026-0566 to -0573, published after 0.19.0 and failing
+  `cargo audit` in CI.
 - **Terminal output.** `-mem-scan` and `-scan-prompts` print the image, mapped
   file names and hit contexts through the terminal-safe filter, and bytes that
   aren't valid UTF-8 are escaped too (a raw 0x9b is CSI to an 8-bit terminal).

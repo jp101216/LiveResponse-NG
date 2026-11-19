@@ -26,7 +26,8 @@ type jlog struct {
 	Ident     string // SYSLOG_IDENTIFIER, else _COMM
 	Transport string // _TRANSPORT: kernel, syslog, journal, stdout, ...
 	Comm      string // _COMM: the sending process's name, set by journald itself
-	UID       string // _UID: the sender's uid, from the socket credentials
+	UID       string // _UID: the sender's real uid, from the socket credentials
+	Exe       string // _EXE: the sender's executable, read by journald from /proc
 	Message   string
 	PID       string
 	Host      string
@@ -38,6 +39,7 @@ func jlogFrom(e *journalEntry) jlog {
 		Transport: e.Get("_TRANSPORT"),
 		Comm:      e.Get("_COMM"),
 		UID:       e.Get("_UID"),
+		Exe:       e.Get("_EXE"),
 		Message:   e.Get("MESSAGE"),
 		PID:       e.Get("_PID"),
 		Host:      e.Get("_HOSTNAME"),

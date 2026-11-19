@@ -801,9 +801,17 @@ func judgeMCPServer(s mcpServer) []Finding {
 	if s.Command != "" {
 		line := joinCommand(s.Command, s.Args)
 		out = append(out, aiCommandFindings(where+" runs a command that", s.Command, line)...)
-		if lvl, why := aiPathRisk(s.Command); lvl == riskHigh {
+		lvl, why := aiPathRisk(s.Command)
+		what := s.Command
+		// "command": "bash", "args": ["/tmp/x.sh"]: the script is what runs.
+		if script := scriptArgument(line); strings.HasPrefix(script, "/") {
+			if l, w := unixPathRisk(script); l > lvl {
+				lvl, why, what = l, w, script
+			}
+		}
+		if lvl == riskHigh {
 			out = append(out, Finding{Rule: "ai.mcp_server_unusual_path", Severity: SevSuspect, Technique: "T1546", Confidence: 65,
-				Detail: fmt.Sprintf("%s starts %s, in %s: the client runs it with the user's rights every time it starts", where, s.Command, why)})
+				Detail: fmt.Sprintf("%s starts %s, in %s: the client runs it with the user's rights every time it starts", where, what, why)})
 		}
 		if spec := remoteCodeSpec(s.Command, s.Args); spec != "" {
 			out = append(out, Finding{Rule: "ai.mcp_server_remote_code", Severity: SevNotable, Technique: "T1195.002", Confidence: 45,
@@ -899,6 +907,10 @@ func judgeMCPCodeEnv(where, name, value string) (Finding, bool) {
 		technique = "T1574.012"
 	}
 	shown, paths := value, splitPathList(value)
+	if upper == "LD_PRELOAD" {
+		// ld.so splits LD_PRELOAD on spaces as well as colons.
+		paths = strings.FieldsFunc(value, func(r rune) bool { return r == ':' || r == ' ' || r == '\t' })
+	}
 	if opts := mcpCodeEnvOptions[upper]; opts != nil {
 		shown, paths = codeLoadingOptions(value, opts)
 		if shown == "" {
@@ -996,10 +1008,10 @@ func judgeMCPURL(where, raw string) (Finding, bool) {
 func judgeAgentHook(h agentHook) []Finding {
 	where := fmt.Sprintf("%s hook %s in %s", h.Client, h.Event, h.Config)
 	out := aiCommandFindings(where+" runs a command that", "", h.Command)
+	// Windows-shaped and POSIX-shaped paths both: the riskier one counts.
 	lvl, why, culprit := commandPathRisk(h.Command)
-	if prog := firstProgram(h.Command); strings.HasPrefix(prog, "/") {
-		lvl, why = unixPathRisk(prog)
-		culprit = prog
+	if l, w, c := unixCommandPathRisk(h.Command); l > lvl {
+		lvl, why, culprit = l, w, c
 	}
 	if lvl == riskHigh {
 		out = append(out, Finding{Rule: "ai.agent_hook_unusual_path", Severity: SevSuspect, Technique: "T1546", Confidence: 60,

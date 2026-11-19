@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -170,22 +171,37 @@ func journalSource(l jlog) string {
 // journalSourceTrusted checks a message's claimed source against what journald
 // records itself. SYSLOG_IDENTIFIER is chosen by the sender — any user can run
 // `logger -t sshd "Accepted password for root from 203.0.113.9 port 1 ssh2"` —
-// but _TRANSPORT, _UID and _COMM come from journald and the kernel. Kernel
-// messages arrive on the kernel transport only; the others run as root when
-// they log (setuid or root daemons), under their own process name. A field the
-// entry doesn't carry (journald couldn't read /proc in time, or an imported
+// but _TRANSPORT, _UID, _COMM and _EXE come from journald and the kernel.
+// Kernel messages arrive on the kernel transport only. The daemons (sshd,
+// cron, useradd and the like run by root) log as root under their own process
+// name. _UID is the sender's real uid, though, not its effective one: su, and
+// passwd, chage or gpasswd run by an ordinary user, are setuid root and log
+// before they change identity, so they carry the invoking user's uid (as do
+// sudo's PAM lines from before it switches to root). Those are accepted from
+// any uid under their own name, and when journald recorded the executable it
+// must be the system's copy of that program. Otherwise a field the entry
+// doesn't carry (journald couldn't read /proc in time, or an imported
 // journal) isn't held against it.
 func journalSourceTrusted(src string, l jlog) bool {
 	if src == "kernel" {
 		return l.Transport == "kernel" || l.Transport == ""
 	}
-	if l.Transport == "kernel" || (l.UID != "" && l.UID != "0") {
+	if l.Transport == "kernel" {
 		return false
+	}
+	comm := strings.ToLower(l.Comm)
+	if l.UID != "" && l.UID != "0" {
+		// Only a setuid program, under its own process name, logs as this
+		// source from another uid. These are interactive, so journald reads
+		// their name in time; a non-root line without one isn't vouched for.
+		if !setuidLoggers[comm] || journalSource(jlog{Ident: comm}) != src {
+			return false
+		}
+		return l.Exe == "" || systemProgram(l.Exe, comm)
 	}
 	if l.Comm == "" {
 		return true
 	}
-	comm := strings.ToLower(l.Comm)
 	switch src {
 	case "sshd":
 		return strings.HasPrefix(comm, "sshd")
@@ -196,6 +212,26 @@ func journalSourceTrusted(src string, l jlog) bool {
 	default:
 		return comm == src
 	}
+}
+
+// setuidLoggers are the setuid-root programs, among the sources parsed here,
+// that an ordinary user runs and that log before taking root's uid.
+var setuidLoggers = map[string]bool{
+	"su": true, "sudo": true, "passwd": true, "chage": true, "gpasswd": true,
+}
+
+// systemProgram reports whether exe is the named program in one of the
+// directories only root can write to.
+func systemProgram(exe, name string) bool {
+	dir, base := path.Split(exe)
+	if !strings.EqualFold(base, name) {
+		return false
+	}
+	switch dir {
+	case "/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/", "/usr/local/bin/", "/usr/local/sbin/":
+		return true
+	}
+	return false
 }
 
 func (t *journalTriage) add(l jlog) {

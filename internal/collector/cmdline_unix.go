@@ -143,9 +143,13 @@ func runsDownloadedSubstitution(lc string) bool {
 		case lc[i] == '`':
 			end := strings.IndexByte(lc[i+1:], '`')
 			if end < 0 {
-				return false
+				continue // a lone (or escaped) backtick: look on
 			}
 			inner = lc[i+1 : i+1+end]
+			if !downloaders[pipelineProgram(inner)] {
+				i += end + 1 // past the closing backtick, so it isn't read as an opening one
+				continue
+			}
 		default:
 			continue
 		}
@@ -230,18 +234,24 @@ func pipeTargets(lc string) []string {
 // grouping around the word are dropped, so the "sh'" in `sh -c 'curl x | sh'`,
 // the "sh)" in `$(curl x | sh)` and the "sh;" in `{ curl x | sh; }` read as sh.
 func pipelineProgram(seg string) string {
-	for _, f := range strings.Fields(strings.TrimSpace(seg)) {
-		f = strings.Trim(f, "'\"`(){};")
+	fields := strings.Fields(strings.TrimSpace(seg))
+	wrapper := ""
+	for i := 0; i < len(fields); i++ {
+		f := strings.Trim(fields[i], "'\"`(){};")
 		switch {
 		case f == "":
 			continue
-		case strings.HasPrefix(f, "-"): // a flag
+		case strings.HasPrefix(f, "-"): // a flag, and a wrapper flag's value ("| sudo -u root bash")
+			if wrapperValueFlags[wrapper][f] {
+				i++
+			}
 			continue
 		case isEnvAssignment(f): // VAR=val, including VAR=/some/path
 			continue
 		}
 		base := unixBaseName(f)
 		if cmdWrappers[base] {
+			wrapper = base
 			continue
 		}
 		return base
@@ -272,7 +282,9 @@ func netcatExec(lc string) bool {
 
 // netcatExecFlag reports whether one argument is a short-option cluster that
 // carries netcat's -e (execute) or -c (shell command) flag: "-e", "-c", but
-// also "-nve /bin/sh" and "-e/bin/sh", which getopt reads the same way.
+// also "-nve /bin/sh", "-Ce /bin/sh", "-4e /bin/sh" and "-e/bin/sh", which
+// getopt reads the same way. An option that takes a value (-p 4444, -w5)
+// ends the cluster: the rest of it is that value.
 func netcatExecFlag(f string) bool {
 	if len(f) < 2 || f[0] != '-' || f[1] == '-' {
 		return false
@@ -281,12 +293,20 @@ func netcatExecFlag(f string) bool {
 		switch {
 		case r == 'e' || r == 'c':
 			return true
-		case r < 'a' || r > 'z':
-			return false // the cluster ended: what follows is an option argument
+		case strings.ContainsRune(netcatValueOptions, r):
+			return false // the rest of the cluster is this option's value
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			// a flag (-n, -v, -l, -C, -4 ...): the cluster goes on
+		default:
+			return false
 		}
 	}
 	return false
 }
+
+// netcatValueOptions are the single-letter options, across the traditional,
+// OpenBSD and Nmap netcats, that take a value.
+const netcatValueOptions = "dgGiImMoOpPqsTVwxX"
 
 // splitCommandSegments breaks a command line at the separators that start a new
 // command or pipeline stage, so each segment can be examined for its own program.

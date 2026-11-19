@@ -64,18 +64,18 @@ func (p persistRecorder) add(fields map[string]any, cmd string, findings []Findi
 // the shared Unix analytics) and where its program runs from.
 func persistenceFindings(source, cmd string) []Finding {
 	out := analyzeUnixCommandLine(source, "", cmd)
-	if prog := firstProgram(cmd); prog != "" && strings.HasPrefix(prog, "/") {
-		if lvl, why := unixPathRisk(prog); lvl == riskHigh {
-			out = append(out, Finding{
-				Rule: "persistence.unusual_path", Severity: SevSuspect, Technique: "T1543", Confidence: 55,
-				Detail: fmt.Sprintf("%s runs %s from %s", source, prog, why),
-			})
-		} else if lvl == riskLow {
-			out = append(out, Finding{
-				Rule: "persistence.unusual_path", Severity: SevNotable, Technique: "T1543", Confidence: 30,
-				Detail: fmt.Sprintf("%s runs %s from %s", source, prog, why),
-			})
-		}
+	// The program, or the script an interpreter runs ("sh /tmp/.x/run.sh").
+	switch lvl, why, what := unixCommandPathRisk(cmd); lvl {
+	case riskHigh:
+		out = append(out, Finding{
+			Rule: "persistence.unusual_path", Severity: SevSuspect, Technique: "T1543", Confidence: 55,
+			Detail: fmt.Sprintf("%s runs %s from %s", source, what, why),
+		})
+	case riskLow:
+		out = append(out, Finding{
+			Rule: "persistence.unusual_path", Severity: SevNotable, Technique: "T1543", Confidence: 30,
+			Detail: fmt.Sprintf("%s runs %s from %s", source, what, why),
+		})
 	}
 	return out
 }

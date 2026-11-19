@@ -166,17 +166,18 @@ type groupMembership struct {
 	group   string
 	gid     int
 	member  string
-	uid     int // -1 when the member isn't in /etc/passwd
+	uid     int    // -1 when the member isn't in /etc/passwd
+	shell   string // the member's login shell, when it is in /etc/passwd
 	primary bool
 }
 
 // privilegedMemberships lists the members of privilegedGroups: those
 // /etc/group names, then the accounts whose primary group it is, each once.
 func privilegedMemberships(groups []groupEntry, users []passwdEntry) []groupMembership {
-	uidOf := map[string]int{}
+	uidOf, shellOf := map[string]int{}, map[string]string{}
 	for _, u := range users {
 		if _, ok := uidOf[u.Name]; !ok {
-			uidOf[u.Name] = u.UID
+			uidOf[u.Name], shellOf[u.Name] = u.UID, u.Shell
 		}
 	}
 	var out []groupMembership
@@ -196,13 +197,13 @@ func privilegedMemberships(groups []groupEntry, users []passwdEntry) []groupMemb
 			if !ok {
 				uid = -1
 			}
-			add(groupMembership{group: grp.Name, gid: grp.GID, member: name, uid: uid})
+			add(groupMembership{group: grp.Name, gid: grp.GID, member: name, uid: uid, shell: shellOf[name]})
 		}
 		for _, u := range users {
 			// A group's own namesake account (root in root, a docker
 			// account in docker) is how distributions set groups up.
 			if u.GID == grp.GID && u.Name != grp.Name {
-				add(groupMembership{group: grp.Name, gid: grp.GID, member: u.Name, uid: u.UID, primary: true})
+				add(groupMembership{group: grp.Name, gid: grp.GID, member: u.Name, uid: u.UID, shell: u.Shell, primary: true})
 			}
 		}
 	}
@@ -238,7 +239,12 @@ func (m groupMembership) findings() []Finding {
 			Detail: fmt.Sprintf("%q %s the \"shadow\" group: it can read /etc/shadow, every account's password hash. Only "+
 				"system programs (unix_chkpwd, chage) need that", m.member, how)}}
 	}
-	if m.primary && m.uid > 0 && (m.group == "root" || m.group == "sudo" || m.group == "wheel" || m.group == "admin") {
+	// Red Hat's sync, shutdown, halt and operator accounts have the root group
+	// as their primary group by default; a system account (below UID 1000)
+	// without a usable login shell is how distributions set that up, not a
+	// way in.
+	systemDefault := m.uid < 1000 && disabledShells[m.shell]
+	if m.primary && m.uid > 0 && !systemDefault && (m.group == "root" || m.group == "sudo" || m.group == "wheel" || m.group == "admin") {
 		return []Finding{{Rule: "accounts.privileged_primary_group", Severity: SevNotable, Technique: "T1078.003", Confidence: 45,
 			Detail: fmt.Sprintf("%q has the %q group (GID %d) as its primary group, set in /etc/passwd where `getent group` and "+
 				"group-membership reviews don't look", m.member, m.group, m.gid)}}

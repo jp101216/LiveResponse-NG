@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+Fixes from a bug check of 0.19.0: two ways a crafted log could stall the
+agent, false findings on every `su` and on Red Hat's default accounts, and
+several ways a Linux payload could slip past the persistence and command-line
+checks. Report schema remains 1.2.
+
+### Fixed
+
+- **EVTX text amplification.** One record whose template names a long string
+  substitution thousands of times took about 40 seconds to parse (its text was
+  rebuilt on every append), and nothing bounded the text a record could
+  render, so a crafted log stalled the event-log collector despite the
+  template-bomb fix. Element text is now built linearly within a 4 MiB
+  per-record budget; a record over it is cut short with a warning.
+- **Journal fields claiming a huge size.** journald's LZ4 and zstd payloads
+  state their decompressed size, and the reader reserved that much (up to
+  16 MiB) before finding the payload empty: about 2 ms a field, hours for a
+  crafted 512 MiB journal. The up-front reservation now follows the input's
+  size.
+- **`su` reported as forged log lines.** journald's `_UID` is the sender's
+  real uid, and `su` (like `passwd`, `chage` or `gpasswd` run by a user, and
+  `sudo`'s PAM lines) is setuid root and logs before changing identity, so
+  every `su` was `defense.log_spoofing` and its event was dropped. These
+  programs are accepted from any uid under their own process name, and from
+  the system's copy of the program when journald recorded `_EXE`;
+  `logger -t su` is still caught.
+- **systemd comments.** A comment line ending in a backslash was joined with
+  the next line, so `# old: \` above `ExecStart=/tmp/x` hid the ExecStart.
+  Unit files are now split as systemd does: comment lines are dropped even
+  inside a continuation, and only an odd number of trailing backslashes
+  continues a line.
+- **Scripts run by an interpreter.** `sh /tmp/.x/run.sh`, `python3
+  /dev/shm/a.py` and the like in cron, systemd units, anacron and `at` jobs,
+  MCP servers (`"command": "bash", "args": ["/tmp/x.sh"]`) and agent hooks are
+  graded by the script's location, not only the interpreter's.
+- **Wrapper options.** `sudo -u nobody /tmp/x`, `nice -n 19 /tmp/x` and
+  `curl … | sudo -u root bash` took the option's value for the program; the
+  value of a wrapper's option is now skipped.
+- **Red Hat defaults.** `sync`, `shutdown`, `halt` and `operator` have the
+  root group as their primary group out of the box and were
+  `accounts.privileged_primary_group` on every such host; system accounts
+  without a login shell are no longer reported for it.
+- **Kerberoasting under load.** AES tickets could fill the ticket tracker's
+  bounds on a busy domain controller and crowd out the RC4 tickets of a real
+  roast. AES tickets now take at most half of each bound, a bound reached is
+  noted in the collector's meta, and a burst that mixes RC4 and AES tickets
+  says so.
+- **Links to network shares on Windows.** A symbolic link whose
+  target is a UNC path (`C:\Users\x\.claude` → `\\host\share`) was followed
+  when the file was opened, defeating the UNC check. Each path is now walked
+  from its volume root and refused when a link on the way leads off the host.
+- **Smaller evasions.** A lone or escaped backtick no longer stops the
+  download-substitution check; netcat `-e` is recognised after upper-case or
+  digit flags (`-Ce`, `-4e`); `LD_PRELOAD` in an MCP server's environment is
+  split on spaces as well as colons.
+- **Terminal output.** `-mem-scan` and `-scan-prompts` print the image, mapped
+  file names and hit contexts through the terminal-safe filter, and bytes that
+  aren't valid UTF-8 are escaped too (a raw 0x9b is CSI to an 8-bit terminal).
+
 ## 0.19.0
 
 Fixes from a line-by-line review of the whole source tree (agent, sidecar,

@@ -52,8 +52,9 @@ sidecar-rs/            Rust sidecar
     threads.rs         thread start addresses and stack frames: the judging
                        (portable)
     unwind.rs          x64 unwinding from a module's .pdata/.xdata, as
-                       RtlVirtualUnwind does it, and the follows-a-call
-                       check (portable)
+                       RtlVirtualUnwind does it, the follows-a-call check,
+                       and the call-target, thunk and tail-jump decoding
+                       the call-mismatch check reads (portable)
     pe.rs              bounds-checked PE reader (sections, relocations,
                        exports) and the per-module comparison
     windows.rs         VirtualQueryEx / ReadProcessMemory (read-only)
@@ -378,6 +379,20 @@ A walk stops at the first frame it can't go past:
 - memory no image backs. Frame 1 there is the system-call checks' finding;
   deeper, it is `memory.stack_unbacked` unless the address is in a code range
   the process registered with ntdll.
+
+Frame 1 in a module is also checked against the stub (`call_mismatch`): the
+stub's start is the nearest `mov r10, rcx; mov eax, n` before the thread's
+instruction pointer; the call before the return address is decoded
+(`unwind::call_target`: `call rel32` or `call [rip+disp32]` through the import
+pointer, and only when every decoding that ends there agrees); jump thunks are
+followed (`thunk_hop`, but not a `jmp rel32` out of its module, an inline
+hook). A call to another stub is a mismatch. A call to a function of the
+caller's module or the core DLLs is one only if `tail_reaches` proves no tail
+jump gets from it to the stub: every fragment of the function (`fragments`,
+by chained unwind information) is scanned for jumps (`jump_targets`), and
+those leading to a function's start or a thunk are followed up to three deep
+within 16 KiB of code. An indirect jump, a function with no unwind data, or a
+longer chain leaves it unjudged.
 
 Those ranges come from the dynamic function table list (`RtlGetFunctionTableListHead`
 gives its head in ntdll's data, at the same address in every process; each

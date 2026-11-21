@@ -13,6 +13,11 @@
 //!   data, a dispatcher's machine frame, or memory no image backs (judged
 //!   there). A finding is kept only if the thread's registers and the stack
 //!   slot it came from read the same a second time.
+//! - The first return address above the system call must follow a call
+//!   that leads to the stub the thread is blocked in (directly, through an
+//!   import or thunk, or by a tail jump in the function it calls). A forged
+//!   return address picked because a call precedes it (a call-preceded
+//!   gadget) usually follows a call to something else.
 //! - JIT code: the ranges a runtime registered with ntdll as code
 //!   (RtlAddFunctionTable, RtlInstallFunctionTableCallback,
 //!   RtlAddGrowableFunctionTable) come from the process's list of dynamic
@@ -41,6 +46,13 @@ const STACK_READ: usize = 64 << 10;
 const MAX_MODULES: usize = 2048;
 /// Dynamic function tables read per process, at most.
 const MAX_TABLES: usize = 4096;
+/// Code read from a called function (all its fragments) to look for a tail
+/// jump on to the system-call stub; a longer one isn't judged.
+const MAX_TARGET_CODE: usize = 16 << 10;
+/// Jump thunks followed from a call's target, at most.
+const MAX_THUNK_HOPS: usize = 4;
+/// Functions followed through tail jumps from a call's target, at most.
+const MAX_TAIL_DEPTH: usize = 3;
 /// DYNAMIC_FUNCTION_TABLE (x64): MinimumAddress and MaximumAddress.
 const TABLE_MIN: usize = 0x20;
 const TABLE_MAX: usize = 0x28;
@@ -430,6 +442,16 @@ pub(super) fn walk(
                     let symbol = module.name(base, pc, true);
                     return (finding(Frame::NoCall { symbol }, chain), frames);
                 }
+                if depth == 1 {
+                    if let Some(target) = call_mismatch(p, r.rip, pc, base, mods) {
+                        let frame = Frame::CallMismatch {
+                            symbol: module.name(base, pc, true),
+                            target,
+                            waiting: chain[0].clone(),
+                        };
+                        return (finding(frame, chain), frames);
+                    }
+                }
                 chain.push(module.name(base, pc, true));
                 let Some(t) = module.table.as_ref() else {
                     return (Walked::Stopped("a module with no x64 unwind data"), frames);
@@ -601,6 +623,152 @@ fn judge_ends(
         frame,
         chain: c,
     })
+}
+
+/// Whether the call just before the first return address `pc` (in the module
+/// at `caller`) leads somewhere other than the system-call stub the thread is
+/// blocked in (`rip` is just past its `syscall`): the target's name if so.
+///
+/// Judged only when the bytes leave no doubt. The call must be `call rel32`
+/// or through an import pointer (a call through a register says nothing);
+/// jump thunks from its target are followed, except a `jmp rel32` out of its
+/// module, which is an inline hook. The target must be another system-call
+/// stub (a definite mismatch), or a function of the caller's own module or
+/// the system's core DLLs from which no tail jump can reach the stub
+/// ([`tail_reaches`]). Anything else is left unjudged.
+fn call_mismatch(
+    p: &WinProcess,
+    rip: usize,
+    pc: usize,
+    caller: usize,
+    mods: &mut Modules,
+) -> Option<String> {
+    let mut back = [0u8; 0x20];
+    if p.read(rip.checked_sub(back.len())?, &mut back) != back.len() {
+        return None;
+    }
+    let stub = unwind::stub_start(&back, rip as u64)? as usize;
+    let mut before = [0u8; 15];
+    if p.read(pc.checked_sub(before.len())?, &mut before) != before.len() {
+        return None;
+    }
+    let mut read = |a: u64| read_usize(p.h, usize::try_from(a).ok()?).map(|v| v as u64);
+    let base_of = |a: usize| locate(p, a).and_then(|m| m.base);
+    let mut target = unwind::call_target(&before, pc as u64, &mut read)? as usize;
+    for _ in 0..MAX_THUNK_HOPS {
+        if target == stub {
+            return None;
+        }
+        let mut code = [0u8; 16];
+        let n = p.read(target, &mut code);
+        let Some(next) = unwind::thunk_hop(&code[..n], target as u64, &mut read) else {
+            break;
+        };
+        let next = next as usize;
+        if code[0] == 0xE9 && base_of(next) != base_of(target) {
+            return None; // an inline hook: where it leads says nothing
+        }
+        target = next;
+    }
+    if target == stub {
+        return None;
+    }
+    let tbase = base_of(target)?;
+    let tm = module_at(p, mods, tbase);
+    let mut head = [0u8; 4];
+    let another_stub = p.read(target, &mut head) == head.len() && head == unwind::STUB_PREFIX;
+    if !another_stub {
+        let core = matches!(
+            tm.name.as_str(),
+            "ntdll.dll" | "win32u.dll" | "kernelbase.dll" | "kernel32.dll"
+        );
+        if (tbase != caller && !core) || tail_reaches(p, mods, target, stub) != Some(false) {
+            return None;
+        }
+    }
+    Some(tm.name(tbase, target, true))
+}
+
+/// Whether control entering the function at `start` can reach `stub` by
+/// tail jumps: `Some(true)` if a jump leads there (directly, through a thunk,
+/// or through up to MAX_TAIL_DEPTH functions in turn), `Some(false)` if none
+/// can, `None` when that can't be told: an indirect jump, a function with no
+/// unwind data to bound it, a chain deeper than MAX_TAIL_DEPTH, or more than
+/// MAX_TARGET_CODE bytes to read.
+///
+/// The functions' bytes are scanned at every offset, so data and the middle
+/// of an instruction can read as a jump. A compiler's tail jump goes to a
+/// function's start or a thunk; a "jump" anywhere else (into the middle of a
+/// function, past any function's code, or out of mapped image code) is that
+/// noise and is skipped.
+fn tail_reaches(p: &WinProcess, mods: &mut Modules, start: usize, stub: usize) -> Option<bool> {
+    let mut read = |a: u64| read_usize(p.h, usize::try_from(a).ok()?).map(|v| v as u64);
+    let mut seen = std::collections::HashSet::new();
+    let mut queue = vec![(start, 0usize)];
+    let mut budget = MAX_TARGET_CODE;
+    while let Some((f, depth)) = queue.pop() {
+        if f == stub {
+            return Some(true);
+        }
+        if !seen.insert(f) {
+            continue;
+        }
+        let mem = locate(p, f);
+        let Some(base) = mem.as_ref().filter(|m| m.exec).and_then(|m| m.base) else {
+            if depth == 0 {
+                return None;
+            }
+            continue; // not image code: noise
+        };
+        let mut head = [0u8; 16];
+        let n = p.read(f, &mut head);
+        if n >= 4 && head[..4] == unwind::STUB_PREFIX {
+            continue; // another stub: it returns
+        }
+        if let Some(next) = unwind::thunk_hop(&head[..n], f as u64, &mut read) {
+            if depth >= MAX_TAIL_DEPTH {
+                return None;
+            }
+            queue.push((next as usize, depth + 1));
+            continue;
+        }
+        let m = module_at(p, mods, base);
+        let rva = u32::try_from(f - base).ok()?;
+        let t = m.table.as_ref()?;
+        match t.function(rva) {
+            Some(func) if func.begin == rva => {}
+            _ if depth > 0 => continue, // not a function's start: noise
+            _ => return None,
+        }
+        if depth >= MAX_TAIL_DEPTH {
+            return None;
+        }
+        let ranges: Vec<(usize, usize)> = t
+            .fragments(rva)
+            .into_iter()
+            .map(|(b, e)| (base + b as usize, base + e as usize))
+            .collect();
+        for &(lo, hi) in &ranges {
+            budget = budget.checked_sub(hi - lo)?;
+            let mut code = vec![0u8; hi - lo];
+            if p.read(lo, &mut code) != code.len() {
+                return None;
+            }
+            let (targets, indirect) = unwind::jump_targets(&code, lo as u64, &mut read);
+            if indirect {
+                return None;
+            }
+            for t in targets.into_iter().map(|t| t as usize) {
+                if t == stub {
+                    return Some(true);
+                }
+                if !ranges.iter().any(|&(a, b)| t >= a && t < b) {
+                    queue.push((t, depth + 1));
+                }
+            }
+        }
+    }
+    Some(false)
 }
 
 /// Whether the code just before `pc` ends with a call instruction; None when
@@ -820,8 +988,11 @@ mod tests {
     /// there), the same with that memory made non-executable while it waits
     /// (as a sleep mask leaves it), the same with the memory registered as
     /// JIT code (not judged), threads parked at LoadLibraryW and inside a
-    /// function, and one posed with a return address that follows no call.
-    /// The waiting code only calls WaitForSingleObject; nothing evasive runs.
+    /// function, one posed with a return address that follows no call, and
+    /// one posed in NtWaitForSingleObject returning to SleepEx's real return
+    /// site, which follows a call to NtDelayExecution (a call-preceded
+    /// gadget). The waiting code only calls WaitForSingleObject; nothing
+    /// evasive runs.
     #[test]
     fn walks_stacks_and_finds_planted_threads() {
         let _serial = SELFTEST.lock();
@@ -1011,14 +1182,25 @@ mod tests {
         let mut copy = vec![0u8; 0x400];
         let n = p_read(sc_ctx.0.Rsp as usize, &mut copy);
         assert!(n >= 0x100, "read {n} bytes of the sleeping thread's stack");
-        // The data page holds four stacks that mustn't overlap: this copy at
+        // The data page holds five stacks that mustn't overlap: this copy at
         // the bottom (at most 0x40F bytes in), then the posed stacks at 0x800
-        // (no call), 0xA00 (truncated) and 0xC00 (gadget), each with zeros
-        // above it where its walk ends.
+        // (no call), 0xA00 (truncated), 0xC00 (gadget) and 0xE00 (call
+        // mismatch), each with zeros above it where its walk ends.
         let forged = data + (sc_ctx.0.Rsp as usize & 0xF);
         assert!(forged + n <= data + 0x800);
         unsafe { core::ptr::copy_nonoverlapping(copy.as_ptr(), forged as *mut u8, n) };
         let forged_pose = Posed::new(delay + dsc + 2, forged);
+        // NtDelayExecution's stub is a leaf: SleepEx's return site is at the
+        // top of the sleeping thread's stack. It follows a real call, to
+        // NtDelayExecution; posed above NtWaitForSingleObject it is a
+        // call-preceded gadget.
+        let sleep_ret = u64::from_le_bytes(copy[..8].try_into().unwrap()) as usize;
+        assert!(
+            unwind::follows_call(unsafe { &*((sleep_ret - 15) as *const [u8; 15]) }),
+            "SleepEx's return site 0x{sleep_ret:x} follows a call"
+        );
+        unsafe { *((data + 0xE00) as *mut u64) = sleep_ret as u64 };
+        let mismatch_pose = Posed::new(wait + sc + 2, data + 0xE00);
 
         let planted = me.thread_checks(soon()).unwrap().threads;
         // While it waits, the waiting code is made non-executable.
@@ -1040,7 +1222,7 @@ mod tests {
         assert!(unsafe { RtlDeleteFunctionTable(rf.as_ptr()) });
 
         // Undo it all: the waiting thread returns, the others run `idle`.
-        for posed in [gadget_pose, truncated_pose, forged_pose] {
+        for posed in [gadget_pose, truncated_pose, forged_pose, mismatch_pose] {
             posed.release();
         }
         unsafe {
@@ -1135,6 +1317,26 @@ mod tests {
             1,
             "{:?}",
             planted.hits()
+        );
+        // The call-preceded gadget, and only it: every real waiter (and the
+        // truncated and forged poses, whose first frames are their stubs'
+        // real callers) passes.
+        let mismatch = find(&planted, "defense.stack_call_mismatch", "suspect");
+        assert_eq!(mismatch.offset as usize, sleep_ret);
+        assert!(
+            mismatch
+                .context
+                .contains("follows a call to ntdll.dll!NtDelayExecution")
+                && mismatch
+                    .context
+                    .contains("not to ntdll.dll!NtWaitForSingleObject"),
+            "{}",
+            mismatch.context
+        );
+        assert!(
+            !mismatch.context.contains("; thread"),
+            "only one thread: {}",
+            mismatch.context
         );
         assert_eq!(
             find(&hidden, "defense.stack_return_nonexec", "critical").offset as usize,

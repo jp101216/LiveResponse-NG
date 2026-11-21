@@ -42,6 +42,16 @@ schema remains 1.2.
   while `RunAsPPL` asks for protection, or Defender's engine without
   PPL-Antimalware, is *suspect*. A new `process_protection` record lists the
   levels read.
+- **`defense.stack_call_mismatch`.** The stack walk checks the first return
+  address above a system call: the call before it must lead to the stub the
+  thread is blocked in, directly, through an import or thunk, or by tail
+  jumps (followed up to three functions deep, every fragment of each). A
+  return site borrowed from a call to another system call or to a function
+  that can't reach that stub is a call-preceded gadget, which passes the
+  follows-a-call check. Judged only for a direct or import call into the
+  caller's own module or the core DLLs, with unwind data and no indirect
+  jump; inline hooks are left alone. The Windows self-test poses a thread in
+  NtWaitForSingleObject returning to SleepEx's real return site.
 - **`defense.indirect_syscall` from Sysmon 10.** LSASS opened through an
   ntdll system-call stub that code no module backs called directly (the
   NanoDump and Halo's/Tartarus-gate shape). Unbacked frames further up the

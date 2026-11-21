@@ -68,6 +68,14 @@ pub enum Frame {
     /// The frame BaseThreadInitThunk called, when it is a Windows API in a
     /// module the thread didn't start in.
     FakeThreadStart { symbol: String, start: String },
+    /// The first return address above a system call, which follows a call,
+    /// but a call to some other function (`target`) than the stub the
+    /// thread is blocked in (`waiting`).
+    CallMismatch {
+        symbol: String,
+        target: String,
+        waiting: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,6 +224,11 @@ impl StackFinding {
                  "BaseThreadInitThunk appears to have called a Windows API itself, in a module the thread didn't start in: thread-start frames forged beneath the real caller so the stack looks like a fresh thread waiting (synthetic call-stack spoofing)"),
                 line,
             ),
+            Frame::CallMismatch { .. } => (
+                ("defense.stack_call_mismatch", "suspect", "T1036", 70,
+                 "the call just before this return address goes to a different function than the system call the thread is blocked in, so that call didn't put it there: an address picked because a call precedes it (a call-preceded gadget) and placed on the stack to pass as the caller, the way CET-aware call-stack spoofers and indirect system calls that borrow another API's return site disguise their frames"),
+                line,
+            ),
         }
     }
 }
@@ -242,6 +255,11 @@ impl Frame {
             Frame::FakeThreadStart { symbol, start } => format!(
                 "{symbol} (0x{addr:x}), called straight from BaseThreadInitThunk though the thread started at {start}"
             ),
+            Frame::CallMismatch {
+                symbol,
+                target,
+                waiting,
+            } => format!("{symbol} (0x{addr:x}), which follows a call to {target}, not to {waiting}"),
         }
     }
 }
@@ -411,6 +429,25 @@ mod tests {
                     },
                     chain: chain("kernel32.dll!Sleep"),
                 },
+                StackFinding {
+                    tid: 8,
+                    addr: 0x7ff3,
+                    depth: 1,
+                    frame: Frame::CallMismatch {
+                        symbol: "kernelbase.dll!SleepEx+0x9d".into(),
+                        target: "ntdll.dll!NtDelayExecution".into(),
+                        waiting: "ntdll.dll!NtWaitForSingleObject".into(),
+                    },
+                    chain: vec![
+                        "ntdll.dll!NtWaitForSingleObject".into(),
+                        Frame::CallMismatch {
+                            symbol: "kernelbase.dll!SleepEx+0x9d".into(),
+                            target: "ntdll.dll!NtDelayExecution".into(),
+                            waiting: "ntdll.dll!NtWaitForSingleObject".into(),
+                        }
+                        .describe(0x7ff3),
+                    ],
+                },
             ],
             ..Default::default()
         };
@@ -430,8 +467,14 @@ mod tests {
                 ("memory.stack_unbacked", "critical", 0x3010),
                 ("defense.stack_return_nonexec", "critical", 0x2010),
                 ("defense.stack_frame_no_call", "suspect", 0x7ff2),
+                ("defense.stack_call_mismatch", "suspect", 0x7ff3),
             ]
         );
+        assert_eq!(
+            h[8].context.split(". ").next().unwrap(),
+            "thread 8 waiting in ntdll.dll!NtWaitForSingleObject, called from kernelbase.dll!SleepEx+0x9d (0x7ff3), which follows a call to ntdll.dll!NtDelayExecution, not to ntdll.dll!NtWaitForSingleObject"
+        );
+        assert!(h[8].context.contains("call-preceded gadget") && h[8].technique == "T1036");
         // Threads 1 and 5 share one hit.
         assert!(
             h[0].context
@@ -456,7 +499,7 @@ mod tests {
                 m["stack_findings"].as_u64(),
                 m["jit_ranges"].as_u64()
             ),
-            (Some(5), Some(4), Some(3))
+            (Some(5), Some(5), Some(3))
         );
         assert!(Report::unsupported("x").hits().is_empty());
         assert_eq!(Report::unsupported("x").meta()["supported"], false);

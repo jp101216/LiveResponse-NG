@@ -178,6 +178,14 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 	}
 
 	tree := analyzeProcessTree(views, systemRoot())
+	worn, wornStats := threadTokens(owners)
+	rowOf := make(map[uint32]int, len(rows))
+	for i, r := range rows {
+		rowOf[r.e.pid] = i
+	}
+	tokenOf := func(r row) tokenView {
+		return tokenView{Name: r.e.name, ImagePath: r.d.imagePath, SID: r.d.userSID, User: r.d.user}
+	}
 	hashed, envRead, envUnread := 0, 0, 0
 	critRead, critUnread := 0, 0
 	critical := map[string]int{} // name -> processes marked critical
@@ -228,6 +236,23 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 				}
 			}
 		}
+		// Tokens: a process running as someone other than its parent, and
+		// threads wearing another account's token.
+		if !views[i].Self {
+			if j, ok := rowOf[r.e.ppid]; ok && views[i].ParentVerified {
+				if f, ok := stolenTokenFinding(label, tokenOf(r), tokenOf(rows[j]), systemRoot()); ok {
+					findings = mergeFindings(findings, f)
+				}
+			}
+			if threads := worn[r.e.pid]; len(threads) > 0 {
+				if list := impersonationFields(threads, r.d.userSID); len(list) > 0 {
+					r.fields["impersonation_tokens"] = list
+				}
+				if f, ok := impersonationFinding(label, tokenOf(r), threads); ok {
+					findings = mergeFindings(findings, f)
+				}
+			}
+		}
 		// The image file's times: set by hand to look old (timestomping).
 		if img := r.d.imagePath; img != "" && !views[i].Self {
 			t, seen := dated[img]
@@ -267,6 +292,12 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 	res.SetMeta("critical_processes", critical)
 	res.SetMeta("desktops", desktops)
 	res.SetMeta("image_files_dated", len(dated))
+	res.SetMeta("threads_token_checked", wornStats.Threads)
+	res.SetMeta("threads_impersonating", wornStats.Impersonating)
+	res.SetMeta("threads_token_unreadable", wornStats.Unreadable)
+	if wornStats.Err != "" {
+		res.SetMeta("thread_token_error", wornStats.Err)
+	}
 	res.SetMeta("hashing", opts.Hasher != nil)
 	res.SetMeta("signature_checks", opts.Signer != nil)
 	if opts.Hasher != nil && ctx.Err() != nil {
@@ -351,6 +382,17 @@ func imagePath(pid uint32) (string, error) {
 	}
 	defer syscall.CloseHandle(h)
 	return queryImagePath(h)
+}
+
+// commandLineOf reads one process's command line, "" when it can't.
+func commandLineOf(pid uint32) string {
+	h, err := syscall.OpenProcess(processQueryLimitedInformation, false, pid)
+	if err != nil {
+		return ""
+	}
+	defer syscall.CloseHandle(h)
+	cl, _ := queryCommandLine(h)
+	return cl
 }
 
 // queryImagePath calls QueryFullProcessImageNameW, retrying with a long-path

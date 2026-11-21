@@ -159,13 +159,19 @@ func collectConnections(ctx context.Context, opts RunOptions) (Result, error) {
 				State: state, Local: c.Local.Addr(), LocalPort: c.Local.Port(),
 				Remote: remote, RemotePort: c.Remote.Port(), PID: c.PID, Process: proc,
 			}
-			// Only public outbound sockets need the image path for the
-			// path heuristic; listeners are judged by name.
-			if hasPeer && aidetect.PublicAddr(remote) && (state == "ESTABLISHED" || state == "SYN_SENT") {
+			// The path heuristics need the image path: public outbound
+			// sockets, connections to a directory's LDAP ports, and
+			// listeners (a dropped program accepting connections).
+			opened := hasPeer && (state == "ESTABLISHED" || state == "SYN_SENT")
+			_, ldap := ldapPorts[c.Remote.Port()]
+			if (opened && (aidetect.PublicAddr(remote) || ldap)) || c.State == tcpStateListen {
 				cv.ImagePath = pathOf(c.PID)
 				if cv.ImagePath != "" {
 					fields["image_path"] = cv.ImagePath
 				}
+			}
+			if opened && ldap && baseName(proc) == "rundll32.exe" {
+				cv.CommandLine = commandLineOf(c.PID)
 			}
 			cv.Self = opts.isSelf(c.PID, cv.ImagePath)
 			if remote.IsLoopback() {

@@ -32,7 +32,9 @@ schema remains 1.2.
   commands in one shell invocation.
 - **`network.unusual_path_listener`.** A program in a temporary, download or
   public folder accepting connections (an implant's SOCKS proxy, port
-  forward or relay); *notable* when it listens on loopback only.
+  forward or relay); *notable* when it listens on loopback only. The Windows
+  connection collector now reads listeners' image paths for it (they were
+  judged by name only).
 - **`process.deleted_binary` on Windows and `defense.self_delete`.** A
   running image no longer on disk, and Sysmon 23/26 recording a process
   deleting its own executable: self-deletion through an NTFS stream rename.
@@ -56,6 +58,39 @@ schema remains 1.2.
   ntdll system-call stub that code no module backs called directly (the
   NanoDump and Halo's/Tartarus-gate shape). Unbacked frames further up the
   trace still don't count.
+- **`privesc.thread_impersonation`.** The Windows process collector reads
+  every thread's impersonation token (OpenThreadToken) and records, on the
+  process, the threads wearing another account's (`impersonation_tokens`).
+  Impersonation or delegation level in a sacrificial host (rundll32,
+  regsvr32, notepad, mshta, wscript and the like), a program in a temporary
+  folder or a shell is *suspect*; elsewhere outside Program Files and the
+  Windows folder, *notable*. Servers impersonate their clients and pass:
+  this is steal_token and ImpersonateLoggedOnUser on a duplicated token.
+- **`privesc.stolen_token_process`.** A process running as a different
+  account from its verified parent, when the parent isn't one of Windows'
+  brokers (session and service managers, svchost, WMI, Explorer's and
+  runas's "run as different user", Windows Installer) in the Windows folder.
+  A user's process starting a SYSTEM one is *suspect* (token theft or a
+  potato exploit through CreateProcessWithTokenW), as is any switch from a
+  sacrificial or temporary-folder parent; installed services starting
+  programs for a user pass; the rest is *notable*.
+- **`modules.clr_in_native_process`.** The .NET Framework runtime (clr.dll,
+  or mscorwks.dll for 2.0) in a process whose image has no CLR header, read
+  from the file: in-memory assembly execution. *Suspect* in the sacrificial
+  hosts (Windows Installer's managed custom actions and ClickOnce in
+  rundll32 excepted) and in native programs run from temporary folders;
+  *notable* in wscript and cscript (DotNetToJScript, but also admin scripts
+  creating .NET objects through COM) and outside Program Files and the
+  Windows folder, where Office, MMC, PowerShell, IIS and SQL Server host it. Also from Sysmon 7 for the sacrificial hosts. Module
+  records gain `clr_runtime` and `image_kind`.
+- **`discovery.ldap_unusual_process`.** A connection to a domain
+  controller's LDAP, LDAPS or global catalog port from a sacrificial host or
+  a program in a temporary folder (*suspect*), or from PowerShell, a script
+  interpreter or a program outside the installed locations (*notable*):
+  directory enumeration such as SharpHound or a C2's net-enum. Private
+  addresses count. Live on Windows and Linux, and from Sysmon 3. Windows'
+  Find Users dialog (rundll32 dsquery.dll) is *notable*; the live Windows
+  path reads rundll32's command line to tell.
 
 ## 0.19.1
 

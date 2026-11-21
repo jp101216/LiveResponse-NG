@@ -136,19 +136,28 @@ func directDNSFinding(label, image string, peer netip.AddrPort, when string) (Fi
 }
 
 // sysmonNetworkFindings judges Sysmon's event 3 (a network connection): DNS
-// sent past the DNS client, QUIC from a program that isn't a browser, and a
-// signed proxy-execution binary reaching the internet.
+// sent past the DNS client, QUIC from a program that isn't a browser, a
+// signed proxy-execution binary reaching the internet, and LDAP to a domain
+// controller from a program that has no reason to read the directory.
 func sysmonNetworkFindings(ev winEvent) []Finding {
 	if !strings.EqualFold(strings.TrimSpace(evData(ev, "Initiated")), "true") {
 		return nil
 	}
 	img := firstNonEmpty(evData(ev, "Image"), "a process")
 	ip, err := netip.ParseAddr(strings.TrimSpace(evData(ev, "DestinationIp")))
-	if err != nil || !aidetect.PublicAddr(ip) {
+	if err != nil {
 		return nil
 	}
 	port := uint16(atoiSafe(evData(ev, "DestinationPort")))
 	peer := netip.AddrPortFrom(ip, port)
+	if !aidetect.PublicAddr(ip) {
+		// Domain controllers are on private addresses.
+		if f, ok := ldapDiscoveryFinding(fmt.Sprintf("%s (pid %s)", img, firstNonEmpty(evData(ev, "ProcessId"), "?")),
+			evData(ev, "Image"), "", peer, eventTime(ev)); ok {
+			return []Finding{f}
+		}
+		return nil
+	}
 	shown := peer.String()
 	if h := strings.TrimSpace(evData(ev, "DestinationHostname")); h != "" && h != "-" {
 		shown = h + " (" + shown + ")"

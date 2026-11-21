@@ -357,6 +357,25 @@ pub fn follows_call(before: &[u8]) -> bool {
 
 /// The length of the call instruction at the start of `b`, if it is one.
 fn call_length(b: &[u8]) -> Option<usize> {
+    call_at(b).map(|(len, _)| len)
+}
+
+/// Where a call instruction sends control, as far as its bytes tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CallKind {
+    /// `call rel32`: to the end of the instruction plus this.
+    Rel32(i32),
+    /// `call qword ptr [rip+disp32]`: to the pointer at the end of the
+    /// instruction plus this (an import, as compilers call them).
+    RipIndirect(i32),
+    /// Through a register or other memory, or a far call: not knowable from
+    /// the bytes.
+    Other,
+}
+
+/// The call instruction at the start of `b`, if it is one: its length and
+/// kind. Legacy prefixes and REX are allowed.
+fn call_at(b: &[u8]) -> Option<(usize, CallKind)> {
     let mut i = 0;
     while matches!(
         b.get(i),
@@ -371,17 +390,22 @@ fn call_length(b: &[u8]) -> Option<usize> {
         i += 1;
     }
     match *b.get(i)? {
-        0xE8 => Some(i + 5),
+        0xE8 => {
+            let rel = u32_at(b, i + 1).map_or(0, |v| v as i32);
+            Some((i + 5, CallKind::Rel32(rel)))
+        }
         0xFF => {
             let modrm = *b.get(i + 1)?;
-            if !matches!((modrm >> 3) & 7, 2 | 3) {
+            let reg = (modrm >> 3) & 7;
+            if !matches!(reg, 2 | 3) {
                 return None;
             }
             let (md, rm) = (modrm >> 6, modrm & 7);
             let mut len = i + 2;
             if md == 3 {
-                return Some(len);
+                return Some((len, CallKind::Other));
             }
+            let mut kind = CallKind::Other;
             if rm == 4 {
                 let sib = *b.get(i + 2)?;
                 len += 1;
@@ -389,11 +413,151 @@ fn call_length(b: &[u8]) -> Option<usize> {
                     len += 4;
                 }
             } else if md == 0 && rm == 5 {
-                len += 4; // RIP-relative
+                // RIP-relative; only a near call (FF /2) reads a code pointer.
+                if reg == 2 {
+                    kind = CallKind::RipIndirect(u32_at(b, len).map_or(0, |v| v as i32));
+                }
+                len += 4;
             }
-            Some(len + [0, 1, 4][md as usize])
+            Some((len + [0, 1, 4][md as usize], kind))
         }
         _ => None,
+    }
+}
+
+/// The address the call that ends just before `pc` transfers to, when its
+/// bytes (`before`, the bytes ending at `pc`) say so beyond doubt: `call
+/// rel32`, or `call qword ptr [rip+disp32]` through a pointer `read`
+/// supplies. `None` for a call through a register or other memory, for no
+/// call at all, and whenever the bytes decode as more than one call that
+/// would go to different places (a call through a register whose bytes also
+/// end a longer instruction).
+pub fn call_target(
+    before: &[u8],
+    pc: u64,
+    read: &mut dyn FnMut(u64) -> Option<u64>,
+) -> Option<u64> {
+    let n = before.len();
+    let mut target = None;
+    for len in 2..=n.min(15) {
+        let Some((l, kind)) = call_at(&before[n - len..]) else {
+            continue;
+        };
+        if l != len {
+            continue;
+        }
+        let t = match kind {
+            CallKind::Rel32(rel) => pc.wrapping_add(rel as i64 as u64),
+            CallKind::RipIndirect(disp) => read(pc.wrapping_add(disp as i64 as u64))?,
+            CallKind::Other => return None,
+        };
+        match target {
+            None => target = Some(t),
+            Some(prev) if prev != t => return None,
+            _ => {}
+        }
+    }
+    target
+}
+
+/// Where a jump thunk at `at` (its bytes `code`) leads: `jmp rel32`, `jmp
+/// short`, or `jmp qword ptr [rip+disp32]` (with REX.W, as import thunks
+/// and forwarders are written) through a pointer `read` supplies. `None`
+/// when `code` doesn't start with one of these.
+pub fn thunk_hop(code: &[u8], at: u64, read: &mut dyn FnMut(u64) -> Option<u64>) -> Option<u64> {
+    let rex = usize::from(matches!(code.first(), Some(0x48)));
+    match (code.get(rex)?, code.get(rex + 1)) {
+        (0xE9, _) if rex == 0 => {
+            let rel = u32_at(code, 1)? as i32;
+            Some(at.wrapping_add(5).wrapping_add(rel as i64 as u64))
+        }
+        (0xEB, Some(&rel)) if rex == 0 => {
+            Some(at.wrapping_add(2).wrapping_add(rel as i8 as i64 as u64))
+        }
+        (0xFF, Some(0x25)) => {
+            let disp = u32_at(code, rex + 2)? as i32;
+            let end = at.wrapping_add(rex as u64 + 6);
+            read(end.wrapping_add(disp as i64 as u64))
+        }
+        _ => None,
+    }
+}
+
+/// The jumps in `code` (at `at`) whose targets its bytes give: `jmp rel32`,
+/// `jmp short`, and `jmp qword ptr [rip+disp32]` through a pointer `read`
+/// supplies. Also whether it holds an indirect jump through a register or
+/// memory that isn't RIP-relative, whose target its bytes can't give. Every
+/// byte offset is tried, so data or the middle of an instruction can be taken
+/// for a jump: callers treat targets that aren't a function's start as noise,
+/// and a spurious indirect jump only makes them say less.
+pub fn jump_targets(
+    code: &[u8],
+    at: u64,
+    read: &mut dyn FnMut(u64) -> Option<u64>,
+) -> (Vec<u64>, bool) {
+    let mut targets = Vec::new();
+    let mut indirect = false;
+    for i in 0..code.len() {
+        if let Some(t) = thunk_hop(&code[i..], at.wrapping_add(i as u64), read) {
+            targets.push(t);
+        }
+        // jmp near indirect (FF /4), not RIP-relative (read above).
+        if code[i] == 0xFF {
+            if let Some(&modrm) = code.get(i + 1) {
+                if (modrm >> 3) & 7 == 4 && modrm & 0xC7 != 0x05 {
+                    indirect = true;
+                }
+            }
+        }
+    }
+    targets.sort_unstable();
+    targets.dedup();
+    (targets, indirect)
+}
+
+/// How an x64 system-call stub in ntdll or win32u starts: `mov r10, rcx;
+/// mov eax, <number>`.
+pub const STUB_PREFIX: [u8; 4] = [0x4C, 0x8B, 0xD1, 0xB8];
+
+/// The start of the system-call stub a thread is blocked in, from the bytes
+/// `before` that end at its instruction pointer (just past the `syscall`):
+/// the nearest `mov r10, rcx; mov eax, n` before it.
+pub fn stub_start(before: &[u8], rip: u64) -> Option<u64> {
+    let n = before.len();
+    (STUB_PREFIX.len()..=n)
+        .find(|&back| before[n - back..].starts_with(&STUB_PREFIX))
+        .map(|back| rip - back as u64)
+}
+
+impl UnwindTable {
+    /// The functions whose code a function `begin` is split into: its own
+    /// entry and every entry whose unwind information chains to it (cold
+    /// code moved away from the rest), as [begin, end) RVA ranges.
+    pub fn fragments(&self, begin: u32) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for f in &self.functions {
+            if f.begin == begin || self.primary(f) == Some(begin) {
+                out.push((f.begin, f.end));
+            }
+        }
+        out
+    }
+
+    /// The begin RVA of the function a fragment's chained unwind
+    /// information leads back to; `None` for a function that isn't chained.
+    fn primary(&self, f: &Function) -> Option<u32> {
+        let mut info = f.info;
+        let mut begin = None;
+        for _ in 0..MAX_CHAIN {
+            let b = self.infos.get(&info)?;
+            if (b[0] >> 3) & UNW_FLAG_CHAININFO == 0 {
+                return begin;
+            }
+            let codes = 2 * (b[2] as usize + (b[2] as usize & 1));
+            begin = Some(u32_at(b, 4 + codes)?);
+            info = u32_at(b, 4 + codes + 8)?;
+        }
+        begin
     }
 }
 
@@ -761,5 +925,147 @@ pub(crate) mod tests {
         for b in not {
             assert!(!follows_call(b), "{b:02x?}");
         }
+    }
+
+    #[test]
+    fn call_targets() {
+        let pc = 0x7ff8_0000_2000u64;
+        // The import table slot at pc + 0x1000 - 0x10 points at 0x7ff8_1111_0000.
+        let slot = pc + 0x0ff0;
+        let mut mem = stack(&[(slot, 0x7ff8_1111_0000)]);
+        let rel = |v: i32| v.to_le_bytes();
+        // call rel32, forward and backward.
+        let mut b = vec![0xCC, 0xE8];
+        b.extend_from_slice(&rel(0x40));
+        assert_eq!(call_target(&b, pc, &mut mem), Some(pc + 0x40));
+        let mut b = vec![0xE8];
+        b.extend_from_slice(&rel(-0x1000));
+        assert_eq!(call_target(&b, pc, &mut mem), Some(pc - 0x1000));
+        // call [rip+disp32], with and without REX.W: both read the same slot.
+        for prefix in [&[][..], &[0x48][..]] {
+            let mut b = prefix.to_vec();
+            b.extend_from_slice(&[0xFF, 0x15]);
+            b.extend_from_slice(&rel(0x0ff0));
+            assert_eq!(
+                call_target(&b, pc, &mut mem),
+                Some(0x7ff8_1111_0000),
+                "{b:02x?}"
+            );
+        }
+        // An unreadable slot, a call through a register or other memory,
+        // and no call: nothing can be said.
+        let mut b = vec![0xFF, 0x15];
+        b.extend_from_slice(&rel(0x10));
+        assert_eq!(call_target(&b, pc, &mut mem), None);
+        for b in [
+            &[0xFF, 0xD0][..],
+            &[0xFF, 0x50, 0x08],
+            &[0x48, 0x83, 0xC4, 0x28],
+            &[],
+        ] {
+            assert_eq!(call_target(b, pc, &mut mem), None, "{b:02x?}");
+        }
+        // call rel32 whose last two bytes are also "call rax": ambiguous.
+        assert_eq!(
+            call_target(&[0xE8, 0x00, 0x00, 0xFF, 0xD0], pc, &mut mem),
+            None
+        );
+        // call far [rip+disp32] (FF /3) isn't followed.
+        let mut b = vec![0xFF, 0x1D];
+        b.extend_from_slice(&rel(0x0ff0));
+        assert_eq!(call_target(&b, pc, &mut mem), None);
+    }
+
+    #[test]
+    fn thunks_and_tail_jumps() {
+        let at = 0x1_0000u64;
+        let mut mem = stack(&[(at + 6 + 0x100, 0xAAAA), (at + 7 + 0x100, 0xBBBB)]);
+        let mut jmp_rel = vec![0xE9];
+        jmp_rel.extend_from_slice(&0x20i32.to_le_bytes());
+        assert_eq!(thunk_hop(&jmp_rel, at, &mut mem), Some(at + 5 + 0x20));
+        assert_eq!(thunk_hop(&[0xEB, 0xFE], at, &mut mem), Some(at)); // jmp $
+        let mut imp = vec![0xFF, 0x25];
+        imp.extend_from_slice(&0x100i32.to_le_bytes());
+        assert_eq!(thunk_hop(&imp, at, &mut mem), Some(0xAAAA));
+        let mut rex_imp = vec![0x48, 0xFF, 0x25];
+        rex_imp.extend_from_slice(&0x100i32.to_le_bytes());
+        assert_eq!(thunk_hop(&rex_imp, at, &mut mem), Some(0xBBBB));
+        assert_eq!(thunk_hop(&[0x48, 0xE9, 0, 0, 0, 0], at, &mut mem), None);
+        assert_eq!(thunk_hop(&[0x4C, 0x8B, 0xD1], at, &mut mem), None);
+
+        // A wrapper that tail-jumps to the stub, one that jumps through a
+        // register, and one that only returns.
+        let dest = at + 0x80;
+        let mut tail = vec![0x48, 0x83, 0xEC, 0x28, 0x48, 0x83, 0xC4, 0x28, 0xE9];
+        tail.extend_from_slice(&((dest - (at + 13)) as i32).to_le_bytes());
+        let (t, indirect) = jump_targets(&tail, at, &mut mem);
+        assert!(t.contains(&dest) && !indirect, "{t:x?}");
+        let (_, indirect) = jump_targets(&[0x48, 0x8B, 0xC1, 0xFF, 0xE0], at, &mut mem);
+        assert!(indirect); // jmp rax
+        let (_, indirect) = jump_targets(&[0x41, 0xFF, 0x24, 0x24], at, &mut mem);
+        assert!(indirect); // jmp [r12]
+        assert_eq!(
+            jump_targets(&[0x33, 0xC0, 0xC3], at, &mut mem),
+            (vec![], false)
+        );
+        // A jmp [rip+disp32] is read, not taken as indirect.
+        assert_eq!(jump_targets(&imp, at, &mut mem), (vec![0xAAAA], false));
+    }
+
+    #[test]
+    fn stub_starts() {
+        // NtWaitForSingleObject as Windows 10 and 11 lay it out: the thread's
+        // instruction pointer is just past the syscall at +0x12.
+        let stub = [
+            0xC3, 0xCC, 0x4C, 0x8B, 0xD1, 0xB8, 0x04, 0x00, 0x00, 0x00, 0xF6, 0x04, 0x25, 0x08,
+            0x03, 0xFE, 0x7F, 0x01, 0x75, 0x03, 0x0F, 0x05,
+        ];
+        let rip = 0x7ffd_0000_1016u64;
+        assert_eq!(stub_start(&stub, rip), Some(rip - 0x14));
+        assert_eq!(stub_start(&stub[3..], rip), None); // its start cut off
+        assert_eq!(stub_start(&[0x0F, 0x05], rip), None);
+    }
+
+    #[test]
+    fn fragments_follow_chains() {
+        let main = Function {
+            begin: 0x1000,
+            end: 0x1040,
+            info: 0x1800,
+        };
+        // A cold fragment chained to `main`, and one chained to it in turn.
+        let cold = Function {
+            begin: 0x1100,
+            end: 0x1120,
+            info: 0x1840,
+        };
+        let colder = Function {
+            begin: 0x1140,
+            end: 0x1150,
+            info: 0x1880,
+        };
+        let other = Function {
+            begin: 0x1060,
+            end: 0x1080,
+            info: 0x1800,
+        };
+        let base = info(0, 4, (0, 0), &[Op(4, ALLOC_SMALL, 4)], None);
+        let chained_main = info(UNW_FLAG_CHAININFO, 0, (0, 0), &[], Some(main));
+        let chained_cold = info(UNW_FLAG_CHAININFO, 0, (0, 0), &[], Some(cold));
+        let t = UnwindTable::from_image(&image(
+            &[main, other, cold, colder],
+            &[
+                (0x1800, base),
+                (0x1840, chained_main),
+                (0x1880, chained_cold),
+            ],
+        ))
+        .unwrap();
+        assert_eq!(
+            t.fragments(0x1000),
+            vec![(0x1000, 0x1040), (0x1100, 0x1120), (0x1140, 0x1150)]
+        );
+        assert_eq!(t.fragments(0x1060), vec![(0x1060, 0x1080)]);
+        assert_eq!(t.fragments(0x2000), Vec::<(u32, u32)>::new());
     }
 }

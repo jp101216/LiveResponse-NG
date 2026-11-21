@@ -122,12 +122,63 @@ func pipeFinding(r pipeRule, what string) Finding {
 	return Finding{Rule: r.rule, Severity: r.severity, Technique: r.technique, Confidence: r.confidence, Detail: what + ": " + r.who}
 }
 
+// chromiumMojoPipe is how Chromium names its Mojo IPC pipes:
+// mojo.<pid>.<tid>.<random 64-bit number>, all decimal.
+var chromiumMojoPipe = regexp.MustCompile(`^mojo\.\d+\.\d+\.\d+$`)
+
+// chromiumHosts are the browsers and Chromium-based apps (Electron, WebView2,
+// CEF) that create Mojo pipes.
+var chromiumHosts = set("chrome.exe", "msedge.exe", "msedgewebview2.exe", "brave.exe", "opera.exe", "vivaldi.exe",
+	"chromium.exe", "arc.exe", "code.exe", "code - insiders.exe", "cursor.exe", "windsurf.exe", "teams.exe", "ms-teams.exe",
+	"slack.exe", "discord.exe", "spotify.exe", "whatsapp.exe", "signal.exe", "notion.exe", "obsidian.exe", "claude.exe",
+	"1password.exe", "figma.exe", "postman.exe", "steamwebhelper.exe", "epicwebhelper.exe", "electron.exe", "github desktop.exe",
+	"githubdesktop.exe", "zoom.exe", "skype.exe", "msteams.exe", "olk.exe", "searchhost.exe", "widgets.exe", "webviewhost.exe")
+
+// mojoImpostorFinding judges a pipe named like Chromium's Mojo pipes that
+// Chromium didn't make: C2 frameworks name their SMB peer-to-peer pipes
+// mojo.* so a list of pipes reads as a browser's (Cobalt Strike's own default
+// is caught by name above; Project Lattice's SMB profile uses mojo.5688).
+// image is the program that created it, "" when only the name is known.
+func mojoImpostorFinding(name, image string) (Finding, bool) {
+	if !strings.HasPrefix(strings.ToLower(name), "mojo.") {
+		return Finding{}, false
+	}
+	f := Finding{Rule: "network.mojo_pipe_impostor", Technique: "T1036"}
+	switch {
+	case image != "":
+		if chromiumHosts[baseName(image)] {
+			return Finding{}, false
+		}
+		f.Severity, f.Confidence = SevSuspect, 65
+		f.Detail = fmt.Sprintf("%s made a pipe named like a Chromium Mojo pipe (\\\\.\\pipe\\%s) but isn't a browser or "+
+			"Chromium-based app: C2 frameworks name their SMB peer-to-peer pipes this way to pass for Chrome's", image, name)
+		if packagedProgram(image) {
+			f.Severity, f.Confidence = SevNotable, 40
+			f.Detail += ". It is an installed program, possibly a Chromium-based app this check doesn't know"
+		}
+	case !chromiumMojoPipe.MatchString(name):
+		f.Severity, f.Confidence = SevSuspect, 60
+		f.Detail = fmt.Sprintf("the named pipe \\\\.\\pipe\\%s is open on this host: named like a Chromium Mojo pipe, but "+
+			"not in Chromium's mojo.<pid>.<thread>.<number> form. C2 frameworks name their SMB peer-to-peer pipes mojo.* to "+
+			"pass for Chrome's", name)
+	default:
+		return Finding{}, false
+	}
+	return f, true
+}
+
 // pipeEventFindings judges the pipe in a Sysmon pipe event (17 created, 18
 // connected), naming the program.
 func pipeEventFindings(ev winEvent) []Finding {
 	name := strings.TrimPrefix(evData(ev, "PipeName"), `\`)
 	r, ok := judgePipe(name)
 	if !ok {
+		if ev.EventID == 17 {
+			if f, ok := mojoImpostorFinding(name, evData(ev, "Image")); ok {
+				f.Detail += eventTime(ev) + " (Sysmon event 17)"
+				return []Finding{f}
+			}
+		}
 		return nil
 	}
 	verb := "created"
@@ -198,6 +249,9 @@ func lateralReport(res *Result, pipes []string, files []leftoverFile, proxies []
 			flagged++
 			res.Add(map[string]any{"kind": "pipe", "name": name},
 				pipeFinding(r, fmt.Sprintf("the named pipe \\\\.\\pipe\\%s is open on this host", name)))
+		} else if f, ok := mojoImpostorFinding(name, ""); ok {
+			flagged++
+			res.Add(map[string]any{"kind": "pipe", "name": name}, f)
 		}
 	}
 	listed := pipes

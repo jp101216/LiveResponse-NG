@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+Detection for every feature on Project Lattice's roadmap, the author's own
+adversary-emulation C2, mapped feature by feature in
+[docs/lattice-coverage.md](docs/lattice-coverage.md). Most of the roadmap was
+already covered (stack spoofing, indirect syscalls, sleep masking, module
+stomping, threadless hooks, VEH, hardware-breakpoint AMSI/ETW bypasses, the
+second ntdll, DCSync, pass-the-hash); this release adds the gaps. Report
+schema remains 1.2.
+
+### Added
+
+- **`malware.lattice_agent`.** The `implants` collector knows a second
+  family, Project Lattice (agent or team server), and now runs on Linux: the
+  images of processes outside the system's program folders, read through
+  `/proc/<pid>/exe` so an image deleted after launch is still searched, and
+  the executables directly in `/tmp`, `/var/tmp` and `/dev/shm`. Families
+  carry their own rule IDs; NIK C2's finding is unchanged.
+- **`network.doh_outbound`.** A public DNS-over-HTTPS resolver's port 443 (Cloudflare,
+  Google, Quad9, OpenDNS, AdGuard), or DNS over TLS on 853 anywhere, from a
+  program that isn't a browser, a resolver or a DNS privacy tool. From
+  Sysmon 3 and the live connection tables, Windows and Linux.
+- **`network.mojo_pipe_impostor`.** A pipe named like Chromium's Mojo pipes
+  that Chromium didn't make: from Sysmon 17, created by a program that isn't
+  a Chromium-based browser or app; in the live pipe list, a mojo.* name not
+  in Chromium's `mojo.<pid>.<tid>.<n>` form. Cobalt Strike's own mojo default
+  is still `network.c2_named_pipe`.
+- **`exec.c2_shell_recon` on Linux.** `sh -c` host discovery with silent
+  fallbacks (`whoami 2>/dev/null || id -un`), or three or more discovery
+  commands in one shell invocation.
+- **`network.unusual_path_listener`.** A program in a temporary, download or
+  public folder accepting connections (an implant's SOCKS proxy, port
+  forward or relay); *notable* when it listens on loopback only.
+- **`process.deleted_binary` on Windows and `defense.self_delete`.** A
+  running image no longer on disk, and Sysmon 23/26 recording a process
+  deleting its own executable: self-deletion through an NTFS stream rename.
+- **`defense.ppl_stripped`.** The `defenses` collector reads the kernel
+  protection level of smss, csrss, wininit, services, LSASS and Defender's
+  engine. One of the first four unprotected is *critical*; LSASS unprotected
+  while `RunAsPPL` asks for protection, or Defender's engine without
+  PPL-Antimalware, is *suspect*. A new `process_protection` record lists the
+  levels read.
+- **`defense.indirect_syscall` from Sysmon 10.** LSASS opened through an
+  ntdll system-call stub that code no module backs called directly (the
+  NanoDump and Halo's/Tartarus-gate shape). Unbacked frames further up the
+  trace still don't count.
+
 ## 0.19.1
 
 Fixes from a bug check of 0.19.0: two ways a crafted log could stall the

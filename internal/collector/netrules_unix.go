@@ -84,6 +84,11 @@ func linuxConnFindings(c connView) []Finding {
 			})
 		}
 	}
+	if !shell && !script {
+		if f, ok := unusualListenerFinding(label, c); ok {
+			out = append(out, f)
+		}
+	}
 
 	// Outbound: this host opened the connection. A connection accepted on one
 	// of the host's listening ports is a client of a local server, not the
@@ -96,6 +101,9 @@ func linuxConnFindings(c connView) []Finding {
 		if f, ok := directDNSFinding(label, firstNonEmpty(c.ImagePath, c.Process), netip.AddrPortFrom(c.Remote, c.RemotePort), ""); ok {
 			out = append(out, f)
 		}
+	}
+	if f, ok := dohFinding(label, firstNonEmpty(c.ImagePath, c.Process), netip.AddrPortFrom(c.Remote, c.RemotePort), ""); ok {
+		out = append(out, f)
 	}
 	// JoinHostPort brackets an IPv6 address, so its port can't be misread as
 	// the last group of the address.

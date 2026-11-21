@@ -118,7 +118,102 @@ func analyzeUnixCommandLine(source, image, cmd string) []Finding {
 			"writes to ld.so.preload or rc.local — library-preload or boot persistence")
 	}
 
+	// Host fingerprinting wrapped in a shell, the way a C2 agent runs it.
+	if sev, conf, what, ok := unixShellRecon(lc); ok {
+		add("exec.c2_shell_recon", sev, "T1082", conf, what)
+	}
+
 	return out
+}
+
+// unixReconPrograms are the discovery programs an implant runs to fingerprint
+// a Linux host, its users and its network.
+var unixReconPrograms = set("whoami", "id", "hostname", "uname", "ifconfig", "ss", "netstat", "ps", "w", "who", "last",
+	"lsb_release", "hostnamectl", "arp", "route", "getent", "groups", "lscpu")
+
+// unixReconFiles are what cat reads to the same end.
+var unixReconFiles = []string{"/etc/passwd", "/etc/hosts", "/etc/os-release", "/etc/issue", "/proc/version", "/etc/resolv.conf",
+	"/etc/group", "/proc/net/"}
+
+// unixShells run a command string given with -c.
+var unixShells = set("sh", "bash", "dash", "ash", "zsh", "ksh", "mksh", "busybox")
+
+// reconSegment names the discovery program a shell segment runs ("" if it
+// isn't one): the segment's first word, past any VAR=value assignments.
+func reconSegment(seg string) string {
+	words := strings.Fields(seg)
+	for len(words) > 0 && strings.Contains(words[0], "=") && !strings.HasPrefix(words[0], "-") {
+		words = words[1:]
+	}
+	if len(words) == 0 {
+		return ""
+	}
+	prog := unixBaseName(words[0])
+	switch {
+	case unixReconPrograms[prog]:
+		return prog
+	case prog == "ip" && len(words) > 1:
+		for _, w := range words[1:] {
+			switch w {
+			case "addr", "address", "a", "route", "r", "neigh", "n", "link", "l":
+				return "ip " + w
+			}
+		}
+	case prog == "cat":
+		for _, f := range unixReconFiles {
+			if strings.Contains(seg, f) {
+				return "cat " + f
+			}
+		}
+	}
+	return ""
+}
+
+// unixShellRecon judges a shell started with -c whose command string is host
+// discovery. Two shapes mark a C2 agent rather than a person: a discovery
+// command whose errors are discarded and that falls back to another
+// ("whoami 2>/dev/null || id -un"), which implants hard-code so one line
+// works on any distribution, container or Android; and three or more
+// discovery commands chained in one invocation, an agent's host fingerprint.
+func unixShellRecon(lc string) (Severity, int, string, bool) {
+	words := strings.Fields(lc)
+	if len(words) < 3 || !unixShells[unixBaseName(words[0])] {
+		return "", 0, "", false
+	}
+	i := strings.Index(lc, " -c ")
+	if i < 0 {
+		return "", 0, "", false
+	}
+	payload := lc[i+4:]
+	split := func(r rune) bool { return r == ';' || r == '&' || r == '|' || r == '\n' }
+	seen := map[string]bool{}
+	var progs []string
+	fallback := false // a discovery command right after a ||
+	for k, alt := range strings.Split(payload, "||") {
+		for j, seg := range strings.FieldsFunc(alt, split) {
+			prog := reconSegment(seg)
+			if prog == "" {
+				continue
+			}
+			if k > 0 && j == 0 {
+				fallback = true
+			}
+			if !seen[prog] {
+				seen[prog] = true
+				progs = append(progs, prog)
+			}
+		}
+	}
+	if fallback && strings.Contains(payload, "2>/dev/null") {
+		return SevNotable, 45, fmt.Sprintf("fingerprints the host through a shell (%s), discarding errors and falling back to a "+
+			"second command: C2 agents hard-code these chains so one line works on any distribution, container or Android, "+
+			"and people at a terminal rarely type them", strings.Join(progs, ", ")), true
+	}
+	if len(progs) >= 3 {
+		return SevNotable, 35, fmt.Sprintf("runs %d discovery commands in one shell invocation (%s): a C2 agent's host "+
+			"fingerprint, or an operator's first look around", len(progs), strings.Join(progs, ", ")), true
+	}
+	return "", 0, "", false
 }
 
 // downloaders are the programs whose output is a fetched file.

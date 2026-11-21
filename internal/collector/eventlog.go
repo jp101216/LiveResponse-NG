@@ -627,6 +627,10 @@ func eventFindings(ev winEvent) []Finding {
 		if isSysmon(ev) {
 			out = append(out, remoteThreadFindings(ev)...)
 		}
+	case 23, 26: // Sysmon: a file was deleted (archived / only logged)
+		if isSysmon(ev) {
+			out = append(out, selfDeleteFindings(ev)...)
+		}
 	case 25: // Sysmon: process tampering (hollowing, herpaderping)
 		if isSysmon(ev) {
 			out = append(out, tamperingFindings(ev)...)
@@ -650,16 +654,31 @@ func eventFindings(ev winEvent) []Finding {
 // itself: a direct syscall from injected code, which is how NanoDump and
 // Dumpert open LSASS without passing EDR hooks.
 func processAccessFindings(ev winEvent) []Finding {
-	first, _, _ := strings.Cut(evData(ev, "CallTrace"), "|")
-	first = strings.TrimSpace(first)
-	if !strings.HasPrefix(strings.ToUpper(first), "UNKNOWN(") {
-		return nil
-	}
+	frames := strings.Split(evData(ev, "CallTrace"), "|")
+	first := strings.TrimSpace(frames[0])
 	src := firstNonEmpty(evData(ev, "SourceImage"), "a process")
 	dst := firstNonEmpty(evData(ev, "TargetImage"), "another process")
 	when := ""
 	if !ev.TimeCreated.IsZero() {
 		when = " at " + ev.TimeCreated.UTC().Format(time.RFC3339)
+	}
+	if !strings.HasPrefix(strings.ToUpper(first), "UNKNOWN(") {
+		// An indirect system call: the stub in ntdll ran (so the trace starts
+		// there), but code no module backs called it directly, with no
+		// KERNELBASE or kernel32 frame in between. Judged for LSASS only, and
+		// only on the frame right after ntdll: unbacked frames further up
+		// (JIT code calling OpenProcess) are ordinary.
+		if baseName(dst) != "lsass.exe" || !strings.Contains(strings.ToLower(first), "ntdll.dll") || len(frames) < 2 {
+			return nil
+		}
+		if caller := strings.TrimSpace(frames[1]); strings.HasPrefix(strings.ToUpper(caller), "UNKNOWN(") {
+			return []Finding{{Rule: "defense.indirect_syscall", Severity: SevCritical, Technique: "T1003.001", Confidence: 70,
+				Detail: fmt.Sprintf("%s opened LSASS%s (access %s) through a system-call stub in ntdll that code no module backs "+
+					"called directly (%s, then %s): an indirect system call, the way NanoDump and implants that resolve syscalls "+
+					"themselves (Halo's or Tartarus gate) reach LSASS past EDR hooks",
+					src, when, firstNonEmpty(evData(ev, "GrantedAccess"), "unknown"), first, caller)}}
+		}
+		return nil
 	}
 	f := Finding{
 		Rule: "defense.direct_syscall", Severity: SevSuspect, Technique: "T1106", Confidence: 60,

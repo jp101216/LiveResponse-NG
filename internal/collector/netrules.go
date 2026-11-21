@@ -117,6 +117,30 @@ var proxyBeaconHosts = map[string]bool{
 	"control.exe": true, "msiexec.exe": true, "hh.exe": true,
 }
 
+// unusualListenerFinding judges a program from a user-writable or temporary
+// folder that accepts connections: the SOCKS proxy, reverse port forward or
+// peer-to-peer relay an implant opens so its operator can pivot through this
+// host. Installed servers live in Program Files or a system prefix and pass.
+func unusualListenerFinding(label string, c connView) (Finding, bool) {
+	if c.State != "LISTEN" || !c.Local.IsValid() || c.ImagePath == "" {
+		return Finding{}, false
+	}
+	lvl, why := anyPathRisk(c.ImagePath)
+	if lvl != riskHigh {
+		return Finding{}, false
+	}
+	f := Finding{Rule: "network.unusual_path_listener", Severity: SevSuspect, Technique: "T1090", Confidence: 60,
+		Detail: fmt.Sprintf("%s runs from %s (%s) and is listening on %s port %d: a program dropped there that accepts "+
+			"connections is the shape of an implant's SOCKS proxy, port forward or peer-to-peer relay",
+			label, why, c.ImagePath, c.Local, c.LocalPort)}
+	if c.Local.IsLoopback() {
+		f.Severity, f.Confidence = SevNotable, 35
+		f.Detail += ". It listens on loopback only, so only programs on this host can reach it (a local SOCKS proxy, or a " +
+			"developer's test server)"
+	}
+	return f, true
+}
+
 // analyzeConnection returns the generic network findings for one socket.
 func analyzeConnection(c connView) []Finding {
 	if c.Self || c.PID == 0 || c.PID == 4 {
@@ -134,6 +158,12 @@ func analyzeConnection(c connView) []Finding {
 		})
 	}
 
+	if !listenerHosts[name] {
+		if f, ok := unusualListenerFinding(label, c); ok {
+			out = append(out, f)
+		}
+	}
+
 	out = append(out, llmServerFindings(c, label)...)
 	outbound := (c.State == "ESTABLISHED" || c.State == "SYN_SENT") && aidetect.PublicAddr(c.Remote)
 	if !outbound {
@@ -144,6 +174,9 @@ func analyzeConnection(c connView) []Finding {
 		if f, ok := directDNSFinding(label, firstNonEmpty(c.ImagePath, c.Process), netip.AddrPortFrom(c.Remote, c.RemotePort), ""); ok {
 			out = append(out, f)
 		}
+	}
+	if f, ok := dohFinding(label, firstNonEmpty(c.ImagePath, c.Process), netip.AddrPortFrom(c.Remote, c.RemotePort), ""); ok {
+		out = append(out, f)
 	}
 	switch {
 	case proxyBeaconHosts[name]:

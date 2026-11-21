@@ -351,3 +351,77 @@ func runtimeEnvReport(res *Result, sources []envSource) {
 			runtimeEnvFindings(s.Where, s.Env, s.Resolve)...)
 	}
 }
+
+// protectedProcess is one process whose kernel protection level was read.
+type protectedProcess struct {
+	Name  string // lower case
+	PID   uint32
+	Level byte // PS_PROTECTION: type in bits 0-2 (0 none, 1 light, 2 full), signer in bits 4-7
+}
+
+// pplAlways are the processes Windows (8.1 onward) always starts protected,
+// as WinTcb protected processes: the session manager, CSRSS, wininit and the
+// service control manager. Unprotected, one has had its protection cleared
+// from the kernel.
+var pplAlways = set("smss.exe", "csrss.exe", "wininit.exe", "services.exe")
+
+// pplSigners name PS_PROTECTION's signer values.
+var pplSigners = []string{"none", "Authenticode", "CodeGen", "Antimalware", "Lsa", "Windows", "WinTcb", "WinSystem", "App"}
+
+// pplLevelName renders a protection level, e.g. "PPL (Lsa)".
+func pplLevelName(level byte) string {
+	signer := "signer " + fmt.Sprint(level>>4)
+	if int(level>>4) < len(pplSigners) {
+		signer = pplSigners[level>>4]
+	}
+	switch level & 7 {
+	case 0:
+		return "unprotected"
+	case 1:
+		return "PPL (" + signer + ")"
+	case 2:
+		return "PP (" + signer + ")"
+	}
+	return fmt.Sprintf("protection type %d (%s)", level&7, signer)
+}
+
+// pplFindings judges the protection levels read from the processes Windows
+// protects. Kernel tampering through a vulnerable driver (BYOVD) clears
+// EPROCESS.Protection so a protected process can be read, injected into or
+// killed: LSASS for its credentials, an antimalware engine to blind it.
+// runAsPPL is Lsa\RunAsPPL (nil: absent).
+func pplFindings(procs []protectedProcess, runAsPPL *uint32) []Finding {
+	var out []Finding
+	for _, p := range procs {
+		if p.Level&7 != 0 {
+			continue
+		}
+		label := fmt.Sprintf("%s (pid %d)", p.Name, p.PID)
+		switch {
+		case pplAlways[p.Name]:
+			out = append(out, Finding{Rule: "defense.ppl_stripped", Severity: SevCritical, Technique: "T1562.001", Confidence: 85,
+				Detail: label + " runs unprotected, though Windows always starts it as a protected process: something in the " +
+					"kernel cleared its protection (EPROCESS.Protection), as BYOVD tools do before reading, injecting into or " +
+					"ending protected processes"})
+		case p.Name == "lsass.exe" && runAsPPL != nil && (*runAsPPL == 1 || *runAsPPL == 2):
+			out = append(out, Finding{Rule: "defense.ppl_stripped", Severity: SevSuspect, Technique: "T1562.001", Confidence: 70,
+				Detail: fmt.Sprintf("%s runs unprotected although LSA protection is configured (Lsa\\RunAsPPL = %d): a kernel "+
+					"driver that clears LSASS's protection lets credential dumpers read its memory. LSA protection switched on "+
+					"since the last restart also looks like this until the next boot", label, *runAsPPL)})
+		case p.Name == "msmpeng.exe":
+			out = append(out, Finding{Rule: "defense.ppl_stripped", Severity: SevSuspect, Technique: "T1562.001", Confidence: 65,
+				Detail: label + ", Microsoft Defender's engine, runs without its PPL-Antimalware protection: with it cleared from " +
+					"the kernel, the engine can be injected into, suspended or ended like any other process"})
+		}
+	}
+	return out
+}
+
+// pplReport adds the protection-level record.
+func pplReport(res *Result, procs []protectedProcess, unread int, runAsPPL *uint32) {
+	list := make([]map[string]any, 0, len(procs))
+	for _, p := range procs {
+		list = append(list, map[string]any{"name": p.Name, "pid": p.PID, "protection": pplLevelName(p.Level), "level": p.Level})
+	}
+	res.Add(map[string]any{"area": "process_protection", "processes": list, "unread": unread}, pplFindings(procs, runAsPPL)...)
+}

@@ -133,6 +133,24 @@ func collectModules(ctx context.Context, opts RunOptions) (Result, error) {
 		if len(candidates) > 0 {
 			fields["side_load_candidates"] = candidates
 		}
+		// The .NET Framework runtime in a program that isn't a .NET program.
+		if identityOK && !self {
+			for _, m := range mods {
+				if !clrModule(m.Path) {
+					continue
+				}
+				kind := managedPE(image)
+				fields["clr_runtime"], fields["image_kind"] = m.Path, kind.String()
+				cmdline := ""
+				if baseName(image) == "rundll32.exe" {
+					cmdline = commandLineOf(p.pid)
+				}
+				if f, ok := clrInNativeFinding(fmt.Sprintf("%s (pid %d)", p.name, p.pid), image, m.Path, cmdline, kind); ok {
+					sideFindings = append(sideFindings, f)
+				}
+				break
+			}
+		}
 		if self {
 			fields["lrng_component"] = true
 		}

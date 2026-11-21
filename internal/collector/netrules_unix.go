@@ -93,7 +93,13 @@ func linuxConnFindings(c connView) []Finding {
 	// Outbound: this host opened the connection. A connection accepted on one
 	// of the host's listening ports is a client of a local server, not the
 	// process reaching out, so it isn't judged as outbound.
-	outbound := (c.State == "SYN_SENT" || (c.State == "ESTABLISHED" && !c.Inbound)) && aidetect.PublicAddr(c.Remote)
+	opened := c.State == "SYN_SENT" || (c.State == "ESTABLISHED" && !c.Inbound)
+	if opened {
+		if f, ok := ldapDiscoveryFinding(label, firstNonEmpty(c.ImagePath, c.Process), "", netip.AddrPortFrom(c.Remote, c.RemotePort), ""); ok {
+			out = append(out, f)
+		}
+	}
+	outbound := opened && aidetect.PublicAddr(c.Remote)
 	if !outbound {
 		return out
 	}

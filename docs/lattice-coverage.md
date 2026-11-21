@@ -60,11 +60,11 @@ don't depend on them.
 | 0x01 | `shell` | Covered | `exec.c2_shell_recon`, the command-line rules (download cradles, reverse shells, encoded payloads), `process.unexpected_parent` |
 | 0x03 | `shinject-moonwalk` | Covered *memory* | `memory.remote_thread_unbacked`, `memory.thread_start_unbacked`, the stack-spoofing rules; Sysmon 8 through `memory.remote_thread_*` |
 | 0x04 | `threadless-inject` | Covered *memory* | `memory.image_inline_patch` |
-| 0x05 | `execute-assembly` | Partial | `defense.amsi_hwbp`, `defense.etw_hwbp`, `defense.dotnet_etw_disabled`. The CLR loaded into an unmanaged process isn't judged yet |
+| 0x05 | `execute-assembly` | New | `modules.clr_in_native_process`: the .NET Framework runtime loaded into a process whose image has no CLR header (*suspect* in sacrificial hosts such as rundll32, notepad or wscript and in programs run from temporary folders; from Sysmon 7 for the sacrificial hosts). The bypasses it pairs with: `defense.amsi_hwbp`, `defense.etw_hwbp`, `defense.dotnet_etw_disabled` |
 | 0x06 | `module-stomp` | Covered *memory* | `memory.image_code_modified` |
-| 0x07 | `token-steal` | Not detected | Thread impersonation tokens aren't collected |
+| 0x07 | `token-steal` | New | `privesc.thread_impersonation`: a thread wearing another account's token in a sacrificial host, a program in a temporary folder or a shell (servers, which impersonate clients, pass); `privesc.stolen_token_process`: a process running as a different account from its parent when the parent isn't a Windows broker, *suspect* for a user's process starting a SYSTEM one |
 | 0x08 | `pth` (overpass-the-hash) | Covered | `cred.pass_the_hash` (logon type 9 through Secondary Logon) |
-| 0x09 | `net-enum` | Partial | Linux: `exec.c2_shell_recon`. Windows in-memory LDAP, share and session enumeration leaves no host artifact lrng reads; on a domain controller, `cred.dcsync` and the directory-access rules see some of it |
+| 0x09 | `net-enum` | New / Partial | LDAP: `discovery.ldap_unusual_process` (a domain controller's LDAP, LDAPS or global catalog port from a sacrificial host or a temporary-folder program; Windows, Linux, Sysmon 3). Linux shell form: `exec.c2_shell_recon`. Share and session enumeration over SMB looks like any other connection to port 445 and isn't judged |
 | 0x0A | `bof-exec` | Partial *memory* | Execution from private memory: `memory.thread_start_unbacked`, `memory.stack_unbacked` |
 | 0x0B | `dcsync` | Covered | `cred.dcsync`, `cred.dcsync_machine_account` |
 | 0x0C | `lsass-nanodump` (`PssCaptureSnapshot`) | Covered / New | Sysmon 10 LSASS access from unbacked code: `defense.direct_syscall`, and new `defense.indirect_syscall` for the indirect form; `process.unexpected_parent` for the snapshot clone (an LSASS whose parent isn't wininit) while it exists; `cred.lsass_dump` for dump-tool command lines |
@@ -101,3 +101,19 @@ through `malware.lattice_agent` (it carries the agent's protocol strings) and
 a listener run from a temporary or public folder through
 `network.unusual_path_listener`. The operator console runs on the operator's
 machine, not a target's.
+
+## What's left
+
+Everything on the roadmap now has a rule, apart from these:
+
+- **Kernel tampering** (callback unlinking, ETW-TI, the `byovd-*` payloads
+  themselves): out of reach for a user-mode responder. The driver load that
+  makes it possible is covered.
+- **DripLoader's allocation pattern** and **headerless reflective images**:
+  the memory scanner sees the code running from private memory, not the
+  4 KB reservations or the image without its header.
+- **A plausible spoofed parent**: `process.unexpected_parent` catches
+  impossible parents of system processes, not a believable one.
+- **SMB share and session enumeration**, and the transports' wire formats
+  (JA3/JA4, WebSockets, gRPC): a network sensor's job.
+- **Keying, kill dates and sandbox checks**: they leave nothing on a host.

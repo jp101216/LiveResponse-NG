@@ -183,8 +183,9 @@ one critical finding, not four).
 
 The Windows collectors use the standard-library `syscall` package plus
 `LazyDLL` bindings for the rest, so there are no third-party Go dependencies:
-Toolhelp process and module snapshots, `QueryFullProcessImageNameW`,
-`NtQueryInformationProcess`, `GetProcessTimes` and token queries;
+Toolhelp process, module and thread snapshots, `QueryFullProcessImageNameW`,
+`NtQueryInformationProcess`, `GetProcessTimes` and token queries (each
+thread's impersonation token through `OpenThread` and `OpenThreadToken`);
 `GetExtendedTcpTable`/`GetExtendedUdpTable` (`iphlpapi.dll`); the registry
 (`advapi32.dll`: `RegOpenKeyExW`, `RegEnumKeyExW`, `RegEnumValueW`,
 `RegQueryValueExW`) and SID resolution (`CreateWellKnownSid`,

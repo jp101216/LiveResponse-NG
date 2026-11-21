@@ -29,6 +29,9 @@ type connView struct {
 	// PeerListener is the process listening on RemotePort when the peer is
 	// this host (loopback), "" otherwise.
 	PeerListener string
+	// CommandLine is read only where a rule needs it (rundll32 reaching a
+	// directory), "" otherwise.
+	CommandLine string
 }
 
 // localLLMServers are the default API ports of local LLM servers, each with
@@ -165,6 +168,11 @@ func analyzeConnection(c connView) []Finding {
 	}
 
 	out = append(out, llmServerFindings(c, label)...)
+	if c.State == "ESTABLISHED" || c.State == "SYN_SENT" {
+		if f, ok := ldapDiscoveryFinding(label, firstNonEmpty(c.ImagePath, c.Process), c.CommandLine, netip.AddrPortFrom(c.Remote, c.RemotePort), ""); ok {
+			out = append(out, f)
+		}
+	}
 	outbound := (c.State == "ESTABLISHED" || c.State == "SYN_SENT") && aidetect.PublicAddr(c.Remote)
 	if !outbound {
 		return out

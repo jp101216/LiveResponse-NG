@@ -623,6 +623,10 @@ func eventFindings(ev winEvent) []Finding {
 		if isSysmon(ev) {
 			out = append(out, sysmonNetworkFindings(ev)...)
 		}
+	case 7: // Sysmon: an image was loaded (other providers use 7 for other things)
+		if isSysmon(ev) {
+			out = append(out, clrImageLoadFindings(ev)...)
+		}
 	case 8: // Sysmon: a thread was created in another process
 		if isSysmon(ev) {
 			out = append(out, remoteThreadFindings(ev)...)

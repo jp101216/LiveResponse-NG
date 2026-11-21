@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.20.0
+
 Detection for every feature on Project Lattice's roadmap, the author's own
 adversary-emulation C2, mapped feature by feature in
 [docs/lattice-coverage.md](docs/lattice-coverage.md). Most of the roadmap was

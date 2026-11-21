@@ -16,7 +16,7 @@ modules, eBPF and the systemd journal behind the same interface.
 *The [report viewer](#report-viewer) on a lab VM seeded with harmless
 lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 
-> **Status:** v0.19.1. On **Linux**, a default run covers processes, network
+> **Status:** v0.20.0. On **Linux**, a default run covers processes, network
 > (TCP + UDP, with per-socket process attribution via `/proc`), loaded modules,
 > local accounts (with SSH keys' forced commands), persistence (cron, anacron, `at`,
 > systemd, ld.so.preload, rc.local, XDG autostart, shell startup files, PAM, sudo
@@ -32,7 +32,8 @@ lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 > On **Windows**, a default run covers processes (with a process-tree,
 > command-line analysis, offline Authenticode verification that names the
 > signer, and the tricks implants play: marking themselves critical so killing
-> them crashes Windows, running on a hidden desktop, back-dating their files),
+> them crashes Windows, running on a hidden desktop, back-dating their files,
+> deleting their own image, wearing a stolen token),
 > network (TCP + UDP, IPv4 + IPv6), services, ~20 autostart locations (and the
 > registry keys UAC bypasses plant),
 > scheduled tasks (cross-checked against the Task Scheduler's registry cache),
@@ -50,8 +51,8 @@ lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 > roasting, shadow credentials, delegation and ACL backdoors, AD CS abuse), DNS
 > tunnels and other covert channels — which can also be triaged offline from
 > saved `.evtx` files on any OS — and known implants by their own strings and
-> the files they stage (NIK C2). A correlation pass lines the logs up against
-> the live state. That's about 240 named detections, each mapped to MITRE ATT&CK, plus
+> the files they stage (NIK C2, Project Lattice). A correlation pass lines the
+> logs up against the live state. That's about 250 named detections, each mapped to MITRE ATT&CK, plus
 > your own Sigma rules (or the bundled pack), an optional super-timeline,
 > indicator (IOC) export and offline endpoint-intelligence attribution
 > (ASN / country / cloud / CDN / hosting / Tor, air-gapped), AI
@@ -66,7 +67,7 @@ lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 > recognizable stubs and extra copies of ntdll mapped around EDR hooks,
 > a check of where threads started and a walk of each waiting thread's
 > stack, which finds sleeping beacons, sleep-masked implants and spoofed
-> stacks, and Cobalt Strike and Havoc configurations decoded out of memory
+> stacks (call-preceded gadgets included), and Cobalt Strike and Havoc configurations decoded out of memory
 > (C2 hosts, URIs, watermark, sleep), which go into the IOC export.
 > Reports open in a [report viewer](#report-viewer): one offline HTML page, or
 > `-format html` for the report and viewer in one file. See

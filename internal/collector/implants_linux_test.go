@@ -4,6 +4,7 @@ package collector
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,13 +56,27 @@ func TestImplantsLinuxRunningImage(t *testing.T) {
 	if err := os.WriteFile(bin, data, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if real, err := filepath.EvalSymlinks(bin); err == nil {
+		bin = real // /proc/<pid>/exe names the resolved path
+	}
+	// argv[0] stays "sleep": a multicall coreutils (uutils, busybox) picks
+	// the utility by that name, and would exit at once as "wraith".
 	cmd := exec.Command(bin, "30")
+	cmd.Args[0] = "sleep"
 	if err := cmd.Start(); err != nil {
 		t.Skipf("can't run the copy: %v", err)
 	}
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-	time.Sleep(200 * time.Millisecond)
 	pid := uint32(cmd.Process.Pid)
+	running := false
+	for i := 0; i < 50 && !running; i++ {
+		time.Sleep(20 * time.Millisecond)
+		exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+		running = err == nil && exe == bin
+	}
+	if !running {
+		t.Skipf("the copy of %s didn't stay running as %s", src, bin)
+	}
 
 	check := func(stage string, deleted bool) {
 		recs := latticeFindings(t)

@@ -14,8 +14,9 @@ import (
 
 // implants.go — specific implant families, found by what they are rather
 // than how they behave: their own strings in a program running from a
-// user-writable folder, and the files they stage. The first family is NIK C2,
-// the AI-enabled Go RAT Cisco Talos described in October 2026.
+// user-writable folder, and the files they stage. The families are NIK C2,
+// the AI-enabled Go RAT Cisco Talos described in October 2026, and the agent
+// of Project Lattice, an open adversary-emulation C2 written in Rust.
 //
 // Marker strings are kept XOR-encoded in this source, so that lrng's own
 // binary (or its test binary, run from a temporary folder) never holds them
@@ -24,7 +25,7 @@ import (
 type implantsCollector struct{ opts RunOptions }
 
 func (*implantsCollector) Name() string           { return "implants" }
-func (*implantsCollector) Platforms() []string    { return []string{"windows"} }
+func (*implantsCollector) Platforms() []string    { return []string{"windows", "linux"} }
 func (*implantsCollector) Timeout() time.Duration { return 2 * time.Minute }
 
 func (c *implantsCollector) Configure(o RunOptions) { c.opts = o }
@@ -47,15 +48,22 @@ func xorKey(s string) []byte {
 // implantFamily is one family's markers. A file is the family's when it holds
 // at least one strong marker and two markers in all.
 type implantFamily struct {
-	Name    string
-	Strong  [][]byte // strings only the family's own code carries
-	Weak    [][]byte // strings it carries that others might too
-	GoOnly  bool     // the family is written in Go: only Go binaries are searched
-	Summary string   // what it is, for the finding
+	Name      string
+	Rule      string   // the finding's rule ID
+	Technique string   // the finding's ATT&CK technique
+	Strong    [][]byte // strings only the family's own code carries
+	Weak      [][]byte // strings it carries that others might too
+	GoOnly    bool     // the family is written in Go: only Go binaries are searched
+	Critical  bool     // the implant marks its process critical (ending it crashes Windows)
+	Summary   string   // what it is, for the finding
 }
 
+// implantFamilies lists the families searched for. NIK C2 stays first: the
+// staged-file checks below read its bootkit marker by index.
 var implantFamilies = []implantFamily{{
-	Name: "NIK C2",
+	Name:      "NIK C2",
+	Rule:      "malware.nik_c2",
+	Technique: "T1071.001",
 	Strong: [][]byte{
 		xorKey("\x34\x33\x31\x05\x2a\x3b\x34\x3f\x36"),                                 // its panel's build path
 		xorKey("\x01\x14\x13\x11\x07\x7a\x09\x2e\x3b\x28\x2e\x33\x34\x3d"),             // its start-up log line
@@ -67,20 +75,81 @@ var implantFamilies = []implantFamily{{
 		xorKey("\x39\x35\x2a\x23\x2d\x3b\x2e\x39\x32\x3e\x35\x3d"),                         // its watchdog argument
 		xorKey("\x36\x35\x39\x31\x05\x29\x39\x28\x3f\x3f\x34\x74\x32\x2e\x37\x36"),         // its lock screen's file
 	},
-	GoOnly: true,
+	GoOnly:   true,
+	Critical: true,
 	Summary: "a Go remote-access implant (Cisco Talos, October 2026) that steals browser, Discord, Wi-Fi and wallet " +
 		"credentials, logs keys, runs a hidden VNC, proxies traffic, shows a fake ransomware lock screen and sends its " +
 		"operator's prompts to OpenAI's API from the victim's machine",
+}, {
+	Name:      "Project Lattice",
+	Rule:      "malware.lattice_agent",
+	Technique: "T1071.001",
+	Strong: [][]byte{
+		xorKey("\x02\x77\x16\x3b\x2e\x2e\x33\x39\x3f\x77\x02\x15\x08"),                                                         // its custom HTTP header
+		xorKey("\x2d\x28\x3b\x33\x2e\x32\x77\x36\x33\x2c\x3f\x77"),                                                             // its session-ID prefix
+		xorKey("\x0d\x28\x3b\x33\x2e\x32\x7a\x16\x33\x2c\x3f\x7a\x0a\x28\x35\x39\x3f\x29\x29\x7a\x09\x2e\x3b\x28\x2e\x3f\x3e"), // its start-up line
+	},
+	Weak: [][]byte{
+		xorKey("\x75\x3b\x2a\x33\x75\x2c\x6b\x75\x33\x37\x2a\x36\x3b\x34\x2e\x75\x39\x32\x3f\x39\x31\x33\x34"), // its check-in path
+		xorKey("\x75\x3b\x2a\x33\x75\x2c\x6b\x75\x33\x37\x2a\x36\x3b\x34\x2e\x75\x28\x3f\x29\x2f\x36\x2e"),     // its result path
+		xorKey("\x75\x3b\x2a\x33\x75\x2c\x68\x75\x2e\x3f\x36\x3f\x37\x3f\x2e\x28\x23"),                         // its default listener path
+		xorKey("\x78\x29\x23\x29\x39\x3b\x36\x36\x05\x3f\x34\x3d\x33\x34\x3f\x78\x60\x78"),                     // a check-in JSON key
+		xorKey("\x78\x36\x35\x3b\x3e\x3f\x28\x05\x37\x35\x3e\x3f\x78\x60\x78"),                                 // another check-in JSON key
+	},
+	Summary: "a component of Project Lattice, an adversary-emulation C2 written in Rust and Go (its agent, or its team " +
+		"server, which carries the same protocol strings). The agent checks in over HTTP with a custom header, runs the " +
+		"operator's shell commands and enumerates the host and its network; the project's roadmap adds DNS, DoH, HTTP/3, " +
+		"SMB-pipe and WebSocket transports, sleep masking, indirect syscalls, stack spoofing, PPL stripping and kernel " +
+		"callback tampering",
 }}
+
+// implantFamilyNames lists the families searched, for the collector's metadata.
+func implantFamilyNames() []string {
+	out := make([]string, len(implantFamilies))
+	for i, f := range implantFamilies {
+		out[i] = f.Name
+	}
+	return out
+}
 
 // goBuildID is how a Go-built program starts its code (the build ID sits at
 // the start of the text section).
 var goBuildID = []byte("Go build ID: \"")
 
 const (
-	implantHeadBytes = 64 << 10 // read to tell a Go binary
-	implantMaxFile   = 64 << 20 // larger files aren't searched
+	implantHeadBytes  = 64 << 10 // read to tell a Go binary
+	implantMaxFile    = 64 << 20 // larger files aren't searched
+	implantByteBudget = 1 << 30  // bounds how much the collector reads in all
 )
+
+// unixSystemPrefixes are the folders a Linux package manager, snap, flatpak
+// or Nix installs programs into. A running image under one isn't searched:
+// the families here run from wherever they were dropped or built.
+var unixSystemPrefixes = []string{"/usr/", "/bin/", "/sbin/", "/lib/", "/lib32/", "/lib64/", "/libx32/", "/opt/",
+	"/snap/", "/nix/store/", "/var/lib/flatpak/", "/var/lib/snapd/"}
+
+// unixImplantCandidate reports whether a running image on Linux is searched:
+// it has a path, and the path (less a " (deleted)" mark) is outside the
+// system's program folders.
+func unixImplantCandidate(exe string) bool {
+	p := strings.TrimSuffix(exe, deletedSuffix)
+	if !strings.HasPrefix(p, "/") {
+		return false
+	}
+	for _, pre := range unixSystemPrefixes {
+		if strings.HasPrefix(p, pre) {
+			return false
+		}
+	}
+	return true
+}
+
+// unixStagingDirs are the world-writable folders an implant is dropped into
+// before it runs; executables directly inside them are searched too.
+var unixStagingDirs = []string{"/tmp", "/var/tmp", "/dev/shm"}
+
+// elfMagic is how every Linux executable starts.
+var elfMagic = []byte("\x7fELF")
 
 // errNotCandidate is a file that isn't searched (too large, not a Go binary).
 var errNotCandidate = errors.New("not a candidate")
@@ -147,10 +216,12 @@ func implantFileFinding(fam *implantFamily, path string, markers []string, pids 
 		}
 		running = "running as pid " + strings.Join(ids, ", ")
 	}
-	return Finding{Rule: "malware.nik_c2", Severity: SevCritical, Technique: "T1071.001", Confidence: 95,
-		Detail: fmt.Sprintf("%s (%s) holds %s's own strings (%s): %s, %s. It marks itself critical, so ending it "+
-			"crashes Windows: suspend it rather than kill it", path, running, fam.Name, strings.Join(quoteAll(markersShown(markers)), ", "),
-			fam.Name, fam.Summary)}
+	detail := fmt.Sprintf("%s (%s) holds %s's own strings (%s): %s, %s", path, running, fam.Name,
+		strings.Join(quoteAll(markersShown(markers)), ", "), fam.Name, fam.Summary)
+	if fam.Critical {
+		detail += ". It marks itself critical, so ending it crashes Windows: suspend it rather than kill it"
+	}
+	return Finding{Rule: fam.Rule, Severity: SevCritical, Technique: fam.Technique, Confidence: 95, Detail: detail}
 }
 
 // markersShown keeps the report readable: at most four markers.

@@ -51,10 +51,12 @@ func TestScanImplantFile(t *testing.T) {
 	if fam, _, _, _ := scanImplantFile(write("c.exe", fakeGoProgram(nik.Strong[2]))); fam != nil {
 		t.Error("one strong marker alone")
 	}
-	// NIK C2 is a Go program: anything else isn't searched.
+	// NIK C2 is a Go program: anything else is searched only for the
+	// families that aren't (Project Lattice), so NIK's markers there are not
+	// NIK C2.
 	notGo := append([]byte("MZ not go "), append(append([]byte{}, nik.Strong[0]...), nik.Strong[1]...)...)
-	if _, _, _, err := scanImplantFile(write("d.exe", notGo)); err != errNotCandidate {
-		t.Errorf("a program that isn't Go: %v", err)
+	if fam, _, _, err := scanImplantFile(write("d.exe", notGo)); fam != nil || err != nil {
+		t.Errorf("a program that isn't Go: %v %v", fam, err)
 	}
 	big := write("e.exe", nil)
 	if err := os.Truncate(big, implantMaxFile+1); err != nil {
@@ -62,6 +64,91 @@ func TestScanImplantFile(t *testing.T) {
 	}
 	if _, _, _, err := scanImplantFile(big); err != errNotCandidate {
 		t.Errorf("too large: %v", err)
+	}
+}
+
+// fakeELF is bytes shaped like a Linux executable (not a Go one) holding the
+// given markers.
+func fakeELF(markers ...[]byte) []byte {
+	b := append([]byte{0x7f, 'E', 'L', 'F', 2, 1, 1}, bytes.Repeat([]byte{0}, 0x400)...)
+	for _, m := range markers {
+		b = append(b, bytes.Repeat([]byte{0xcc}, 2048)...)
+		b = append(b, m...)
+	}
+	return b
+}
+
+func latticeFamily(t *testing.T) implantFamily {
+	t.Helper()
+	for _, f := range implantFamilies {
+		if f.Name == "Project Lattice" {
+			return f
+		}
+	}
+	t.Fatal("Project Lattice family missing")
+	return implantFamily{}
+}
+
+func TestScanImplantFileLattice(t *testing.T) {
+	lat := latticeFamily(t)
+	dir := t.TempDir()
+	write := func(name string, data []byte) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	fam, markers, _, err := scanImplantFile(write("wraith", fakeELF(lat.Strong[0], lat.Strong[1], lat.Weak[0], lat.Weak[3])))
+	if err != nil || fam == nil || fam.Name != "Project Lattice" || len(markers) != 4 {
+		t.Fatalf("Lattice-shaped ELF: %v %v %v", fam, markers, err)
+	}
+	f := implantFileFinding(fam, "/home/op/Project-Lattice/wraith/target/release/wraith", markers, []uint32{10487})
+	if f.Rule != "malware.lattice_agent" || f.Severity != SevCritical || f.Technique != "T1071.001" ||
+		!strings.Contains(f.Detail, "pid 10487") || strings.Contains(f.Detail, "suspend it") {
+		t.Errorf("finding: %+v", f)
+	}
+	// A Windows build is searched the same way; it isn't a Go program.
+	pe := append([]byte("MZ"), fakeELF(lat.Strong[2], lat.Weak[1])[4:]...)
+	if fam, _, _, _ := scanImplantFile(write("wraith.exe", pe)); fam == nil || fam.Rule != "malware.lattice_agent" {
+		t.Errorf("PE build: %v", fam)
+	}
+	// The check-in paths and JSON keys alone are generic web-API strings.
+	if fam, _, _, _ := scanImplantFile(write("api-client", fakeELF(lat.Weak...))); fam != nil {
+		t.Errorf("weak markers alone: %v", fam)
+	}
+	if fam, _, _, _ := scanImplantFile(write("one", fakeELF(lat.Strong[0]))); fam != nil {
+		t.Errorf("one strong marker alone: %v", fam)
+	}
+	// NIK C2's markers in a program that isn't Go are not NIK C2.
+	nik := implantFamilies[0]
+	if fam, _, _, _ := scanImplantFile(write("nik-elf", fakeELF(nik.Strong[0], nik.Strong[1]))); fam != nil {
+		t.Errorf("NIK markers outside a Go program: %v", fam)
+	}
+	// The NIK finding keeps its rule and its warning about killing it.
+	if f := implantFileFinding(&implantFamilies[0], `C:\x.exe`, []string{"a", "b"}, nil); f.Rule != "malware.nik_c2" ||
+		!strings.Contains(f.Detail, "suspend it") {
+		t.Errorf("NIK finding: %+v", f)
+	}
+}
+
+func TestUnixImplantCandidate(t *testing.T) {
+	for exe, want := range map[string]bool{
+		"/home/op/Project-Lattice/wraith/target/release/wraith": true,
+		"/tmp/.x/agent":                      true,
+		"/dev/shm/a (deleted)":               true,
+		"/root/agent":                        true,
+		"/usr/bin/python3.12":                false,
+		"/usr/lib/systemd/systemd (deleted)": false,
+		"/opt/google/chrome/chrome":          false,
+		"/snap/firefox/123/usr/lib/firefox":  false,
+		"/nix/store/abc-bash-5.2/bin/bash":   false,
+		"":                                   false,
+		"relative/path":                      false,
+	} {
+		if got := unixImplantCandidate(exe); got != want {
+			t.Errorf("%q: %v, want %v", exe, got, want)
+		}
 	}
 }
 

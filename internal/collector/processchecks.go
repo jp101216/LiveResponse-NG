@@ -156,6 +156,36 @@ func implausibleTime(t, now time.Time) string {
 
 // timestompFinding judges an executable's file times (created may be zero
 // where the file system doesn't record it).
+// deletedImageFinding judges a running process whose image file no longer
+// exists: self-deleting implants remove their own locked executable while it
+// runs (on Windows by renaming its data stream to an alternate stream, then
+// deleting the file).
+func deletedImageFinding(label, img string) Finding {
+	return Finding{Rule: "process.deleted_binary", Severity: SevSuspect, Technique: "T1070.004", Confidence: 70,
+		Detail: fmt.Sprintf("%s is running from %s, which no longer exists: self-deleting implants remove their own "+
+			"executable while it runs (on Windows by renaming its data stream to an alternate stream, then deleting the "+
+			"file). An updater or uninstaller that removes itself as it exits looks the same for a moment", label, img)}
+}
+
+// selfDeleteFindings judges Sysmon's file-delete events (23, 26): a process
+// that deleted its own executable.
+func selfDeleteFindings(ev winEvent) []Finding {
+	img := strings.TrimSpace(evData(ev, "Image"))
+	target := strings.TrimSpace(evData(ev, "TargetFilename"))
+	if img == "" || target == "" || !strings.EqualFold(img, target) {
+		return nil
+	}
+	f := Finding{Rule: "defense.self_delete", Severity: SevSuspect, Technique: "T1070.004", Confidence: 70,
+		Detail: fmt.Sprintf("%s (pid %s) deleted its own executable%s (Sysmon event %d): implants erase themselves this way on "+
+			"exit or on command, leaving only memory and logs behind", img, firstNonEmpty(evData(ev, "ProcessId"), "?"),
+			eventTime(ev), ev.EventID)}
+	if packagedProgram(img) {
+		f.Severity, f.Confidence = SevNotable, 35
+		f.Detail += ". It is an installed program; uninstallers and updaters remove themselves too"
+	}
+	return []Finding{f}
+}
+
 func timestompFinding(what, path string, created, modified, now time.Time) (Finding, bool) {
 	var bad []string
 	early := false

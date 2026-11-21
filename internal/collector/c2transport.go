@@ -34,6 +34,85 @@ var quicClients = set("chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "o
 	"ms-teams.exe", "teams.exe", "svchost.exe", "system", "onedrive.exe", "discord.exe", "slack.exe", "zoom.exe", "spotify.exe",
 	"code.exe", "chrome", "firefox", "msedge", "brave", "chromium", "chromium-browser", "opera", "vivaldi", "code", "discord", "slack")
 
+// dohResolvers are the public resolvers that answer DNS over HTTPS on port
+// 443 (and DNS over TLS on 853): Cloudflare, Google, Quad9, OpenDNS and
+// AdGuard, each family's IPv4 and IPv6 service addresses.
+var dohResolvers = addrSet(
+	"1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2", "1.1.1.3", "1.0.0.3",
+	"2606:4700:4700::1111", "2606:4700:4700::1001", "2606:4700:4700::1112", "2606:4700:4700::1002",
+	"2606:4700:4700::1113", "2606:4700:4700::1003",
+	"8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844",
+	"9.9.9.9", "149.112.112.112", "9.9.9.10", "149.112.112.10", "9.9.9.11", "149.112.112.11",
+	"2620:fe::fe", "2620:fe::9", "2620:fe::10", "2620:fe::fe:10", "2620:fe::11", "2620:fe::fe:11",
+	"208.67.222.222", "208.67.220.220", "2620:119:35::35", "2620:119:53::53",
+	"94.140.14.14", "94.140.15.15", "2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff")
+
+// dohApps are programs besides browsers and resolvers that encrypt DNS by
+// design: Cloudflare's WARP client, NextDNS, AdGuard and DNS proxies.
+var dohApps = set("warp-svc.exe", "warp-svc", "cloudflare warp.exe", "nextdns.exe", "nextdns", "adguardsvc.exe", "adguard.exe",
+	"adguardhome", "adguardhome.exe", "dnsproxy", "dnsproxy.exe", "simplednscrypt.exe", "stubby.exe", "unbound.exe",
+	"technitium.dnsserver.exe", "blocky", "dnsdist")
+
+func addrSet(items ...string) map[netip.Addr]bool {
+	m := make(map[netip.Addr]bool, len(items))
+	for _, s := range items {
+		m[netip.MustParseAddr(s)] = true
+	}
+	return m
+}
+
+// anyPathRisk judges an image path in whichever form it comes: a Linux path
+// by the Unix rules, anything else by the Windows ones.
+func anyPathRisk(p string) (riskLevel, string) {
+	if strings.HasPrefix(p, "/") {
+		return unixPathRisk(p)
+	}
+	return pathRisk(p)
+}
+
+// packagedProgram reports an image installed where software is installed:
+// Program Files or the Windows folder, or a Linux system prefix.
+func packagedProgram(img string) bool {
+	if strings.HasPrefix(img, "/") {
+		return !unixImplantCandidate(img)
+	}
+	return installedProgram(img)
+}
+
+// dohFinding judges a connection that carries DNS inside an encrypted
+// channel: to port 853 (DNS over TLS) anywhere, or to a public DoH resolver's
+// port 443, from a program that isn't a browser, a resolver or a DNS privacy
+// tool. Encrypted DNS goes past the host's DNS client and whatever logs it;
+// C2 frameworks tunnel through public DoH resolvers (godoh, Cobalt Strike's
+// DoH beacon) because the traffic reads as a browser's HTTPS.
+func dohFinding(label, image string, peer netip.AddrPort, when string) (Finding, bool) {
+	var what string
+	switch {
+	case peer.Port() == 853:
+		what = "DNS over TLS (port 853)"
+	case peer.Port() == 443 && dohResolvers[peer.Addr().Unmap()]:
+		what = "a public DNS-over-HTTPS resolver"
+	default:
+		return Finding{}, false
+	}
+	name := baseName(image)
+	if dnsResolvers[name] || quicClients[name] || dohApps[name] {
+		return Finding{}, false
+	}
+	f := Finding{Rule: "network.doh_outbound", Severity: SevSuspect, Technique: "T1572", Confidence: 55,
+		Detail: fmt.Sprintf("%s reached %s, %s%s: DNS carried inside an encrypted channel, past the host's DNS client and "+
+			"anything that logs plain DNS. C2 frameworks tunnel through public DoH resolvers (godoh, Cobalt Strike's DoH "+
+			"beacon) because the traffic reads as a browser's HTTPS", label, peer, what, when)}
+	if lvl, why := anyPathRisk(image); lvl == riskHigh {
+		f.Confidence = 70
+		f.Detail += "; the program runs from " + why
+	} else if packagedProgram(image) {
+		f.Severity, f.Confidence = SevNotable, 35
+		f.Detail += ". It is an installed program; VPN clients, privacy tools and some apps resolve this way too"
+	}
+	return f, true
+}
+
 // directDNSFinding judges a program sending DNS (port 53) straight to a public
 // address: past the host's DNS client and whatever logs it, as DNS tunnels
 // and DNS C2 implants that carry their own resolver do.
@@ -78,6 +157,9 @@ func sysmonNetworkFindings(ev winEvent) []Finding {
 	name := baseName(img)
 	label := fmt.Sprintf("%s (pid %s)", img, firstNonEmpty(evData(ev, "ProcessId"), "?"))
 	var out []Finding
+	if f, ok := dohFinding(label, img, peer, eventTime(ev)); ok {
+		out = append(out, f)
+	}
 	switch {
 	case port == 53:
 		if f, ok := directDNSFinding(label, img, peer, eventTime(ev)); ok {

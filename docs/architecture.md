@@ -434,18 +434,24 @@ shells byte for byte and reads their language-neutral version resource
 
 ### Implants, and the tricks they play on processes
 
-`implants` (Windows) searches program files for implant families' own strings
+`implants` (Windows and Linux) searches program files for implant families' own strings
 (`implantFamilies` in `implants.go`: strong markers only the family's code
 carries, weak ones others might; a match needs one strong and two in all). The
 markers are stored XOR 0x5A (`xorKey`) so lrng's binary never carries them, and
 `TestImplantMarkersNotInOwnBinary` reads the test binary to make sure. A
 family can be limited to Go programs (`GoOnly`), told by the build-ID line Go
-writes at the start of the text section. Candidates are running images outside
-the Windows and Program Files folders plus the executables in each user's
-temporary folder and `AppData\Roaming\Microsoft\Network`; `stagedFilesFinding`
-judges the files NIK C2 leaves in temporary folders.
+writes at the start of the text section. Each family carries its own rule ID
+(`malware.nik_c2`, `malware.lattice_agent`). On Windows, candidates are running
+images outside the Windows and Program Files folders plus the executables in
+each user's temporary folder and `AppData\Roaming\Microsoft\Network`;
+`stagedFilesFinding` judges the files NIK C2 leaves in temporary folders. On
+Linux (`implants_linux.go`), candidates are running images outside
+`unixSystemPrefixes`, read through `/proc/<pid>/exe` so a deleted image still
+reads, plus ELF files directly in `unixStagingDirs`.
 
-`processchecks.go` holds three portable judges the process collectors call:
+`processchecks.go` holds the portable judges the process collectors call:
+`deletedImageFinding` (Windows: a running image `imageMissing` finds gone from
+disk), `selfDeleteFindings` (Sysmon 23/26: a process deleting its own image),
 `criticalProcessFinding` (the flag read with `IsProcessCritical` on the
 query-only handle), `desktopFinding` (`DesktopInfo`, read from
 `RTL_USER_PROCESS_PARAMETERS` at 0xC0 by `processParams`, which reads the

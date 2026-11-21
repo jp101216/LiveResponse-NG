@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"strings"
 	"syscall"
 	"time"
@@ -237,6 +239,9 @@ func collectProcesses(ctx context.Context, opts RunOptions) (Result, error) {
 			}
 			if f, ok := timestompFinding("the image of "+label, img, t[0], t[1], now); ok {
 				findings = mergeFindings(findings, f)
+			}
+			if imageMissing(img) {
+				findings = mergeFindings(findings, deletedImageFinding(label, img))
 			}
 		}
 		if r.d.imagePath != "" && ctx.Err() == nil {
@@ -485,4 +490,14 @@ func processCritical(h syscall.Handle) (bool, error) {
 		return false, err
 	}
 	return crit != 0, nil
+}
+
+// imageMissing reports whether a drive-letter image path is gone from disk.
+// Paths in other forms (\Device\..., UNC) aren't judged.
+func imageMissing(img string) bool {
+	if len(img) < 3 || img[1] != ':' || img[2] != '\\' {
+		return false
+	}
+	_, err := os.Lstat(img)
+	return errors.Is(err, fs.ErrNotExist)
 }

@@ -11,9 +11,6 @@ import (
 	"strings"
 )
 
-// implantByteBudget bounds how much the collector reads in all.
-const implantByteBudget = 1 << 30
-
 // collectImplants searches the programs running from outside the Windows and
 // Program Files folders, and the programs sitting in the folders NIK C2 copies
 // itself to, for implant families' own strings; and lists what NIK C2 stages
@@ -141,7 +138,7 @@ func collectImplants(ctx context.Context, opts RunOptions) (Result, error) {
 			res.Add(map[string]any{"kind": "staged_files", "folder": dir, "files": names}, f)
 		}
 	}
-	res.SetMeta("families", []string{implantFamilies[0].Name})
+	res.SetMeta("families", implantFamilyNames())
 	res.SetMeta("programs_checked", checked)
 	res.SetMeta("programs_searched", searched)
 	res.SetMeta("programs_unreadable", unreadable)

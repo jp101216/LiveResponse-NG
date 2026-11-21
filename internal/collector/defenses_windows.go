@@ -6,6 +6,8 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"syscall"
+	"unsafe"
 
 	"github.com/jp101216/liveresponse-ng/internal/winreg"
 )
@@ -26,10 +28,52 @@ var exclusionKeys = []struct{ kind, key string }{
 func collectDefenses(ctx context.Context) (Result, error) {
 	res := NewResult("defenses")
 	d := readDefender()
-	defensesReport(res, d, readCredentials())
+	creds := readCredentials()
+	defensesReport(res, d, creds)
+	procs, unread := readProtection()
+	pplReport(res, procs, unread, creds.RunAsPPL)
 	amsiReport(res, readAMSI(), !d.NotInstalled)
 	runtimeEnvReport(res, readRuntimeEnv())
 	return res.Finish(), nil
+}
+
+// readProtection reads the kernel protection level of the processes
+// Windows protects (pplAlways, LSASS, Defender's engine) with
+// NtQueryInformationProcess(ProcessProtectionInformation). A limited-query
+// handle is all it takes, and protected processes grant one.
+func readProtection() ([]protectedProcess, int) {
+	const (
+		processQueryLimited          = 0x1000
+		processProtectionInformation = 61
+	)
+	entries, err := snapshotProcesses()
+	if err != nil {
+		return nil, 0
+	}
+	var out []protectedProcess
+	unread := 0
+	for _, e := range entries {
+		name := strings.ToLower(e.name)
+		if !pplAlways[name] && name != "lsass.exe" && name != "msmpeng.exe" {
+			continue
+		}
+		h, err := syscall.OpenProcess(processQueryLimited, false, e.pid)
+		if err != nil {
+			unread++
+			continue
+		}
+		var level byte
+		var n uint32
+		st, _, _ := procNtQueryInformationProcess.Call(uintptr(h), processProtectionInformation,
+			uintptr(unsafe.Pointer(&level)), 1, uintptr(unsafe.Pointer(&n)))
+		syscall.CloseHandle(h)
+		if st != 0 {
+			unread++
+			continue
+		}
+		out = append(out, protectedProcess{Name: name, PID: e.pid, Level: level})
+	}
+	return out, unread
 }
 
 const (

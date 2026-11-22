@@ -10,7 +10,7 @@ import (
 )
 
 // ErrUnsupported is returned by Record where no live source exists yet.
-var ErrUnsupported = errors.New("watch mode records on Windows in this release (Linux arrives in 0.23.0); -watch-from replays a saved stream on any OS")
+var ErrUnsupported = errors.New("watch mode records on Windows and Linux; -watch-from replays a saved stream on any OS")
 
 // RecordOptions configure a live recording.
 type RecordOptions struct {

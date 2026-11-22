@@ -308,13 +308,18 @@ func (a *Aggregator) addDNS(e Event) {
 // routable is false for destinations that can't be a remote C2: loopback,
 // unspecified, multicast and link-local.
 func (a *Aggregator) routable(ap netip.AddrPort) bool {
-	ip := ap.Addr().Unmap()
-	if !ip.IsValid() || ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
+	if !routableAddr(ap.Addr()) {
 		a.excluded++
 		return false
 	}
 	return true
+}
+
+// routableAddr is false for an address no remote C2 can have.
+func routableAddr(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	return ip.IsValid() && !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsMulticast() &&
+		!ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && ip != netip.AddrFrom4([4]byte{255, 255, 255, 255})
 }
 
 // flow returns the flow for key, making it (and evicting the least active

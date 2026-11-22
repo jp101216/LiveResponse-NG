@@ -149,10 +149,16 @@ func TestWatchFromCommand(t *testing.T) {
 	if d, err := cmd.CombinedOutput(); err == nil || cmd.ProcessState.ExitCode() != exitError {
 		t.Fatalf("a stream without a start time: %v %s", err, d)
 	}
-	if runtime.GOOS != "windows" {
+	switch {
+	case runtime.GOOS == "linux" && os.Geteuid() != 0:
 		cmd = exec.Command(exe, "-watch", "1m", "-watch-only")
-		if d, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(d), "watch mode records on Windows") {
-			t.Fatalf("-watch off Windows: %v %s", err, d)
+		if d, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(d), "watch mode needs root on Linux") {
+			t.Fatalf("-watch without root: %v %s", err, d)
+		}
+	case runtime.GOOS != "windows" && runtime.GOOS != "linux":
+		cmd = exec.Command(exe, "-watch", "1m", "-watch-only")
+		if d, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(d), "watch mode records on Windows and Linux") {
+			t.Fatalf("-watch elsewhere: %v %s", err, d)
 		}
 	}
 }

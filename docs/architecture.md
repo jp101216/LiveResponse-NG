@@ -754,7 +754,7 @@ has to remap the rules in the same change.
 
 ## Watch mode
 
-`internal/watch` has one platform-specific stage. On Windows,
+`internal/watch` has one platform-specific stage, the source. On Windows,
 `source_windows.go` starts a real-time ETW session through `advapi32`
 (`StartTraceW`, `EnableTraceEx2`, `OpenTraceW`, `ProcessTrace`, one
 `syscall.NewCallback`), with struct layouts written out per pointer size so
@@ -766,6 +766,38 @@ into a normalized `Event`. New processes' command lines are read by a worker,
 not the callback. Processes already running are seeded at the start so their
 connections are named.
 
+On Linux, `source_linux.go` opens three sockets with the standard library's
+`syscall` package. A `NETLINK_CONNECTOR` socket joined to the process
+connector's group reports exec, fork and exit; an exec's image, parent and
+command line are read from `/proc` as it arrives. An `AF_PACKET` socket,
+created with protocol 0, gets its classic BPF program (`bpf.go`, assembled
+from labeled steps) attached before it is bound to every protocol, so no
+packet arrives unfiltered. The program loads the ancillary EtherType and
+packet type, then keeps 96 bytes of outbound TCP SYNs and outbound UDP and
+4 KB of DNS queries (outbound, to port 53) and answers (inbound, from port
+53); kernel receive timestamps and the drop count come with each packet as
+control messages. A `NETLINK_SOCK_DIAG` socket looks up the socket behind a
+packet's addresses (an exact `inet_diag_req_v2` request; UDP's exact lookup
+takes the remote end as its source, and the reply's local port is checked
+either way), or `/proc/net/{tcp,udp}{,6}` when sock_diag is missing.
+
+The capture goroutine hands each packet to a `tracker` (`linuxtrack.go`,
+portable and tested with a fake kernel), which turns it into `Event`s. A
+socket's inode is matched to a process through `/proc/<pid>/fd`: first the
+holder already known for that inode (rechecked by its fd link), then the fds
+of processes started in the last minute and of recent socket owners, within
+a budget of links. A miss waits for a scan of every process, run on another
+goroutine at most every max(100 ms, 20 × the last scan's time). A socket
+gone before that scan is unattributed (PID 0). Owners found are cached by
+address pair for 30 seconds, so a busy flow costs one map lookup per packet.
+The tracker also pairs DNS queries with answers by client, server and ID,
+drops a resolver's upstream copy of a lookup a program asked it seconds
+before, and holds an answered lookup with no process for 10 seconds, giving
+it to the first program that connects to one of its answers. The packet and
+DNS parsers, the netlink and procfs formats (`linuxparse.go`) and the filter
+(run by an interpreter in the tests) are all exercised on any OS; only the
+socket calls need Linux, and the CI job runs them as root.
+
 From `Event` on, everything is portable. The `Aggregator` folds events into
 bounded state: per process, address and protocol, a ring of check-in times and
 the bytes sent and received on each (TCP sends and receives are matched to
@@ -773,8 +805,8 @@ their connection by 4-tuple; UDP check-ins start after two seconds of quiet),
 plus DNS lookups (their answers name addresses) and process starts. Caps are
 enforced as events arrive and every drop is counted. A `-watch-raw` stream is
 the same events, written by its own goroutine so the source never blocks, and
-`-watch-from` replays one through the same aggregator, so the Windows source is
-the only code the Linux CI can't run.
+`-watch-from` replays one through the same aggregator, so each source is the
+only code that needs its own system to run.
 
 `Analyze` runs after the window closes, with the snapshot's results. It groups
 flows by program (image path and the snapshot's SHA-256) and destination

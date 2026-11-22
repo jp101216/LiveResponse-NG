@@ -76,7 +76,7 @@ func main() {
 	flag.StringVar(&nav.Min, "navigator-min", "", "lowest severity in the Navigator layer: info, notable, suspect or critical (default notable)")
 	flag.StringVar(&nav.Expect, "expect", "", "expected techniques (a Navigator layer, or any text/Markdown file of T#### IDs): makes the layer a coverage map")
 	flag.Float64Var(&nav.ExpectMin, "expect-min", 0, "with -expect, exit with status 3 when under this percentage of expected techniques is detected")
-	flag.DurationVar(&wo.Duration, "watch", 0, "first record processes, connections and DNS for this long (1m to 24h, e.g. 15m), then run the snapshot; scores beaconing (Windows, elevated)")
+	flag.DurationVar(&wo.Duration, "watch", 0, "first record processes, connections and DNS for this long (1m to 24h, e.g. 15m), then run the snapshot; scores beaconing (Windows elevated, or Linux as root)")
 	flag.BoolVar(&wo.Only, "watch-only", false, "with -watch, skip the snapshot and report only the watch result")
 	flag.StringVar(&wo.Raw, "watch-raw", "", "with -watch, also save the recorded event stream (JSON Lines) to this path, plus <path>.sha256")
 	flag.StringVar(&wo.From, "watch-from", "", "offline: rescore a stream saved by -watch-raw and exit; works on any OS")
@@ -344,7 +344,7 @@ Usage: lrng [flags]
   lrng -navigator-from host.json -navigator layer.json   offline: a layer from a saved report (any OS)
   lrng -navigator-from host.json -expect profile.md -expect-min 60 -navigator coverage.json
                                        coverage of an emulation plan: detected, partial, missed, extra
-  lrng -watch 15m -out host.json       record 15 minutes first, scoring beacons, then the snapshot (Windows)
+  lrng -watch 15m -out host.json       record 15 minutes first, scoring beacons, then the snapshot (Windows, Linux)
   lrng -watch 15m -watch-only -watch-raw events.jsonl -out watch.json
                                        just the watch window, keeping the event stream
   lrng -watch-from events.jsonl -out rescored.json   offline: rescore a saved stream (any OS)

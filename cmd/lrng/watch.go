@@ -117,10 +117,15 @@ type watchRun struct {
 
 // recordWatch records this host for the -watch window, before the snapshot.
 func recordWatch(ctx context.Context, cfg config.Config, w watchOptions) (*watchRun, error) {
-	if runtime.GOOS != "windows" {
+	switch runtime.GOOS {
+	case "windows", "linux":
+	default:
 		return nil, watch.ErrUnsupported
 	}
 	if elev, err := hostinfo.Elevated(); err != nil || !elev {
+		if runtime.GOOS == "linux" {
+			return nil, errors.New("watch mode needs root on Linux: the process connector, packet capture and other processes' sockets refuse anyone else")
+		}
 		return nil, errors.New("watch mode needs an elevated prompt (administrator or SYSTEM): the kernel's process and network providers refuse anyone else")
 	}
 	if w.Raw != "" && !cfg.Force {

@@ -3,8 +3,9 @@
 // to be a person, a periodic DNS lookup, a tunnel's burst of unique
 // subdomains, or the same command started on a timer.
 //
-// Only the first stage depends on the platform. A source (ETW on Windows)
-// turns what the kernel reports into normalized Events; from there an
+// Only the first stage depends on the platform. A source (ETW on Windows; the
+// process connector, a packet socket and sock_diag on Linux) turns what the
+// kernel reports into normalized Events; from there an
 // Aggregator keeps bounded per-flow history, and Analyze scores it after the
 // window closes. A saved event stream (-watch-raw) replays through the same
 // Aggregator, so the scoring is tested on any OS.

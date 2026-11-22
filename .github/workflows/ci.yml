@@ -44,6 +44,11 @@ jobs:
       - name: go test on 32-bit (parsers of hostile input must not overflow int)
         shell: bash
         run: GOARCH=386 go test -count=1 -json ./internal/... 2>&1 | python3 .github/scripts/ci-annotate.py go-test
+      - name: watch mode's live Linux source (as root)
+        shell: bash
+        run: |
+          go test -c -o watch.test ./internal/watch
+          sudo ./watch.test -test.run 'TestLinux' -test.v -test.count=1
       - name: cross-compile release agents
         run: |
           for arch in amd64 386 arm64; do
@@ -417,8 +422,103 @@ jobs:
           bad = {k: v for k, v in r["summary"]["by_rule"].items() if k in ("memory.image_code_modified", "memory.image_header_mismatch")}
           assert not bad, "false positive on a clean process: %s" % bad
           '
+      - name: watch mode catches a scripted beacon and a DNS tunnel (live, as root)
+        working-directory: dist/linux-amd64
+        run: |
+          set -euo pipefail
+          # While lrng watches for 2 minutes: curl fetches from a local HTTP server on this
+          # runner's own address every 10 seconds (a new process each time, so attribution
+          # has to win the race with a short-lived socket); a Python loop sends a burst of
+          # 1200-byte UDP datagrams to port 443 every 10 seconds, as an HTTP/3 (QUIC)
+          # beacon does; and another asks for a random 40-character TXT name under one
+          # domain each second, as a DNS tunnel does. Each must score, attributed to its
+          # program, and the saved stream must rescore to the same findings offline.
+          ip=$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -n1)
+          port=47124
+          echo "runner address: $ip"
+          cat > server.py <<'PY'
+          import http.server, sys, time
+          class H(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  time.sleep(0.2)  # a server across a network answers in tenths of a second
+                  self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
+              def log_message(self, *a): pass
+          http.server.ThreadingHTTPServer((sys.argv[1], int(sys.argv[2])), H).serve_forever()
+          PY
+          cat > tunnel.py <<'PY'
+          import random, socket, string, struct, sys, time
+          s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+          time.sleep(3)
+          while True:
+              label = "".join(random.choice(string.ascii_lowercase + "234567") for _ in range(40))
+              q = struct.pack(">HHHHHH", random.randrange(65536), 0x0100, 1, 0, 0, 0)
+              for part in (label, "t", "exfil-test", "com"):
+                  q += bytes([len(part)]) + part.encode()
+              s.sendto(q + b"\0" + struct.pack(">HH", 16, 1), (sys.argv[1], 53))
+              time.sleep(1)
+          PY
+          cat > quic.py <<'PY'
+          import socket, sys, time
+          u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+          time.sleep(5)
+          while True:
+              for _ in range(4):
+                  u.sendto(bytes(1200), (sys.argv[1], 443)); time.sleep(0.05)
+              time.sleep(10)
+          PY
+          python3 server.py "$ip" "$port" & srv=$!
+          (sleep 4; while true; do curl --noproxy '*' -s -o /dev/null "http://$ip:$port/beacon" || true; sleep 10; done) & loop=$!
+          python3 tunnel.py "$ip" & tun=$!
+          python3 quic.py "$ip" & quic=$!
+          trap 'kill $srv $loop $tun $quic 2>/dev/null || true' EXIT
+          sudo ./lrng -watch 2m -watch-only -watch-raw linux.jsonl -out watch-linux.json -quiet
+          kill $srv $loop $tun $quic 2>/dev/null || true
+          sudo ./lrng -watch-from linux.jsonl -out replay-linux.json -quiet
+          sudo cat watch-linux.json > watch-linux.copy.json
+          sudo cat replay-linux.json > replay-linux.copy.json
+          IP="$ip" PORT="$port" python3 - <<'PY'
+          import json, os
+          ip, port = os.environ["IP"], int(os.environ["PORT"])
+          def watch(path):
+              return [r for r in json.load(open(path))["results"] if r["collector"] == "watch"][0]
+          def hits(w, rule, **want):
+              out = []
+              for rec in w["records"]:
+                  f = rec["fields"]
+                  if any(x["rule"] == rule for x in rec.get("findings", [])) and all(f.get(k) == v for k, v in want.items()):
+                      out.append(rec)
+              return out
+          def check(w, label):
+              beacon = hits(w, "network.beacon", remote_addr=ip, remote_port=port)
+              assert len(beacon) == 1, f"{label}: no network.beacon for the curl loop to {ip}:{port}"
+              assert beacon[0]["fields"]["image_path"].endswith("/curl"), f"{label}: beacon attributed to {beacon[0]['fields']['image_path']}"
+              assert len(beacon[0]["fields"].get("pids", [])) > 1, f"{label}: the curl check-ins weren't merged across processes"
+              quic = hits(w, "network.beacon", remote_addr=ip, remote_port=443, transport="quic")
+              assert len(quic) == 1, f"{label}: no QUIC network.beacon for the UDP 443 loop"
+              assert "python" in quic[0]["fields"]["image_path"], f"{label}: QUIC beacon attributed to {quic[0]['fields']['image_path']}"
+              assert [x for x in quic[0]["findings"] if x["rule"] == "network.beacon"][0]["technique"] == "T1071.001"
+              tunnel = hits(w, "dns.tunnel_rate", domain="exfil-test.com")
+              assert len(tunnel) == 1, f"{label}: no dns.tunnel_rate for exfil-test.com"
+              assert "python" in tunnel[0]["fields"]["image_path"], f"{label}: tunnel attributed to {tunnel[0]['fields'].get('image_path')}"
+              for rec in beacon + quic + tunnel:
+                  for x in rec["findings"]:
+                      print(f"::notice::{label}: {x['rule']}: {x['detail']}")
+          w = watch("watch-linux.copy.json")
+          m = w["meta"]
+          keys = ("events", "cpu_seconds", "cpu_percent_of_one_core", "heap_in_use_bytes", "packets", "packets_dropped_by_kernel",
+                  "proc_events", "proc_events_lost", "socket_lookup", "full_socket_scans", "full_socket_scan_ms_max",
+                  "attributed_by", "unattributed_because", "unattributed_events", "dns_forwarded")
+          print("::notice::watch meta: " + json.dumps({k: m[k] for k in keys if k in m}))
+          if w.get("errors"):
+              print("::notice::watch errors: " + " | ".join(w["errors"]))
+          assert m["source"] == "netlink" and m["window_seconds"] <= 125, f"window {m['window_seconds']} s from {m['source']}"
+          check(w, "live")
+          check(watch("replay-linux.copy.json"), "replay")
+          PY
       - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: linux-runner-report
-          path: dist/linux-amd64/report.json*
+          path: |
+            dist/linux-amd64/report.json*
+            dist/linux-amd64/watch-linux.copy.json

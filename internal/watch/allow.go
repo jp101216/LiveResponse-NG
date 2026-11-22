@@ -7,10 +7,11 @@ import (
 )
 
 // Programs whose periodic traffic is expected: Windows' own services,
-// Defender, browsers and their updaters, sync and chat clients. Each is
-// pinned to the folder it installs to, so a copy dropped elsewhere under the
-// same name isn't excused; a snapshot that finds the image unsigned or
-// untrusted overrides the entry. Their flows are still recorded.
+// Defender, Linux's resolvers and time services, browsers and their
+// updaters, sync and chat clients. Each is pinned to the folder it installs
+// to, so a copy dropped elsewhere under the same name isn't excused; a
+// snapshot that finds the image unsigned or untrusted overrides the entry.
+// Their flows are still recorded.
 var builtinAllow = []struct{ pattern, why string }{
 	{`{sys}/system32/svchost.exe`, "Windows service host"},
 	{`{sys}/system32/lsass.exe`, "Windows security authority"},
@@ -58,6 +59,37 @@ var builtinAllow = []struct{ pattern, why string }{
 	{`{pf}/microsoft office/root/office16/*.exe`, "Microsoft Office"},
 	{`{pf}/common files/microsoft shared/clicktorun/officeclicktorun.exe`, "Microsoft Office"},
 	{`{users}/*/appdata/local/slack/app-*/slack.exe`, "Slack"},
+
+	// Linux: resolvers, time and network services, updaters and browsers,
+	// at the paths their packages install to.
+	{`/usr/lib/systemd/systemd-resolved`, "systemd resolver"},
+	{`/lib/systemd/systemd-resolved`, "systemd resolver"},
+	{`/usr/lib/systemd/systemd-timesyncd`, "systemd time sync"},
+	{`/lib/systemd/systemd-timesyncd`, "systemd time sync"},
+	{`/usr/lib/systemd/systemd-networkd`, "systemd network manager"},
+	{`/lib/systemd/systemd-networkd`, "systemd network manager"},
+	{`/usr/sbin/chronyd`, "chrony time sync"},
+	{`/usr/sbin/ntpd`, "NTP daemon"},
+	{`/usr/sbin/dnsmasq`, "dnsmasq resolver"},
+	{`/usr/sbin/unbound`, "Unbound resolver"},
+	{`/usr/sbin/networkmanager`, "NetworkManager"},
+	{`/usr/sbin/dhclient`, "DHCP client"},
+	{`/sbin/dhclient`, "DHCP client"},
+	{`/usr/lib/snapd/snapd`, "snapd"},
+	{`/usr/libexec/packagekitd`, "PackageKit"},
+	{`/usr/lib/packagekit/packagekitd`, "PackageKit"},
+	{`/usr/libexec/fwupd/fwupd`, "fwupd firmware updater"},
+	{`/usr/lib/fwupd/fwupd`, "fwupd firmware updater"},
+	{`/usr/lib/firefox/firefox`, "Mozilla Firefox"},
+	{`/usr/lib64/firefox/firefox`, "Mozilla Firefox"},
+	{`/snap/firefox/*/usr/lib/firefox/firefox`, "Mozilla Firefox"},
+	{`/opt/google/chrome/chrome`, "Google Chrome"},
+	{`/usr/lib/chromium/chromium`, "Chromium"},
+	{`/usr/lib/chromium-browser/chromium-browser`, "Chromium"},
+	{`/snap/chromium/*/usr/lib/chromium-browser/chrome`, "Chromium"},
+	{`/usr/share/code/code`, "Visual Studio Code"},
+	{`/opt/microsoft/msedge/msedge`, "Microsoft Edge"},
+	{`/usr/lib/slack/slack`, "Slack"},
 }
 
 // Allowlist decides which programs' periodic traffic is expected.

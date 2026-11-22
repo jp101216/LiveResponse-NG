@@ -15,7 +15,7 @@ Status:
 
 Rules marked *memory* come from the memory scanner, which is opt-in:
 `lrng -collectors default,memory` (or pass `-yara`). Rules marked *watch* come
-from watch mode (`lrng -watch 15m`, Windows), which records the host before
+from watch mode (`lrng -watch 15m`, Windows or Linux), which records the host before
 the snapshot.
 
 ## The agent itself

@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+Watch mode on Linux. `-watch` now records on Linux as root, with the same
+scoring, rules, saved streams and replay as on Windows. No new
+dependencies; report schema remains 1.2.
+
+### Added
+
+- **Linux source for `-watch`** (root). The kernel's process connector
+  reports execs, forks and exits; a packet socket with a classic BPF filter
+  keeps only outbound TCP SYNs, outbound UDP datagram headers and DNS queries
+  and answers; sock_diag and `/proc/<pid>/fd` name the process behind each
+  one. Recently started processes and recent socket owners are tried first,
+  then a scan of every process, at most every 100 ms and within about 5% of a
+  core. Nothing is loaded into the kernel but the socket filter. About 0.1%
+  of a core idle.
+- **DNS on Linux.** Each lookup is paired with its answer, or times out
+  after 5 seconds. A lookup that a local resolver (systemd-resolved,
+  dnsmasq) forwards upstream counts once, for the program that asked. A
+  lookup whose socket closed before its owner was found is credited to the
+  program that next connects to one of its answers.
+- **Unattributed traffic.** A socket that closes before its owner is found is
+  recorded with PID 0, reported as an unattributed process, scored per
+  destination but not for rotation, and counted in `meta.unattributed_events`
+  and `meta.unattributed_because`. `meta.attributed_by` says how the rest were
+  found.
+- **Linux allowlist entries**: systemd-resolved, timesyncd and networkd,
+  chrony, ntpd, dnsmasq, Unbound, NetworkManager, dhclient, snapd,
+  PackageKit, fwupd, and Firefox, Chrome, Chromium, Edge, VS Code and Slack at
+  their package paths.
+- **CI**: the Linux job runs a curl loop (a new process for every check-in),
+  a UDP 443 QUIC loop and a DNS-tunnel imitation under a 2-minute watch as
+  root, and checks each scores, attributed to its program, live and from the
+  saved stream. The Go job runs the live source's tests as root.
+
+### Changed
+
+- `-watch` off Windows and Linux reports that it records on those two; on
+  Linux without root it says root is needed.
+
+### Known gaps
+
+- TCP flows on Linux have no byte counts (the filter keeps only SYNs), so
+  they score without the size part. IPv6 packets with extension headers are
+  skipped. Containers in their own network namespace are seen after NAT, so
+  their traffic is unattributed. Linux watch mode runs on the host, not in a
+  container.
+
 ## 0.22.0
 
 Two features for red and purple teams: an ATT&CK Navigator export of the

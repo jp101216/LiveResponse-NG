@@ -1312,7 +1312,11 @@ enriched by the same run's hashes, signatures, memory scan and intel.
 ```powershell
 .\lrng.exe -watch 15m -out E:\case42\HOST01.json        # watch, then the snapshot
 .\lrng.exe -watch 15m -watch-only -watch-raw E:\case42\HOST01-events.jsonl -out E:\case42\HOST01-watch.json
-lrng -watch-from HOST01-events.jsonl -out rescored.json    # offline: rescore a saved stream (any OS)
+```
+
+```sh
+sudo ./lrng -watch 15m -out /mnt/case42/web01.json      # Linux, as root
+lrng -watch-from HOST01-events.jsonl -out rescored.json  # offline: rescore a saved stream (any OS)
 ```
 
 `15m` is a good starting point: seven check-ins from a 2-minute beacon. The
@@ -1329,8 +1333,23 @@ from the schema TDH reports for each event version, not fixed offsets. ETW
 events carry no payload: watch mode records addresses, ports, sizes and names,
 never content. The session is stopped on exit, Ctrl+C and timeout, and
 sessions left by a crashed run are stopped before a new one starts (Windows
-allows 64). Linux follows in 0.23.0; on Linux, `-watch` stops with that
-message, and `-watch-from` works everywhere.
+allows 64).
+
+**Sources (Linux, root).** Three kernel interfaces, and nothing loaded into
+the kernel but a socket filter. The process connector (netlink) reports every
+exec, fork and exit. A packet socket with a classic BPF filter keeps the
+headers of outbound TCP SYNs (a connection starting) and outbound UDP
+datagrams, and the first 4 KB of DNS queries and answers; everything else
+stays in the kernel, and no payload beyond DNS is kept. sock_diag names the
+socket behind each packet's addresses, and `/proc/<pid>/fd` says which process
+holds it: processes started in the last minute and recent socket owners
+first, then a scan of every process, which runs at most every 100 ms and
+never more than about 5% of a core. Each lookup is paired with its answer. A
+lookup a local resolver (systemd-resolved, dnsmasq) forwards upstream counts
+once, for the program that asked. A lookup whose socket closed before its
+owner was found is credited to the program that next connects to one of its
+answers. A curl loop, a new process for every check-in, is attributed and
+scored as one program, which the Linux CI job checks on every run.
 
 **What a flow is.** One program (image path plus the snapshot's SHA-256, so a
 restarted program merges) talking to one destination: the registrable domain
@@ -1367,7 +1386,7 @@ sizes; `internal/watch/score_test.go` keeps it as a test):
 | Lognormal gaps (agent-like, 60 s median) | 0.42 | 5% |
 | Bursty human use | — | 1% |
 
-**HTTP/3 (QUIC).** QUIC check-ins have no connection ETW can see, so for
+**HTTP/3 (QUIC).** QUIC check-ins have no connection either source can see, so for
 UDP a burst of datagrams after two seconds of quiet is one check-in, and an
 HTTP/3 beacon is scored like an HTTPS one. UDP 443 is labeled `quic`
 (T1071.001). HTTP/3 can run on any port, so a UDP flow on another port is
@@ -1375,8 +1394,8 @@ labeled `quic` too when the program learned that port the ways HTTP/3 is
 advertised: it also spoke HTTPS (TCP 443) to the same address, where an
 `Alt-Svc` header names the port, or it looked up the host's HTTPS or SVCB
 record (RFC 9460). The record's `quic_evidence` says which. Otherwise it stays
-plain `udp` (T1071): it is still scored, but ETW shows no payload, so a QUIC
-packet can't be recognized by its header. The snapshot's
+plain `udp` (T1071): it is still scored, but neither source keeps the
+payload, so a QUIC packet isn't recognized by its header. The snapshot's
 `network.quic_outbound` (UDP 443 from a program that isn't a browser) raises
 a QUIC beacon's severity.
 
@@ -1401,20 +1420,22 @@ beacon configuration), a QUIC, DoH or direct-DNS finding on it, or with
 PID running something else doesn't lend its findings.
 
 **Expected noise.** Windows Update, Defender, telemetry, time sync, browsers
-and their updaters, OneDrive, Teams, Office and Slack check in by design. A
+and their updaters, OneDrive, Teams, Office and Slack check in by design, as
+do Linux's resolvers, time and DHCP clients, snapd, PackageKit and fwupd. A
 built-in list, each entry pinned to the folder that program installs to (a
 same-named copy elsewhere isn't excused), keeps them from becoming findings;
-`-allow-beacon name.exe,...` adds programs on any path. A snapshot that finds
+`-allow-beacon name.exe,...` adds programs on any path (on Linux, by file name: `-allow-beacon backup-agent`). A snapshot that finds
 the image unsigned or untrusted, or a memory finding on it, overrides the
 list. Excused flows are still recorded, with the reason.
 
 **Safety limits.** Each flow keeps its last 512 check-ins; at most 20,000
 flows and 2 million check-ins, lookups and process starts are held, and past
 that the least active flows are dropped and counted in the result's
-`meta.dropped`. ETW's own losses go in `meta.etw_events_lost`. Event callbacks
-only parse and append; scoring runs once the window closes. The result's meta
-records the recording's CPU time and heap, which the Windows CI job reports
-on every run.
+`meta.dropped`. ETW's own losses go in `meta.etw_events_lost`; on Linux, the
+kernel's go in `meta.packets_dropped_by_kernel` and `meta.proc_events_lost`.
+Event callbacks only parse and append; scoring runs once the window closes.
+The result's meta records the recording's CPU time and heap, which both CI
+jobs report on every run (about 0.1% of a core idle on either system).
 
 **Saved streams.** `-watch-raw` writes the normalized events as they are
 recorded, as JSON Lines (a header, one line per event, and an end line when
@@ -1435,6 +1456,19 @@ flags beside its own.
   malware that mimics agent timing either; that stays with the AI modules.
 - A reused connection (HTTP keep-alive, a websocket) is one check-in. Timing
   sends within a connection is a later version's work.
+- On Linux, a socket that closes before lrng finds its owner (within a
+  millisecond or two, quicker than a network round trip) is recorded with
+  PID 0 and reported as an unattributed process; `meta.unattributed_events`
+  and `meta.unattributed_because` count them. Unattributed traffic is still
+  scored per destination, but not checked for rotation, since it mixes
+  programs. Containers in their own network namespace are seen after NAT, so
+  their traffic is unattributed too.
+- On Linux, TCP flows have no byte counts (the filter keeps only SYNs), so
+  they score without the size part, and IPv6 packets with extension headers
+  are skipped.
+- Run Linux watch mode on the host, not in a container: the process
+  connector speaks only in the host's network namespace and reports the
+  host's PIDs.
 
 ---
 
@@ -1916,7 +1950,7 @@ lrng -navigator-from HOST01.json -expect profile.md -expect-min 60 -navigator co
 | `-navigator-min` | `notable` | lowest severity in the layer: `info`, `notable`, `suspect` or `critical` |
 | `-expect` | — | expected techniques (a Navigator layer, or a text/Markdown file of IDs): makes the layer a coverage map |
 | `-expect-min` | — | with `-expect`, exit with status 3 when under this percentage of expected techniques is detected |
-| `-watch` | — | first record processes, connections and DNS for this long (1m to 24h), then run the snapshot; scores [beaconing](#watch-mode-beaconing) (Windows, elevated) |
+| `-watch` | — | first record processes, connections and DNS for this long (1m to 24h), then run the snapshot; scores [beaconing](#watch-mode-beaconing) (Windows elevated, or Linux as root) |
 | `-watch-only` | off | with `-watch`, skip the snapshot |
 | `-watch-raw` | — | with `-watch`, also save the recorded event stream (JSON Lines), plus `<path>.sha256` |
 | `-watch-from` | — | offline: rescore a stream saved by `-watch-raw` and exit; works on any OS |

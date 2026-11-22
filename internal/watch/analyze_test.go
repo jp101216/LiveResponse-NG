@@ -435,3 +435,53 @@ func TestRegistrable(t *testing.T) {
 		t.Errorf("entropy(abcd) = %v", e)
 	}
 }
+
+// udpBeacon sends a burst of datagrams to dst every period.
+func (s *stream) udpBeacon(pid uint32, dst string, period time.Duration) {
+	remote := netip.MustParseAddrPort(dst)
+	for at := t0.Add(7 * time.Second); at.Before(t0.Add(win)); at = at.Add(period) {
+		for k := 0; k < 4; k++ {
+			s.add(Event{Time: at.Add(time.Duration(k) * 80 * time.Millisecond), Kind: UDPSend, PID: pid, Local: local, Remote: remote, Bytes: 1250})
+		}
+	}
+}
+
+// HTTP/3 off UDP 443 is named QUIC when the program learned the port the
+// ways HTTP/3 is advertised: Alt-Svc over HTTPS to the same address, or an
+// HTTPS/SVCB record. Without either it stays plain UDP.
+func TestHTTP3OffPort443(t *testing.T) {
+	s := newStream()
+	s.proc(61, `C:\Users\dev\AppData\Local\Lattice\agent.exe`)
+	s.add(Event{Time: t0.Add(2 * time.Second), Kind: TCPConnect, PID: 61, Local: local, Remote: netip.MustParseAddrPort("198.51.100.30:443")})
+	s.udpBeacon(61, "198.51.100.30:8443", time.Minute)
+
+	s.proc(62, `C:\Users\dev\AppData\Local\Other\h3.exe`)
+	s.add(Event{Time: t0.Add(time.Second), Kind: DNS, PID: 62, Query: "_4433._https.h3.example.net", QType: qtypeHTTPS})
+	s.resolve(t0.Add(2*time.Second), 62, "h3.example.net", "203.0.113.31")
+	s.udpBeacon(62, "203.0.113.31:4433", time.Minute)
+
+	s.proc(63, `C:\Users\dev\AppData\Local\Other\plain.exe`)
+	s.udpBeacon(63, "192.0.2.32:5000", time.Minute)
+
+	r := analyze(t, s.aggregate(), Options{})
+	want := map[uint32]struct{ transport, tech, evidence string }{
+		61: {"quic", "T1071.001", "Alt-Svc"},
+		62: {"quic", "T1071.001", "HTTPS/SVCB record"},
+		63: {"udp", "T1071", ""},
+	}
+	seen := 0
+	for _, rec := range r.Records {
+		w, ok := want[rec.Fields["pid"].(uint32)]
+		if !ok || len(rec.Findings) == 0 || rec.Findings[0].Rule != RuleBeacon {
+			continue
+		}
+		seen++
+		ev := fmt.Sprint(rec.Fields["quic_evidence"])
+		if rec.Fields["transport"] != w.transport || rec.Findings[0].Technique != w.tech || (w.evidence != "" && !strings.Contains(ev, w.evidence)) || (w.evidence == "" && rec.Fields["quic_evidence"] != nil) {
+			t.Errorf("pid %v: transport %v, technique %s, evidence %v; want %+v", rec.Fields["pid"], rec.Fields["transport"], rec.Findings[0].Technique, ev, w)
+		}
+	}
+	if seen != 3 {
+		t.Fatalf("beacon records = %d, want 3: %v", seen, r.Records)
+	}
+}

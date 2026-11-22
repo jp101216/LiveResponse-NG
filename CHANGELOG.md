@@ -26,6 +26,11 @@ report schema remains 1.2 (a new `watch` result).
   same run: an unsigned or unusual-path image, a memory finding on the
   process, a QUIC, DoH or direct-DNS finding, or a hosting, Tor or anonymizer
   destination with `-intel`.
+- **HTTP/3 (QUIC).** UDP check-ins are datagram bursts after two seconds of
+  quiet, so an HTTP/3 beacon scores like an HTTPS one. UDP 443 is labeled
+  `quic`; so is UDP on another port when the program also spoke HTTPS to that
+  address (Alt-Svc) or looked up the host's HTTPS/SVCB record, with the
+  reason in `quic_evidence`. The Windows CI job runs a UDP 443 beacon too.
 - **Expected noise.** Windows services, Defender, browsers and their
   updaters, OneDrive, Teams, Office and Slack are excused when they run from
   the folder they install to and the snapshot doesn't find them unsigned;

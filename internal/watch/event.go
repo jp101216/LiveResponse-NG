@@ -65,8 +65,11 @@ type Event struct {
 	Answers []string `json:"a,omitempty"`
 }
 
-// DNS query types the tunnel heuristic cares about.
+// DNS query types: the tunnel heuristic's, and the records that advertise
+// HTTP/3 (RFC 9460).
 const (
-	qtypeTXT  = 16
-	qtypeNULL = 10
+	qtypeTXT   = 16
+	qtypeNULL  = 10
+	qtypeSVCB  = 64
+	qtypeHTTPS = 65
 )

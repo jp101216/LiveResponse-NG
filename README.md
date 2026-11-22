@@ -1362,6 +1362,19 @@ sizes; `internal/watch/score_test.go` keeps it as a test):
 | Lognormal gaps (agent-like, 60 s median) | 0.42 | 5% |
 | Bursty human use | — | 1% |
 
+**HTTP/3 (QUIC).** QUIC check-ins have no connection ETW can see, so for
+UDP a burst of datagrams after two seconds of quiet is one check-in, and an
+HTTP/3 beacon is scored like an HTTPS one. UDP 443 is labeled `quic`
+(T1071.001). HTTP/3 can run on any port, so a UDP flow on another port is
+labeled `quic` too when the program learned that port the ways HTTP/3 is
+advertised: it also spoke HTTPS (TCP 443) to the same address, where an
+`Alt-Svc` header names the port, or it looked up the host's HTTPS or SVCB
+record (RFC 9460). The record's `quic_evidence` says which. Otherwise it stays
+plain `udp` (T1071): it is still scored, but ETW shows no payload, so a QUIC
+packet can't be recognized by its header. The snapshot's
+`network.quic_outbound` (UDP 443 from a program that isn't a browser) raises
+a QUIC beacon's severity.
+
 Each scored flow is a record of the `watch` result with its score and parts,
 check-ins, interval statistics, destination, addresses and byte counts, so a
 finding's score can be checked by hand.

@@ -199,6 +199,7 @@ type flowAgg struct {
 	addrs      map[netip.Addr]int
 	ports      map[uint16]int
 	transports map[string]bool
+	quicWhy    map[string]bool // why a UDP flow off port 443 reads as HTTP/3
 	tech       string
 	times      []time.Time
 	sizes      []uint64
@@ -227,6 +228,21 @@ func transportOf(p proto, port uint16) (string, string) {
 // check-ins. It returns the identity|domain pairs that produced a beacon
 // finding, so the DNS pass doesn't report the same check-ins twice.
 func (an *analysis) flows() map[string]bool {
+	// HTTP/3 needn't use UDP 443: a server advertises its port in an Alt-Svc
+	// header over HTTPS, or in an HTTPS/SVCB record (RFC 9460). Either one
+	// before a program's UDP flow to that address marks the flow as QUIC.
+	httpsTo := map[string]map[netip.Addr]bool{}
+	for _, f := range an.a.flows {
+		if f.key.proto == protoTCP && f.key.remote.Port() == 443 {
+			id := an.identityOf(f.key.pid, f.first, f.image)
+			if httpsTo[id.key] == nil {
+				httpsTo[id.key] = map[netip.Addr]bool{}
+			}
+			httpsTo[id.key][f.key.remote.Addr().Unmap()] = true
+		}
+	}
+	svcb := an.svcbLookups()
+
 	byKey := map[string]*flowAgg{}
 	var order []string
 	for _, f := range an.a.flows {
@@ -241,7 +257,7 @@ func (an *analysis) flows() map[string]bool {
 		fa := byKey[k]
 		if fa == nil {
 			fa = &flowAgg{id: id, dest: dest, hosts: map[string]bool{}, addrs: map[netip.Addr]int{},
-				ports: map[uint16]int{}, transports: map[string]bool{}}
+				ports: map[uint16]int{}, transports: map[string]bool{}, quicWhy: map[string]bool{}}
 			byKey[k] = fa
 			order = append(order, k)
 		}
@@ -252,6 +268,19 @@ func (an *analysis) flows() map[string]bool {
 		fa.addrs[ip] += len(ts)
 		fa.ports[f.key.remote.Port()] += len(ts)
 		tr, tech := transportOf(f.key.proto, f.key.remote.Port())
+		if tr == "udp" {
+			why := ""
+			switch {
+			case httpsTo[id.key][ip]:
+				why = "the program also spoke HTTPS (TCP 443) to this address, which is how a server advertises HTTP/3 on another port (Alt-Svc)"
+			case host != "" && svcb[id.key][host]:
+				why = "the program looked up " + host + "'s HTTPS/SVCB record, which advertises HTTP/3"
+			}
+			if why != "" {
+				tr, tech = "quic", "T1071.001"
+				fa.quicWhy[why] = true
+			}
+		}
 		fa.transports[tr] = true
 		if fa.tech == "" || fa.tech == "T1071" {
 			fa.tech = tech
@@ -391,6 +420,9 @@ func (an *analysis) flowFields(fa *flowAgg, s Score, sizes []uint64) map[string]
 		f["remote_hosts"] = sortedKeys(fa.hosts)
 	}
 	f["transport"] = strings.Join(sortedKeys(fa.transports), ",")
+	if len(fa.quicWhy) > 0 {
+		f["quic_evidence"] = sortedKeys(fa.quicWhy)
+	}
 	f["first_seen"] = fa.first
 	f["last_seen"] = fa.last
 	f["bytes_total"] = fa.bytes
@@ -436,6 +468,29 @@ func (an *analysis) beaconDetail(fa *flowAgg, s Score, reasons []string) string 
 	}
 	return fmt.Sprintf("%s checked in with %s %d times over %s, every %s ±%.0f%% (score %.2f: %s)%s",
 		fa.id.label(), where, s.N, fmtDur(an.window), fmtSecs(s.Median), 100*s.Jitter(), s.Total, parts, reasonText(reasons))
+}
+
+// svcbLookups are the names each program looked up an HTTPS or SVCB record
+// for. A record for a port other than 443 is asked for as _port._https.name.
+func (an *analysis) svcbLookups() map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, q := range an.a.queries {
+		if q.qtype != qtypeHTTPS && q.qtype != qtypeSVCB {
+			continue
+		}
+		name := q.name
+		if strings.HasPrefix(name, "_") {
+			if i := strings.Index(name, "._https."); i > 0 {
+				name = name[i+len("._https."):]
+			}
+		}
+		id := an.identityOf(q.pid, q.t, "")
+		if out[id.key] == nil {
+			out[id.key] = map[string]bool{}
+		}
+		out[id.key][name] = true
+	}
+	return out
 }
 
 // dns scores periodic lookups and tunnel-like bursts of unique names.

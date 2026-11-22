@@ -25,7 +25,8 @@ the snapshot.
 | Agent or team-server binary, running or dropped | New | `malware.lattice_agent` (implants collector, Windows and Linux: running images outside system folders, deleted ones through `/proc/<pid>/exe`, executables in Temp, `/tmp`, `/var/tmp`, `/dev/shm`) |
 | HTTP check-in from an unusual folder | Covered | `network.unusual_path_outbound` |
 | Sleep and jitter between check-ins | New *watch* | `network.beacon`: a flow whose check-ins are too regular to be a person, *critical* with a second signal such as an unusual folder or `memory.stack_unbacked` on the same process |
-| Transport and host rotation (HTTP, DNS, QUIC) | New *watch* | `network.beacon_rotating`: a process's check-ins regular across destinations or transports combined; `network.beacon` with transport `quic` for UDP 443 |
+| Transport and host rotation (HTTP, DNS, QUIC) | New *watch* | `network.beacon_rotating`: a process's check-ins regular across destinations or transports combined |
+| HTTP/3 over QUIC | New *watch* / Covered | `network.beacon` with transport `quic`: UDP 443, or another port the agent learned through Alt-Svc over HTTPS or an HTTPS/SVCB record; a fixed non-443 port with neither is still scored, as plain `udp`. In the snapshot, `network.quic_outbound` (UDP 443 from a program that isn't a browser) |
 | DNS transport | New *watch* / Covered | `dns.tunnel_rate` (unique high-entropy names or TXT/NULL queries at rate), `dns.periodic_query`; in the snapshot, `network.dns_tunnel` |
 | `sh -c` host fingerprint (`whoami 2>/dev/null \|\| id -un`), `net-enum`, default `shell` | New | `exec.c2_shell_recon` (Linux form: silent-fallback chains, or three or more discovery commands in one shell) |
 

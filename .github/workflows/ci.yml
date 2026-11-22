@@ -303,8 +303,10 @@ jobs:
         run: |
           # A PowerShell loop connects to a listener on this runner's own LAN address
           # every 10 seconds while lrng watches for 2 minutes: about 12 check-ins, which
-          # must score as network.beacon from powershell.exe to that address. The saved
-          # stream must rescore to the same finding offline, and the session must be gone.
+          # must score as network.beacon from powershell.exe to that address. A second
+          # loop sends a burst of UDP datagrams to port 443 every 10 seconds, the way an
+          # HTTP/3 (QUIC) beacon checks in: it must score as a QUIC beacon. The saved
+          # stream must rescore to the same findings offline, and the session must be gone.
           trap { Write-Output ("::error::" + ("$_" -replace '%','%25' -replace "`r",'%0D' -replace "`n",'%0A')); exit 1 }
           $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress
           $port = 47123
@@ -312,10 +314,12 @@ jobs:
             "`$l = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Any, $port); `$l.Start(); while (`$true) { `$c = `$l.AcceptTcpClient(); `$c.Close() }"
           $beacon = Start-Process -PassThru -WindowStyle Hidden powershell.exe -ArgumentList '-NoProfile','-Command',
             "Start-Sleep 3; while (`$true) { try { `$c = [Net.Sockets.TcpClient]::new(); `$c.Connect('$ip', $port); `$c.Close() } catch {}; Start-Sleep 10 }"
+          $quic = Start-Process -PassThru -WindowStyle Hidden powershell.exe -ArgumentList '-NoProfile','-Command',
+            "Start-Sleep 5; `$u = [Net.Sockets.UdpClient]::new(); `$b = [byte[]]::new(1200); while (`$true) { 1..4 | ForEach-Object { [void]`$u.Send(`$b, `$b.Length, '$ip', 443); Start-Sleep -Milliseconds 50 }; Start-Sleep 10 }"
           try {
             ./lrng.exe -watch 2m -watch-only -watch-raw beacon.jsonl -out watch.json -quiet
           } finally {
-            Stop-Process -Id $beacon.Id, $listener.Id -ErrorAction SilentlyContinue
+            Stop-Process -Id $beacon.Id, $listener.Id, $quic.Id -ErrorAction SilentlyContinue
           }
           $r = Get-Content watch.json | ConvertFrom-Json
           $w = $r.results | Where-Object { $_.collector -eq 'watch' }
@@ -327,9 +331,14 @@ jobs:
           $hit | ForEach-Object { Write-Output ("::notice::" + ($_.findings | Where-Object rule -eq 'network.beacon').detail) }
           if ($hit.Count -ne 1) { throw "no network.beacon for the scripted beacon to ${ip}:$port" }
           if ($hit[0].fields.image_path -notlike '*\powershell.exe') { throw ("beacon attributed to " + $hit[0].fields.image_path) }
+          $qhit = @($w.records | Where-Object { $_.findings.rule -contains 'network.beacon' -and $_.fields.remote_addr -eq $ip -and $_.fields.remote_port -eq 443 -and $_.fields.transport -eq 'quic' })
+          $qhit | ForEach-Object { Write-Output ("::notice::" + ($_.findings | Where-Object rule -eq 'network.beacon').detail) }
+          if ($qhit.Count -ne 1) { throw "no QUIC network.beacon for the UDP 443 loop to $ip" }
+          if (($qhit[0].findings | Where-Object rule -eq 'network.beacon').technique -ne 'T1071.001') { throw "the QUIC beacon isn't mapped to T1071.001" }
           ./lrng.exe -watch-from beacon.jsonl -out replay.json -quiet
           $rr = (Get-Content replay.json | ConvertFrom-Json).results | Where-Object { $_.collector -eq 'watch' }
           if (-not @($rr.records | Where-Object { $_.findings.rule -contains 'network.beacon' -and $_.fields.remote_port -eq $port }).Count) { throw "the saved stream didn't rescore to the beacon" }
+          if (-not @($rr.records | Where-Object { $_.findings.rule -contains 'network.beacon' -and $_.fields.transport -eq 'quic' }).Count) { throw "the saved stream didn't rescore to the QUIC beacon" }
           if (logman query -ets | Select-String 'lrng-watch-') { throw "an lrng-watch ETW session outlived the run" }
 
   linux-release:

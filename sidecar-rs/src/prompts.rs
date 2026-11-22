@@ -72,7 +72,7 @@ const DEFS: &[Def] = &[
     Def {
         rule: "prompt.injection",
         severity: "critical",
-        technique: "T1059", // Command and Scripting Interpreter (payload steering)
+        technique: "T1698", // Indirect Prompt Injection: instructions planted for an AI to read
         weight: 40,
         secret: None,
         pattern: r"(?i-u)(?:ignore|disregard)\s+(?:all\s+)?(?:your\s+|the\s+)?(?:previous|prior|above)\s+(?:instructions|prompts|context)",

@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+Watch mode on Windows: `-watch` records processes, connections and DNS for a
+window before the snapshot and scores it for beaconing. No new dependencies;
+report schema remains 1.2 (a new `watch` result).
+
+### Added
+
+- **`-watch <duration>`** (1 minute to 24 hours, Windows, elevated). A
+  real-time ETW session (Kernel-Process, Kernel-Network, DNS-Client) records
+  which program connects where and when, its lookups and the processes that
+  start, then the normal snapshot runs and the window is scored against it.
+  Event fields are decoded from TDH's schema for each event version. ETW
+  carries no payload: only addresses, ports, sizes and names are kept. The
+  session is stopped on exit, Ctrl+C and timeout, and sessions left by a
+  crashed run are stopped first. `-watch-only` skips the snapshot.
+- **Beacon scoring.** Each program-to-destination flow is scored on how
+  regular its check-ins are: skew, dispersion, coverage and size, a formula
+  documented in the README and checked by simulation in the tests.
+  `network.beacon` (T1071.001 web and QUIC, T1071.004 DNS),
+  `network.beacon_rotating` (T1008, check-ins spread over destinations or
+  transports), `dns.periodic_query`, `dns.tunnel_rate` (T1071.004) and
+  `process.periodic_spawn` (T1053). Severity rises with corroboration from the
+  same run: an unsigned or unusual-path image, a memory finding on the
+  process, a QUIC, DoH or direct-DNS finding, or a hosting, Tor or anonymizer
+  destination with `-intel`.
+- **HTTP/3 (QUIC).** UDP check-ins are datagram bursts after two seconds of
+  quiet, so an HTTP/3 beacon scores like an HTTPS one. UDP 443 is labeled
+  `quic`; so is UDP on another port when the program also spoke HTTPS to that
+  address (Alt-Svc) or looked up the host's HTTPS/SVCB record, with the
+  reason in `quic_evidence`. The Windows CI job runs a UDP 443 beacon too.
+- **Expected noise.** Windows services, Defender, browsers and their
+  updaters, OneDrive, Teams, Office and Slack are excused when they run from
+  the folder they install to and the snapshot doesn't find them unsigned;
+  `-allow-beacon` adds programs. Excused flows are still recorded.
+- **`-watch-raw <path>`** saves the recorded event stream as JSON Lines with a
+  `.sha256`; **`-watch-from <path>`** rescores one offline on any OS.
+  `-watch-min-events` sets the check-ins a flow needs (default 6).
+- **Bounded recording.** 512 check-ins per flow, 20,000 flows and 2 million
+  held events at most, with what was dropped counted in the result; the
+  recording's CPU time and heap are recorded too.
+
+### Changed
+
+- **ATT&CK v20's prompt-injection technique.** `prompt.injection` (the
+  sidecar's file and memory scan) moves from T1059 to T1698, Indirect Prompt
+  Injection, and so do `ai.hidden_instructions`' critical cases (instructions
+  smuggled to an agent in Unicode tag characters or variation selectors);
+  its bidirectional and zero-width cases stay T1027. No rule maps to T1699
+  (direct injection, typed into a model's interface) or T1700 (AI-enabled
+  exfiltration) yet.
+
+### Notes
+
+- Linux watch mode follows in 0.23.0; on Linux `-watch` says so and exits.
+- A Windows CI job runs a scripted 10-second beacon to the runner's own
+  address for 2 minutes and expects `network.beacon`, then rescores the saved
+  stream offline and checks the ETW session is gone.
+
 ## 0.21.0
 
 ATT&CK Navigator export: a layer of the run's findings, written beside the

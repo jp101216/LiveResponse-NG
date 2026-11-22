@@ -69,12 +69,19 @@ func main() {
 		compareCase = flag.Bool("compare", false, "compare two -case-report inputs in before/after order; requires -same-host")
 		sameHost    = flag.Bool("same-host", false, "attest that the two comparison reports describe the same machine (a hostname alone is insufficient)")
 		nav         navOptions
+		wo          watchOptions
 	)
 	flag.StringVar(&nav.Out, "navigator", "", "also write an ATT&CK Navigator layer of the findings to this path, plus <path>.sha256")
 	flag.StringVar(&nav.From, "navigator-from", "", "offline: build a Navigator layer from a saved JSON report and exit (to -navigator, or stdout); works on any OS")
 	flag.StringVar(&nav.Min, "navigator-min", "", "lowest severity in the Navigator layer: info, notable, suspect or critical (default notable)")
 	flag.StringVar(&nav.Expect, "expect", "", "expected techniques (a Navigator layer, or any text/Markdown file of T#### IDs): makes the layer a coverage map")
 	flag.Float64Var(&nav.ExpectMin, "expect-min", 0, "with -expect, exit with status 3 when under this percentage of expected techniques is detected")
+	flag.DurationVar(&wo.Duration, "watch", 0, "first record processes, connections and DNS for this long (1m to 24h, e.g. 15m), then run the snapshot; scores beaconing (Windows, elevated)")
+	flag.BoolVar(&wo.Only, "watch-only", false, "with -watch, skip the snapshot and report only the watch result")
+	flag.StringVar(&wo.Raw, "watch-raw", "", "with -watch, also save the recorded event stream (JSON Lines) to this path, plus <path>.sha256")
+	flag.StringVar(&wo.From, "watch-from", "", "offline: rescore a stream saved by -watch-raw and exit; works on any OS")
+	flag.IntVar(&wo.MinEvents, "watch-min-events", 6, "check-ins a flow needs before it is scored (4 to 512)")
+	flag.StringVar(&wo.AllowBeacon, "allow-beacon", "", "comma-separated extra program names whose periodic traffic is expected")
 	var caseReports []string
 	flag.Func("case-report", "import an existing LRNG JSON report into an offline case; repeat for each report (max 16)", func(path string) error {
 		if path == "" {
@@ -126,6 +133,8 @@ func main() {
 	}
 	usageErrorOn(validateNavigatorOptions(nav, explicit))
 	usageErrorOn(checkLayerPath(nav.Out, cfg.Output))
+	usageErrorOn(validateWatchOptions(wo, explicit))
+	usageErrorOn(checkDistinctOutputs([][2]string{{"out", cfg.Output}, {"navigator", nav.Out}, {"watch-raw", wo.Raw}, {"watch-from", wo.From}}))
 
 	if *evtxOffline != "" && (cfg.Adaptive || cfg.TraceOnly || cfg.CloudOnly) {
 		usageErrorOn(errors.New("-evtx cannot be combined with -adaptive, -trace-only or -cloud-only"))
@@ -175,6 +184,15 @@ func main() {
 			Warn: func(message string) { fmt.Fprintln(os.Stderr, output.TerminalSafe(message)) },
 		}))
 		return
+	case wo.From != "":
+		rep, err := doWatchFrom(ctx, cfg, wo)
+		exitOn(err)
+		below, err := navigatorAfterRun(rep, nav, cfg)
+		exitOn(err)
+		if failOnMet(rep.Summary, cfg.FailOn) || below {
+			os.Exit(exitFindings)
+		}
+		return
 	case nav.From != "":
 		below, err := doNavigatorFrom(nav, cfg)
 		exitOn(err)
@@ -215,7 +233,12 @@ func main() {
 		return
 	}
 
-	rep, err := doRun(ctx, cfg)
+	var watched *watchRun
+	if wo.enabled() {
+		watched, err = recordWatch(ctx, cfg, wo)
+		exitOn(err)
+	}
+	rep, err := doRunCore(ctx, cfg, nil, watched)
 	exitOn(err)
 	below, err := navigatorAfterRun(rep, nav, cfg)
 	exitOn(err)
@@ -321,6 +344,10 @@ Usage: lrng [flags]
   lrng -navigator-from host.json -navigator layer.json   offline: a layer from a saved report (any OS)
   lrng -navigator-from host.json -expect profile.md -expect-min 60 -navigator coverage.json
                                        coverage of an emulation plan: detected, partial, missed, extra
+  lrng -watch 15m -out host.json       record 15 minutes first, scoring beacons, then the snapshot (Windows)
+  lrng -watch 15m -watch-only -watch-raw events.jsonl -out watch.json
+                                       just the watch window, keeping the event stream
+  lrng -watch-from events.jsonl -out rescored.json   offline: rescore a saved stream (any OS)
   lrng -list                           collectors available on this OS
 
 Exit status: 0 done, 1 error, 2 bad usage, 3 -fail-on or -expect-min threshold met.
@@ -409,7 +436,19 @@ func doRun(ctx context.Context, cfg config.Config) (output.Report, error) {
 }
 
 func doRunWithProgress(ctx context.Context, cfg config.Config, progress func(collector.Result)) (output.Report, error) {
+	return doRunCore(ctx, cfg, progress, nil)
+}
+
+// doRunCore runs the snapshot, scoring a recorded watch window against it
+// when there is one. A -watch-only run, or a watch window cut short by
+// Ctrl+C, skips the snapshot.
+func doRunCore(ctx context.Context, cfg config.Config, progress func(collector.Result), watched *watchRun) (output.Report, error) {
 	started := time.Now().UTC()
+	snapshot := true
+	if watched != nil {
+		started = watched.rec.Agg.Started()
+		snapshot = !watched.only && ctx.Err() == nil
+	}
 	cfg.Graph = cfg.Graph || cfg.AgentTrace != "" || cfg.Adaptive || cfg.CloudAudit != ""
 	traceFiles, err := expandAgentTracePaths(cfg.AgentTrace)
 	if err != nil {
@@ -419,9 +458,12 @@ func doRunWithProgress(ctx context.Context, cfg config.Config, progress func(col
 	if err != nil {
 		return output.Report{}, err
 	}
-	selected, err := selectCollectors(cfg)
-	if err != nil {
-		return output.Report{}, err
+	var selected []collector.Collector
+	if snapshot {
+		selected, err = selectCollectors(cfg)
+		if err != nil {
+			return output.Report{}, err
+		}
 	}
 	names := make([]string, len(selected))
 	dnsCache := false
@@ -504,8 +546,11 @@ func doRunWithProgress(ctx context.Context, cfg config.Config, progress func(col
 		Sigma:           sigmaRS,
 	})
 
-	d := &collector.Dispatcher{Workers: cfg.Workers, Timeout: cfg.Timeout, OnResult: progress}
-	results := d.Run(ctx, selected)
+	var results []collector.Result
+	if len(selected) > 0 {
+		d := &collector.Dispatcher{Workers: cfg.Workers, Timeout: cfg.Timeout, OnResult: progress}
+		results = d.Run(ctx, selected)
+	}
 	if len(traceFiles) > 0 {
 		results = append(results, collector.ParseAgentTraceFiles(ctx, traceFiles))
 		run.Collectors = append(run.Collectors, "agenttrace")
@@ -515,6 +560,10 @@ func doRunWithProgress(ctx context.Context, cfg config.Config, progress func(col
 		run.Collectors = append(run.Collectors, "cloudaudit")
 	}
 	collector.Correlate(results) // cross-reference the event log against the live state
+	if watched != nil {
+		results = append(results, analyzeWatch(watched, results, intelDB))
+		run.Collectors = append(run.Collectors, "watch")
+	}
 	if cfg.Adaptive {
 		results = append(results, collector.RunAdaptive(ctx, results, collector.AdaptiveOptions{
 			MaxFiles: cfg.AdaptiveMaxFiles, Budget: cfg.AdaptiveBudget, NoHash: cfg.NoHash, NoSign: cfg.NoSign,
@@ -541,12 +590,16 @@ func doRunWithProgress(ctx context.Context, cfg config.Config, progress func(col
 	}
 	run.FinishedAt = time.Now().UTC()
 	hi := hostinfo.Gather()
+	runID := output.NewRunID()
+	if watched != nil {
+		runID = watched.runID // the same ID as the -watch-raw stream's header
+	}
 	rep := output.Report{
 		Schema:    output.SchemaVersion,
 		Tool:      "liveresponse-ng",
 		Version:   version,
 		Commit:    commit,
-		RunID:     output.NewRunID(),
+		RunID:     runID,
 		Host:      host,
 		OS:        runtime.GOOS,
 		Arch:      runtime.GOARCH,

@@ -1138,7 +1138,7 @@ func hiddenTextFindings(path, text string) []Finding {
 	h := findHiddenText(text)
 	var out []Finding
 	if h.TagCount > 0 {
-		out = append(out, Finding{Rule: "ai.hidden_instructions", Severity: SevCritical, Technique: "T1027", Confidence: 85,
+		out = append(out, Finding{Rule: "ai.hidden_instructions", Severity: SevCritical, Technique: "T1698", Confidence: 85,
 			Detail: fmt.Sprintf("%s holds %d invisible Unicode tag characters, which spell out: %q. An AI agent reads them; a person "+
 				"reviewing the file sees nothing (ASCII smuggling, a prompt injection hidden in plain sight)",
 				path, h.TagCount, excerpt(string(h.Tags), 300))})
@@ -1150,7 +1150,7 @@ func hiddenTextFindings(path, text string) []Finding {
 			}
 			return '.'
 		}, string(h.Carried))
-		out = append(out, Finding{Rule: "ai.hidden_instructions", Severity: SevCritical, Technique: "T1027", Confidence: 80,
+		out = append(out, Finding{Rule: "ai.hidden_instructions", Severity: SevCritical, Technique: "T1698", Confidence: 80,
 			Detail: fmt.Sprintf("%s hides %d bytes in runs of invisible variation selectors (one byte per selector): %q",
 				path, len(h.Carried), excerpt(shown, 300))})
 	}

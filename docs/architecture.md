@@ -30,6 +30,9 @@ internal/
                        with revocations followed to the current ID
   navigator/           ATT&CK Navigator layers from a report: findings,
                        and coverage against an expected set
+  watch/               Watch mode: the ETW source (Windows), normalized
+                       events and their JSONL stream, the bounded
+                       aggregator, and the beacon, DNS and spawn scorers
   pehash/              Authenticode digest of a PE file (streamed,
                        bounds-checked)
   winreg/              Read-only registry reader (advapi32), value decoding,
@@ -748,6 +751,42 @@ layer. The rate is detected over in-scope expected; partial is not counted.
 the sidecar's Rust sources for technique IDs and fails on any the bundled
 table marks revoked, deprecated or unknown, so a refresh that retires an ID
 has to remap the rules in the same change.
+
+## Watch mode
+
+`internal/watch` has one platform-specific stage. On Windows,
+`source_windows.go` starts a real-time ETW session through `advapi32`
+(`StartTraceW`, `EnableTraceEx2`, `OpenTraceW`, `ProcessTrace`, one
+`syscall.NewCallback`), with struct layouts written out per pointer size so
+32-bit builds work. The callback recognizes the provider and event ID, fetches
+that event version's schema from `TdhGetEventInformation` once, and decodes the
+payload with a portable schema walker (`tdh.go`: strings, counted and
+parameter-length fields, arrays and structs, refusing anything it can't size)
+into a normalized `Event`. New processes' command lines are read by a worker,
+not the callback. Processes already running are seeded at the start so their
+connections are named.
+
+From `Event` on, everything is portable. The `Aggregator` folds events into
+bounded state: per process, address and protocol, a ring of check-in times and
+the bytes sent and received on each (TCP sends and receives are matched to
+their connection by 4-tuple; UDP check-ins start after two seconds of quiet),
+plus DNS lookups (their answers name addresses) and process starts. Caps are
+enforced as events arrive and every drop is counted. A `-watch-raw` stream is
+the same events, written by its own goroutine so the source never blocks, and
+`-watch-from` replays one through the same aggregator, so the Windows source is
+the only code the Linux CI can't run.
+
+`Analyze` runs after the window closes, with the snapshot's results. It groups
+flows by program (image path and the snapshot's SHA-256) and destination
+(registrable domain when a lookup answered for the address), coalesces starts
+under a second apart, and scores each with `ScoreSeries`. Then it scores each
+program's combined check-ins (rotation), DNS lookups per domain (periodic, and
+the tunnel heuristic), and process starts per command line. Corroboration comes
+from the snapshot: the processes collector's signature state and path, memory
+and transport findings on the same PID (only when the snapshot's image for that
+PID matches), and the intel dataset. The result is an ordinary `watch` result,
+so IOCs, intel, the evidence graph, the viewer, cases and the Navigator export
+need nothing special for it.
 
 ## Go <-> Rust sidecar contract
 

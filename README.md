@@ -633,7 +633,7 @@ against both malicious and ordinary examples.
 | **Active Directory** (a domain controller's and a CA's logs) | `cred.dcsync` (*critical*: DS-Replication-Get-Changes-All used by an account that isn't a DC or Azure AD Connect, T1003.006), `cred.dcsync_machine_account` (a computer account that used Get-Changes-All and never showed up in the logs as a DC — learnt from which computers wrote KDC and directory events: *notable* from one DC's logs, *suspect* when the logs came from several DCs and it is none of them), `cred.kerberoasting` (RC4 service tickets to 4 or more user-account services within 15 minutes, *critical* from 10; where RC4 is off, AES tickets to 12 or more at *notable*, *suspect* from 25, T1558.003), `cred.asrep_roasting` (a TGT issued without pre-authentication; *suspect* when RC4, T1558.004), `cred.dpapi_backup_key` (*critical*: the domain's DPAPI backup key read, T1003.004), `cred.shadow_credentials` (a key credential added to an account, T1556), `privesc.rbcd_configured`, `privesc.constrained_delegation_configured` (T1098), `cred.spn_added_to_user` (*notable*: targeted Kerberoasting), `defense.dcshadow` (a DC's SPNs on a computer outside the Domain Controllers OU, T1207), `persistence.dcsync_rights_granted` (*critical*: replication rights granted on the domain to a non-default trustee), `persistence.adminsdholder_modified`, `persistence.domain_acl_changed` (the domain opened with WRITE_DAC), `persistence.sid_history_added` (*critical* for a privileged SID, T1134.005), `persistence.dsrm_password_set`, `cred.computer_certificate_logon` (PKINIT as a computer: PetitPotam + ESC8, T1649), `privesc.certificate_sid_mismatch` (the KDC refused a certificate whose SID isn't the account's), `privesc.adcs_alternate_identity` (a requester-supplied SAN naming another user: ESC1/ESC6, Certipy `req -upn`), `privesc.adcs_application_policies` (ESC15, CVE-2024-49019), `privesc.adcs_vulnerable_template` (an ESC1-shaped template; changed into that shape, ESC4), `privesc.reflection_dns_record` (*critical*: a DNS record named with a marshalled target-info blob, CVE-2025-33073, T1187) |
 | **Kerberos tickets** (`kerberos`) | `cred.golden_ticket` (*critical*: a TGT valid for more than a week; *suspect* over a day, T1558.001), `cred.rc4_tgt` (overpass-the-hash or a forged ticket; *suspect* when other tickets are AES, T1550.002), `cred.pass_the_ticket` (another account's TGT in a session, T1550.003), `cred.kerberos_ticket_anomaly` (*notable*: times that run backwards) |
 | **Known implants** (`implants`) | `malware.nik_c2` (*critical*: a program holding NIK C2's own strings — the AI-enabled Go RAT Cisco Talos described in October 2026 — running from outside the Windows and Program Files folders or sitting where it copies itself; the finding says it is marked critical and not to kill it, T1071.001), `malware.nik_c2_artifact` (*critical*: its bootkit placeholder, or its lock screen's page and batch file, in a temporary folder; *suspect* for other pairs of its staged files, or a copy of the master boot record), `malware.lattice_agent` (*critical*: a program holding Project Lattice's own strings, its agent or team server, Windows or Linux, running or dropped, T1071.001) |
-| **AI agents** (`aiagents`) | `ai.mcp_server_unusual_path` (an MCP server started from a temporary or download folder), `ai.mcp_server_remote_code` (*notable*: fetched from a URL or git at each start, T1195.002), `ai.mcp_server_url` (a bare public IP; plain HTTP at *notable*), `ai.mcp_server_env_injection` (an env block that preloads a library, runs a startup script or hook, or loads a module or agent: *notable*, *suspect* for a preload library or anything loaded from a temporary folder, T1574), `ai.agent_hook_unusual_path` (a Claude Code hook running code from a temporary folder), `ai.hidden_instructions` (*critical*: Unicode tag characters or variation-selector smuggling in an instruction or configuration file, decoded; bidirectional controls and zero-width characters at *suspect*, T1027) — plus the command-line rules on every MCP command and hook |
+| **AI agents** (`aiagents`) | `ai.mcp_server_unusual_path` (an MCP server started from a temporary or download folder), `ai.mcp_server_remote_code` (*notable*: fetched from a URL or git at each start, T1195.002), `ai.mcp_server_url` (a bare public IP; plain HTTP at *notable*), `ai.mcp_server_env_injection` (an env block that preloads a library, runs a startup script or hook, or loads a module or agent: *notable*, *suspect* for a preload library or anything loaded from a temporary folder, T1574), `ai.agent_hook_unusual_path` (a Claude Code hook running code from a temporary folder), `ai.hidden_instructions` (*critical*: Unicode tag characters or variation-selector smuggling in an instruction or configuration file, decoded, T1698 Indirect Prompt Injection; bidirectional controls and zero-width characters at *suspect*, T1027) — plus the command-line rules on every MCP command and hook |
 | **Logon sessions** (event log) | `logon.remote_interactive` (4624 type 10 / RDP — suspect from a public source address, T1021.001), `logon.network_external` (4624 type 3 from an external address, T1021), `logon.failed_external` (4625 from an external address, T1110) |
 | **Correlation** (event log × live state) | `correlate.service_installed_absent` (a 7045 service install with no matching live service — installed then removed, T1070.009), `correlate.task_registered_absent` (a 4698/106 task registration with no matching live task — deleted or hidden, T1070.009); and the `defense.clear_event_logs` finding is annotated with the surviving record-id/time range left by the clear. Independent of the event log: `correlate.task_comhandler_hijacked` (a scheduled task whose `IComHandlerAction` CLSID matches a COM registration `comhijack` flagged — schedule meets hijacked object, T1546.015) |
 | **Sigma** (`-sigma`) | `sigma.<rule>` for each matching Sigma rule, carrying the rule's level (→ severity) and first `attack.t*` tag (→ technique) — the analyst's own detections, run beside the built-in ones |
@@ -716,7 +716,9 @@ Groq, xAI, OpenRouter and other OpenAI-compatible hex keys).
   `truncated` beyond that.
 
 Each hit carries an offset, encoding, sanitized context, severity, ATT&CK
-technique where one fits, and confidence. A run returns an aggregate score
+technique where one fits (`prompt.injection` is T1698, Indirect Prompt
+Injection: instructions planted for an AI to read, including ones aimed at
+AI-based defenses), and confidence. A run returns an aggregate score
 (each rule counted once) and a verdict. Rule ids: `prompt.injection`,
 `prompt.system_role`, `prompt.ai_disclaimer`, `api.chat_schema`,
 `api.messages_array`, `api.sampling_params`, `api.endpoint`,
@@ -1295,6 +1297,144 @@ reproduced and distributed with its permission (see
 
 ---
 
+## Watch mode (beaconing)
+
+A snapshot shows what is connected at one instant; a beacon that sleeps
+between check-ins is usually not. `-watch <duration>` first records the host
+for that long — which process connects where and when, its DNS lookups, the
+processes that start — then runs the normal snapshot, and scores the window
+for check-ins too regular to be a person. Whatever watch mode flags is
+enriched by the same run's hashes, signatures, memory scan and intel.
+
+```powershell
+.\lrng.exe -watch 15m -out E:\case42\HOST01.json        # watch, then the snapshot
+.\lrng.exe -watch 15m -watch-only -watch-raw E:\case42\HOST01-events.jsonl -out E:\case42\HOST01-watch.json
+lrng -watch-from HOST01-events.jsonl -out rescored.json    # offline: rescore a saved stream (any OS)
+```
+
+`15m` is a good starting point: seven check-ins from a 2-minute beacon. The
+window is passive: lrng does nothing else while it records, so its own work
+never shows up as traffic, and its own process is filtered out at the source.
+
+**Sources (Windows, elevated).** A real-time ETW session,
+`lrng-watch-<run_id>`, with three providers: Microsoft-Windows-Kernel-Process
+(process starts and stops), Microsoft-Windows-Kernel-Network (TCP connects,
+accepts, sends and receives, UDP datagrams, IPv4 and IPv6, with the owning
+PID) and Microsoft-Windows-DNS-Client (event 3008: each completed lookup with
+its answers, which name the addresses flows go to). Event fields are decoded
+from the schema TDH reports for each event version, not fixed offsets. ETW
+events carry no payload: watch mode records addresses, ports, sizes and names,
+never content. The session is stopped on exit, Ctrl+C and timeout, and
+sessions left by a crashed run are stopped before a new one starts (Windows
+allows 64). Linux follows in 0.23.0; on Linux, `-watch` stops with that
+message, and `-watch-from` works everywhere.
+
+**What a flow is.** One program (image path plus the snapshot's SHA-256, so a
+restarted program merges) talking to one destination: the registrable domain
+when a lookup in the window answered for the address, otherwise the address
+and port. Connection starts less than a second apart are one check-in; for
+UDP, a datagram after two seconds of quiet starts a new one. Loopback,
+link-local and multicast destinations are ignored.
+
+**The score.** For a flow with at least 6 check-ins (`-watch-min-events`)
+spanning at least three of its intervals, from the intervals' median *m*,
+quartiles *Q1* and *Q3*, and median absolute deviation *MAD*:
+
+| Part | Formula | Weight |
+|---|---|---|
+| Skew | 1 − \|(Q1 + Q3 − 2m) / (Q3 − Q1)\| | 0.35 |
+| Dispersion | max(0, 1 − (MAD / m) / 0.5) | 0.35 |
+| Coverage | min(1, n·m / window) | 0.20 |
+| Size | max(0, 1 − MAD(bytes) / median(bytes)) | 0.10 |
+
+Without byte counts for most check-ins the first three weights are scaled to
+sum to 1. Skew is RITA's Bowley measure: uniform jitter is symmetric, so it
+stays near 1 under heavy jitter while dispersion falls (about 0.8 at ±20%,
+0.5 at ±50%). As in RITA, skew counts as perfect when the median equals a
+quartile, and lrng also treats it so when the quartiles are within a tenth of
+the median of each other, where a second either way is noise. The weights
+were checked by simulation (300 trials per pattern, 15-minute window, no
+sizes; `internal/watch/score_test.go` keeps it as a test):
+
+| Traffic | Median score | Scored 0.65+ |
+|---|---|---|
+| 60 s beacon, ±20% jitter | 0.84 | 98% |
+| 60 s beacon, ±50% jitter | 0.73 | 83% |
+| Random arrivals (Poisson, 60 s mean) | 0.45 | 2% |
+| Lognormal gaps (agent-like, 60 s median) | 0.42 | 5% |
+| Bursty human use | — | 1% |
+
+**HTTP/3 (QUIC).** QUIC check-ins have no connection ETW can see, so for
+UDP a burst of datagrams after two seconds of quiet is one check-in, and an
+HTTP/3 beacon is scored like an HTTPS one. UDP 443 is labeled `quic`
+(T1071.001). HTTP/3 can run on any port, so a UDP flow on another port is
+labeled `quic` too when the program learned that port the ways HTTP/3 is
+advertised: it also spoke HTTPS (TCP 443) to the same address, where an
+`Alt-Svc` header names the port, or it looked up the host's HTTPS or SVCB
+record (RFC 9460). The record's `quic_evidence` says which. Otherwise it stays
+plain `udp` (T1071): it is still scored, but ETW shows no payload, so a QUIC
+packet can't be recognized by its header. The snapshot's
+`network.quic_outbound` (UDP 443 from a program that isn't a browser) raises
+a QUIC beacon's severity.
+
+Each scored flow is a record of the `watch` result with its score and parts,
+check-ins, interval statistics, destination, addresses and byte counts, so a
+finding's score can be checked by hand.
+
+| Rule | Technique | Fires when |
+|---|---|---|
+| `network.beacon` | T1071.001 (web, QUIC), T1071.004 (DNS), else T1071 | a flow scores 0.65 or more |
+| `network.beacon_rotating` | T1008 | a program's check-ins across two or more destinations or transports score 0.65 or more combined, though no single flow does |
+| `dns.periodic_query` | T1071.004 | a program's lookups of one domain score 0.65 or more (not reported again when they belong to a beacon already found) |
+| `dns.tunnel_rate` | T1071.004 | 30 or more unique names a minute under one domain, with mean label entropy of 3.5 bits or more, or mostly TXT or NULL queries |
+| `process.periodic_spawn` | T1053 | the same command line starts 4 or more times at regular intervals |
+
+**Severity.** A score of 0.80 or more is *suspect*, and 0.65 to 0.80 is
+*notable*. One corroborating signal raises it one step (0.80 and up with one
+is *critical*): an unsigned or untrusted image, an image in an unusual folder,
+a memory finding on the same process (`memory.stack_unbacked`, a decoded
+beacon configuration), a QUIC, DoH or direct-DNS finding on it, or with
+`-intel` a destination classified as hosting, Tor or an anonymizer. A reused
+PID running something else doesn't lend its findings.
+
+**Expected noise.** Windows Update, Defender, telemetry, time sync, browsers
+and their updaters, OneDrive, Teams, Office and Slack check in by design. A
+built-in list, each entry pinned to the folder that program installs to (a
+same-named copy elsewhere isn't excused), keeps them from becoming findings;
+`-allow-beacon name.exe,...` adds programs on any path. A snapshot that finds
+the image unsigned or untrusted, or a memory finding on it, overrides the
+list. Excused flows are still recorded, with the reason.
+
+**Safety limits.** Each flow keeps its last 512 check-ins; at most 20,000
+flows and 2 million check-ins, lookups and process starts are held, and past
+that the least active flows are dropped and counted in the result's
+`meta.dropped`. ETW's own losses go in `meta.etw_events_lost`. Event callbacks
+only parse and append; scoring runs once the window closes. The result's meta
+records the recording's CPU time and heap, which the Windows CI job reports
+on every run.
+
+**Saved streams.** `-watch-raw` writes the normalized events as they are
+recorded, as JSON Lines (a header, one line per event, and an end line when
+the window closed cleanly), with a `.sha256`. `-watch-from` rescores one on
+any OS, through the same code as a live run, with its own `-watch-min-events`
+and `-allow-beacon`, and records the stream's SHA-256 in the result. It
+accepts only output, Navigator, `-iocs`, `-intel`, `-timeline` and `-graph`
+flags beside its own.
+
+**Known blind spots.**
+
+- A flow is scored only with 6 check-ins (`-watch-min-events`) spanning at
+  least three of its intervals, so a 1-hour beacon needs a watch of about 6
+  hours.
+- Jitter above about 50% weakens dispersion, and timing that isn't uniform
+  defeats both interval measures. AI agent (MCP) traffic, with lognormal gaps,
+  scores low, so periodic scoring won't misfire on agents, but it won't catch
+  malware that mimics agent timing either; that stays with the AI modules.
+- A reused connection (HTTP keep-alive, a websocket) is one check-in. Timing
+  sends within a connection is a later version's work.
+
+---
+
 ## Endpoint intelligence (offline)
 
 `-intel` adds a synthetic `intel` result that puts a name to the addresses the
@@ -1739,6 +1879,7 @@ lrng -evtx Security.evtx -fail-on critical       # offline triage of one exporte
 .\lrng.exe -iocs -out E:\case42\HOST01.json                # + a deduplicated indicator (IOC) set
 .\lrng.exe -out E:\case42\HOST01.json -navigator E:\case42\HOST01-layer.json   # + an ATT&CK Navigator layer
 lrng -navigator-from HOST01.json -expect profile.md -expect-min 60 -navigator coverage.json   # offline coverage map
+.\lrng.exe -watch 15m -out E:\case42\HOST01.json            # record 15 minutes for beacons, then the snapshot
 .\lrng.exe -fail-on suspect -quiet -out \\share\sweep\%COMPUTERNAME%.json   # exit 3 on findings
 .\lrng.exe -ping-sidecar
 .\lrng.exe -prompt-scan C:\Users\x\Downloads\suspicious.bin
@@ -1772,6 +1913,12 @@ lrng -navigator-from HOST01.json -expect profile.md -expect-min 60 -navigator co
 | `-navigator-min` | `notable` | lowest severity in the layer: `info`, `notable`, `suspect` or `critical` |
 | `-expect` | — | expected techniques (a Navigator layer, or a text/Markdown file of IDs): makes the layer a coverage map |
 | `-expect-min` | — | with `-expect`, exit with status 3 when under this percentage of expected techniques is detected |
+| `-watch` | — | first record processes, connections and DNS for this long (1m to 24h), then run the snapshot; scores [beaconing](#watch-mode-beaconing) (Windows, elevated) |
+| `-watch-only` | off | with `-watch`, skip the snapshot |
+| `-watch-raw` | — | with `-watch`, also save the recorded event stream (JSON Lines), plus `<path>.sha256` |
+| `-watch-from` | — | offline: rescore a stream saved by `-watch-raw` and exit; works on any OS |
+| `-watch-min-events` | 6 | check-ins a flow needs before it is scored (4 to 512) |
+| `-allow-beacon` | — | extra program names whose periodic traffic is expected |
 | `-mem-scan` | — | scan one PID's memory and print the hits |
 | `-mem-*` | | memory-scan options (see [Memory scanning](#memory-scanning-yara)) |
 

@@ -2,9 +2,15 @@
 
 ## Unreleased
 
-Watch mode on Windows: `-watch` records processes, connections and DNS for a
-window before the snapshot and scores it for beaconing. No new dependencies;
-report schema remains 1.2 (a new `watch` result).
+## 0.22.0
+
+Two features for red and purple teams: an ATT&CK Navigator export of the
+findings, with coverage maps against the techniques an emulation or threat
+profile expects, and watch mode on Windows, which records processes,
+connections and DNS for a window before the snapshot and scores it for
+beaconing. Rules now use ATT&CK v20.1's technique IDs. No new dependencies;
+report schema remains 1.2 (watch mode adds a `watch` result). 0.21.0 was
+prepared but not released; its changes ship here.
 
 ### Added
 
@@ -41,33 +47,6 @@ report schema remains 1.2 (a new `watch` result).
 - **Bounded recording.** 512 check-ins per flow, 20,000 flows and 2 million
   held events at most, with what was dropped counted in the result; the
   recording's CPU time and heap are recorded too.
-
-### Changed
-
-- **ATT&CK v20's prompt-injection technique.** `prompt.injection` (the
-  sidecar's file and memory scan) moves from T1059 to T1698, Indirect Prompt
-  Injection, and so do `ai.hidden_instructions`' critical cases (instructions
-  smuggled to an agent in Unicode tag characters or variation selectors);
-  its bidirectional and zero-width cases stay T1027. No rule maps to T1699
-  (direct injection, typed into a model's interface) or T1700 (AI-enabled
-  exfiltration) yet.
-
-### Notes
-
-- Linux watch mode follows in 0.23.0; on Linux `-watch` says so and exits.
-- A Windows CI job runs a scripted 10-second beacon to the runner's own
-  address for 2 minutes and expects `network.beacon`, then rescores the saved
-  stream offline and checks the ETW session is gone.
-
-## 0.21.0
-
-ATT&CK Navigator export: a layer of the run's findings, written beside the
-report or built offline from a saved one, and a coverage map against the
-techniques an emulation or threat profile expects. Rules now use ATT&CK
-v20.1's technique IDs. No new dependencies; report schema remains 1.2.
-
-### Added
-
 - **`-navigator <path>`.** Writes an ATT&CK Navigator layer (format 4.5,
   Enterprise ATT&CK) beside the report, with a `.sha256`. Each technique is
   scored by the worst severity among its findings, and commented with the
@@ -99,6 +78,13 @@ v20.1's technique IDs. No new dependencies; report schema remains 1.2.
 
 ### Changed
 
+- **ATT&CK v20's prompt-injection technique.** `prompt.injection` (the
+  sidecar's file and memory scan) moves from T1059 to T1698, Indirect Prompt
+  Injection, and so do `ai.hidden_instructions`' critical cases (instructions
+  smuggled to an agent in Unicode tag characters or variation selectors);
+  its bidirectional and zero-width cases stay T1027. No rule maps to T1699
+  (direct injection, typed into a model's interface) or T1700 (AI-enabled
+  exfiltration) yet.
 - **Technique IDs follow ATT&CK v19 and later**, which split Defense Evasion
   into Stealth and Defense Impairment and revoked T1562 (Impair Defenses):
   - T1562, T1562.001 and T1562.006 → **T1685** (Disable or Modify Tools):
@@ -131,6 +117,13 @@ v20.1's technique IDs. No new dependencies; report schema remains 1.2.
 - MITRE ATT&CK (© The MITRE Corporation, reproduced and distributed with its
   permission). Its license ships beside the data and in every release archive,
   with `THIRD_PARTY_NOTICES.md`.
+
+### Notes
+
+- Linux watch mode follows in 0.23.0; on Linux `-watch` says so and exits.
+- A Windows CI job runs a scripted 10-second beacon to the runner's own
+  address for 2 minutes and expects `network.beacon`, then rescores the saved
+  stream offline and checks the ETW session is gone.
 
 ## 0.20.0
 

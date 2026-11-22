@@ -61,7 +61,16 @@ func (id *identity) label() string {
 	if id.image != "" {
 		return id.image
 	}
+	if id.unattributed() {
+		return "An unattributed process (no owner was found for its socket)"
+	}
 	return "unknown image (PID " + strconv.Itoa(int(id.firstPID())) + ")"
+}
+
+// unattributed is the traffic Linux's source couldn't tie to a process
+// (PID 0): one identity, though it may be many programs.
+func (id *identity) unattributed() bool {
+	return id.image == "" && len(id.pids) == 1 && id.pids[0]
 }
 
 func (id *identity) firstPID() uint32 {
@@ -360,8 +369,8 @@ func (an *analysis) flows() map[string]bool {
 	sort.Slice(ids, func(i, j int) bool { return ids[i].key < ids[j].key })
 	for _, id := range ids {
 		c := combos[id]
-		if len(c.dests) < 2 && len(c.transports) < 2 {
-			continue
+		if (len(c.dests) < 2 && len(c.transports) < 2) || id.unattributed() {
+			continue // unattributed traffic mixes programs: no rotation to see
 		}
 		times, _ := coalesce(c.times, nil, an.a.lim.Coalesce)
 		s, ok := ScoreSeries(times, nil, an.window, an.opts.MinEvents)
@@ -395,6 +404,9 @@ func (an *analysis) flows() map[string]bool {
 
 func (an *analysis) base(kind string, id *identity) map[string]any {
 	f := map[string]any{"kind": kind, "pid": id.firstPID()}
+	if id.unattributed() {
+		f["unattributed"] = true
+	}
 	if pids := id.pidList(); len(pids) > 1 {
 		f["pids"] = pids
 	}

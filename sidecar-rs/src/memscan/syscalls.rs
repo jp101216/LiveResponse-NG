@@ -475,7 +475,7 @@ fn hit(rule: &str, severity: &str, confidence: i64, addr: usize, context: String
         rule: rule.to_string(),
         severity: severity.to_string(),
         technique: if rule == "defense.ntdll_second_copy" {
-            "T1562.001"
+            "T1685"
         } else {
             "T1106"
         }
@@ -966,7 +966,7 @@ mod tests {
             .context
             .contains("indirect at 0x10000010 (service 0x18) -> syscall at 0x7ffb00001012"));
         assert_eq!(h[0].offset, 0x1000_0010);
-        assert_eq!(h[2].technique, "T1562.001");
+        assert_eq!(h[2].technique, "T1685");
         assert!(Report::unsupported("x64 only").hits().is_empty());
         assert_eq!(Report::unsupported("x64 only").meta()["supported"], false);
     }

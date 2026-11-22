@@ -124,6 +124,22 @@ func Build(ctx context.Context, paths []string, opts Options) (Case, error) {
 	return c, nil
 }
 
+// ReadReport reads and checks one saved LRNG JSON report the way a case
+// import does (regular file, size limit, unambiguous JSON, schema checks),
+// returning it with the SHA-256 of the bytes read.
+func ReadReport(path string, limit int) (output.Report, string, error) {
+	data, err := readReportFile(path, limit)
+	if err != nil {
+		return output.Report{}, "", err
+	}
+	rep, err := decodeReport(data)
+	if err != nil {
+		return output.Report{}, "", err
+	}
+	sum := sha256.Sum256(data)
+	return rep, hex.EncodeToString(sum[:]), nil
+}
+
 func readReportFile(path string, limit int) ([]byte, error) {
 	st, err := os.Lstat(path)
 	if err != nil {

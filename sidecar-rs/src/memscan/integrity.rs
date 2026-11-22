@@ -542,7 +542,7 @@ fn tamper_hit(c: &Change) -> Option<Hit> {
         return Some(hit(
             "defense.amsi_patched",
             "suspect",
-            "T1562.001",
+            "T1685",
             75,
             c.first_site(),
             format!(
@@ -560,7 +560,7 @@ fn tamper_hit(c: &Change) -> Option<Hit> {
         return Some(hit(
             "defense.etw_patched",
             "suspect",
-            "T1562.006",
+            "T1685",
             75,
             c.first_site(),
             format!(

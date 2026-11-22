@@ -54,7 +54,7 @@ func criticalProcessFinding(label, name, imagePath, sysRoot string) (Finding, bo
 	const warn = " Don't end it while responding: Windows stops with a blue screen (CRITICAL_PROCESS_DIED) the moment it " +
 		"exits. Suspend it, or clear the flag with a tool that can (System Informer), and take its memory first"
 	if inSys {
-		return Finding{Rule: "defense.critical_process", Severity: SevNotable, Technique: "T1562", Confidence: 35,
+		return Finding{Rule: "defense.critical_process", Severity: SevNotable, Technique: "T1685", Confidence: 35,
 			Detail: fmt.Sprintf("%s, a Windows program (%s), is marked critical, which Windows doesn't do for it: a "+
 				"process made unkillable, by malware running in it or a tool that set the flag.%s", label, imagePath, warn)}, true
 	}
@@ -62,7 +62,7 @@ func criticalProcessFinding(label, name, imagePath, sysRoot string) (Finding, bo
 	if where == "" {
 		where = "its image path unreadable"
 	}
-	return Finding{Rule: "defense.critical_process", Severity: SevCritical, Technique: "T1562", Confidence: 90,
+	return Finding{Rule: "defense.critical_process", Severity: SevCritical, Technique: "T1685", Confidence: 90,
 		Detail: fmt.Sprintf("%s (%s) is marked critical (ProcessBreakOnTermination). Windows marks only its own core "+
 			"processes this way; malware marks itself so that it can't be killed (NIK C2 does, and njRAT- and "+
 			"AsyncRAT-style \"BSOD protection\" works the same way).%s", label, where, warn)}, true

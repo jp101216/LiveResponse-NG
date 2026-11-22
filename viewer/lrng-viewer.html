@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-fTDWLck2n4dX7Kos76jGtKTcFhMTzfrIXFfiMbv781I='; style-src 'sha256-Xe2w0d4fdYwgu8xiYNoYWwR5pxF2+mvOyarmwqJxbS0='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ynM4lhNd1/sq5YNnU5ObqQPkW1SEmGS5I6xVr9kg++Y='; style-src 'sha256-Xe2w0d4fdYwgu8xiYNoYWwR5pxF2+mvOyarmwqJxbS0='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>lrng report viewer</title>
 <style>
@@ -382,36 +382,65 @@ tr.detail-row td { max-width: none; background: var(--paper); }
     const known = RANK.has(s);
     return h("span", { class: "sev " + (known ? "sev-" + s : "sev-unknown") }, known ? s : (s ? String(s) : "unrated"));
   }
+  // attackgen:begin (cmd/attackgen, Enterprise ATT&CK v20.1; regenerate, don't edit)
   const TACTICS = [
     ["ia", "Initial access"], ["ex", "Execution"], ["pe", "Persistence"], ["pr", "Privilege escalation"],
-    ["de", "Defense evasion"], ["ca", "Credential access"], ["di", "Discovery"], ["lm", "Lateral movement"],
-    ["co", "Collection"], ["cc", "Command and control"], ["ef", "Exfiltration"], ["im", "Impact"],
+    ["st", "Stealth"], ["dm", "Defense impairment"], ["ca", "Credential access"], ["di", "Discovery"],
+    ["lm", "Lateral movement"], ["co", "Collection"], ["cc", "Command and control"], ["ef", "Exfiltration"],
+    ["im", "Impact"],
   ];
   const TACTIC_NAME = new Map(TACTICS);
-  // Enterprise ATT&CK: technique -> tactics, for the techniques lrng's rules
-  // and common Sigma rules use. A sub-technique takes its parent's tactics.
+  // Technique -> tactics, for every Enterprise technique. A sub-technique takes its
+  // parent's tactics; a revoked ID takes its successor's, so older reports still place.
   const TECH = new Map(Object.entries({
-    T1003: "ca", T1005: "co", T1007: "di", T1010: "di", T1012: "di", T1014: "de", T1016: "di", T1018: "di",
-    T1020: "ef", T1021: "lm", T1027: "de", T1033: "di", T1036: "de", T1037: "pe pr", T1040: "ca di",
-    T1041: "ef", T1046: "di", T1047: "ex", T1048: "ef", T1049: "di", T1053: "ex pe pr", T1055: "de pr",
-    T1056: "co ca", T1057: "di", T1059: "ex", T1068: "pr", T1069: "di", T1070: "de", T1071: "cc",
-    T1072: "ex lm", T1074: "co", T1078: "de pe pr ia", T1082: "di", T1083: "di", T1087: "di", T1090: "cc",
-    T1091: "lm ia", T1095: "cc", T1098: "pe pr", T1102: "cc", T1105: "cc", T1106: "ex", T1110: "ca",
-    T1112: "de", T1113: "co", T1115: "co", T1119: "co", T1120: "di", T1124: "di", T1127: "de", T1129: "ex",
-    T1133: "pe ia", T1134: "de pr", T1135: "di", T1136: "pe", T1137: "pe", T1140: "de", T1176: "pe",
-    T1185: "co", T1187: "ca", T1189: "ia", T1190: "ia", T1195: "ia", T1197: "de pe", T1199: "ia",
-    T1201: "di", T1202: "de", T1203: "ex", T1204: "ex", T1207: "de", T1210: "lm", T1211: "de", T1212: "ca",
-    T1216: "de", T1217: "di", T1218: "de", T1219: "cc", T1220: "de", T1221: "de", T1222: "de", T1480: "de",
-    T1482: "di", T1484: "de pr", T1485: "im", T1486: "im", T1489: "im", T1490: "im", T1491: "im",
-    T1495: "im", T1496: "im", T1497: "de di", T1498: "im", T1499: "im", T1505: "pe", T1518: "di",
-    T1529: "im", T1531: "im", T1534: "lm", T1539: "ca", T1542: "de pe", T1543: "pe pr", T1546: "pr pe",
-    T1547: "pe pr", T1548: "pr de", T1550: "de lm", T1552: "ca", T1553: "de", T1554: "pe", T1555: "ca",
-    T1556: "ca de pe", T1557: "ca co", T1558: "ca", T1559: "ex", T1560: "co", T1562: "de", T1563: "lm",
-    T1564: "de", T1565: "im", T1566: "ia", T1567: "ef", T1568: "cc", T1569: "ex", T1570: "lm", T1571: "cc",
-    T1572: "cc", T1573: "cc", T1574: "pe pr de", T1578: "de", T1580: "di", T1606: "ca", T1610: "de ex",
-    T1611: "pr", T1612: "de", T1613: "di", T1614: "di", T1615: "di", T1619: "di", T1620: "de", T1621: "ca",
-    T1622: "de di", T1647: "de", T1649: "ca", T1652: "di", T1654: "di", T1656: "de", T1657: "im",
+    T1001: "cc", T1002: "co", T1003: "ca", T1004: "pe pr", T1005: "co", T1006: "st", T1007: "di", T1008: "cc",
+    T1009: "st", T1010: "di", T1011: "ef", T1012: "di", T1013: "pe pr", T1014: "st", T1015: "pe pr",
+    T1016: "di", T1017: "ex lm", T1018: "di", T1019: "pe st", T1020: "ef", T1021: "lm", T1022: "co",
+    T1023: "pe pr", T1024: "cc", T1025: "co", T1027: "st", T1028: "lm", T1029: "ef", T1030: "ef",
+    T1031: "pe pr", T1032: "cc", T1033: "di", T1035: "ex", T1036: "st", T1037: "pe pr", T1038: "ex st",
+    T1039: "co", T1040: "ca di", T1041: "ef", T1042: "pe pr", T1044: "ex st", T1045: "st", T1046: "di",
+    T1047: "ex", T1048: "ef", T1049: "di", T1050: "pe pr", T1052: "ef", T1053: "ex pe pr", T1054: "dm",
+    T1055: "pr st", T1056: "ca co", T1057: "di", T1058: "ex st", T1059: "ex", T1060: "pe pr", T1063: "di",
+    T1065: "cc", T1066: "st", T1067: "pe st", T1068: "pr", T1069: "di", T1070: "st", T1071: "cc",
+    T1072: "ex lm", T1073: "ex st", T1074: "co", T1075: "lm", T1076: "lm", T1077: "lm", T1078: "ia pe pr st",
+    T1079: "cc", T1080: "lm", T1081: "ca", T1082: "di", T1083: "di", T1084: "pe pr", T1085: "st", T1086: "ex",
+    T1087: "di", T1088: "pr", T1089: "dm", T1090: "cc", T1091: "ia lm", T1092: "cc", T1093: "pr st",
+    T1094: "cc", T1095: "cc", T1096: "st", T1097: "lm", T1098: "pe pr", T1099: "st", T1100: "pe",
+    T1101: "pe pr", T1102: "cc", T1103: "pe pr", T1104: "cc", T1105: "cc", T1106: "ex", T1107: "st",
+    T1109: "pe st", T1110: "ca", T1111: "ca", T1112: "pe dm", T1113: "co", T1114: "co", T1115: "co",
+    T1116: "dm", T1117: "st", T1118: "st", T1119: "co", T1120: "di", T1121: "st", T1122: "pe pr", T1123: "co",
+    T1124: "di", T1125: "co", T1126: "st", T1127: "ex st", T1128: "pe pr", T1129: "ex", T1130: "dm",
+    T1131: "pe pr", T1132: "cc", T1133: "ia pe", T1134: "pr st", T1135: "di", T1136: "pe", T1137: "pe",
+    T1138: "pe pr", T1139: "ca", T1140: "st", T1141: "ca co", T1142: "ca", T1143: "st", T1144: "dm",
+    T1145: "ca", T1146: "st", T1147: "st", T1148: "dm", T1150: "dm", T1151: "st", T1152: "ex", T1154: "pe pr",
+    T1155: "ex", T1156: "pe pr", T1157: "ex st", T1158: "st", T1159: "pe pr", T1160: "pe pr", T1161: "pe pr",
+    T1162: "dm", T1163: "pe pr", T1164: "pe pr", T1165: "pe pr", T1166: "pr", T1167: "ca", T1168: "ex pe pr",
+    T1169: "pr", T1170: "st", T1171: "ca co", T1172: "cc", T1173: "ex", T1174: "pe dm ca", T1176: "pe",
+    T1177: "pe pr", T1178: "pr st", T1179: "ca co", T1180: "pe pr", T1181: "pr st", T1182: "pe pr",
+    T1183: "pe pr", T1184: "lm", T1185: "co", T1186: "pr st", T1187: "ca", T1188: "cc", T1189: "ia",
+    T1190: "ia", T1191: "st", T1192: "ia", T1193: "ia", T1194: "ia", T1195: "ia", T1196: "st",
+    T1197: "ex pe st", T1198: "dm", T1199: "ia", T1200: "ia", T1201: "di", T1202: "st", T1203: "ex",
+    T1204: "ex", T1205: "pe st cc", T1206: "pr", T1207: "dm", T1208: "ca", T1209: "pe pr", T1210: "lm",
+    T1211: "st", T1212: "ca", T1213: "co", T1214: "ca", T1215: "pe pr", T1216: "st", T1217: "di", T1218: "st",
+    T1219: "cc", T1220: "st", T1221: "st", T1222: "dm", T1223: "st", T1480: "st", T1482: "di", T1483: "cc",
+    T1484: "pr dm", T1485: "im", T1486: "im", T1487: "im", T1488: "im", T1489: "im", T1490: "im", T1491: "im",
+    T1492: "im", T1493: "im", T1494: "im", T1495: "im", T1496: "im", T1497: "st di", T1498: "im", T1499: "im",
+    T1500: "st", T1501: "pe pr", T1502: "pr st", T1503: "ca", T1504: "pe pr", T1505: "pe", T1506: "lm",
+    T1514: "pr", T1518: "di", T1519: "pe pr", T1522: "ca", T1525: "pe", T1526: "di", T1527: "lm", T1528: "ca",
+    T1529: "im", T1530: "co", T1531: "im", T1534: "lm", T1535: "st", T1536: "dm", T1537: "ef", T1538: "di",
+    T1539: "ca", T1542: "pe st", T1543: "pe pr", T1546: "pe pr", T1547: "pe pr", T1548: "pr", T1550: "lm",
+    T1552: "ca", T1553: "dm", T1554: "pe", T1555: "ca", T1556: "pe dm ca", T1557: "ca co", T1558: "ca",
+    T1559: "ex", T1560: "co", T1561: "im", T1562: "dm", T1563: "lm", T1564: "st", T1565: "im", T1566: "ia",
+    T1567: "ef", T1568: "cc", T1569: "ex", T1570: "lm", T1571: "cc", T1572: "cc", T1573: "cc", T1574: "ex st",
+    T1578: "dm", T1580: "di", T1599: "dm", T1600: "dm", T1601: "dm", T1602: "co", T1606: "ca", T1609: "ex",
+    T1610: "ex", T1611: "pr", T1612: "st", T1613: "di", T1614: "di", T1615: "di", T1619: "di", T1620: "st",
+    T1621: "ca", T1622: "st di", T1647: "dm", T1648: "ex", T1649: "ca", T1651: "ex", T1652: "di", T1653: "pe",
+    T1654: "di", T1656: "st", T1657: "im", T1659: "ia cc", T1665: "cc", T1666: "dm", T1667: "im", T1668: "pe",
+    T1669: "ia", T1671: "pe", T1672: "st", T1673: "di", T1674: "ex", T1675: "ex", T1677: "ex", T1678: "st",
+    T1679: "st", T1680: "di", T1684: "st", T1685: "dm", T1686: "dm", T1687: "dm", T1688: "dm", T1689: "dm",
+    T1690: "dm", T1696: "st", T1697: "ca", T1698: "ex", T1699: "ex", T1700: "ef",
   }));
+  // attackgen:end
   const TECH_RE = /^T\d{4}(\.\d{3})?$/;
   function tacticsOf(technique) {
     if (typeof technique !== "string" || !TECH_RE.test(technique)) return [];

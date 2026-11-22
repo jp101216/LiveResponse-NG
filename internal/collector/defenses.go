@@ -144,7 +144,7 @@ func judgeExclusion(e exclusion) Finding {
 	case "ip":
 		why = "network protection doesn't inspect traffic to that address"
 	}
-	return Finding{Rule: "defense.defender_exclusion", Severity: sev, Technique: "T1562.001", Confidence: conf,
+	return Finding{Rule: "defense.defender_exclusion", Severity: sev, Technique: "T1685", Confidence: conf,
 		Detail: fmt.Sprintf("Microsoft Defender excludes the %s %s (set by %s): %s", e.Kind, v, src, why)}
 }
 
@@ -189,7 +189,7 @@ func defenderReport(d defenderState) (map[string]any, []Finding) {
 			if s.Policy {
 				src = "group policy"
 			}
-			out = append(out, Finding{Rule: "defense.defender_protection_off", Severity: sev, Technique: "T1562.001", Confidence: conf,
+			out = append(out, Finding{Rule: "defense.defender_protection_off", Severity: sev, Technique: "T1685", Confidence: conf,
 				Detail: fmt.Sprintf("Microsoft Defender: %s (%s\\%s = %d, set by %s). Defender steps aside on its own when another "+
 					"antivirus product takes over; otherwise this is switched off by hand", ds.What, s.Path, s.Name, s.Value, src)})
 		}
@@ -200,7 +200,7 @@ func defenderReport(d defenderState) (map[string]any, []Finding) {
 	if d.Tamper != nil {
 		f["tamper_protection"] = *d.Tamper
 		if *d.Tamper == 4 {
-			out = append(out, Finding{Rule: "defense.defender_protection_off", Severity: SevNotable, Technique: "T1562.001", Confidence: 35,
+			out = append(out, Finding{Rule: "defense.defender_protection_off", Severity: SevNotable, Technique: "T1685", Confidence: 35,
 				Detail: "Microsoft Defender's tamper protection is off (Features\\TamperProtection = 4), so its settings can be changed " +
 					"by anything running as administrator"})
 		}
@@ -232,7 +232,7 @@ func credentialReport(c credentialState) (map[string]any, []Finding) {
 				"Windows turned this off in 8.1; an intruder turns it back on so Mimikatz can read the passwords of whoever logs on next"})
 	}
 	if c.RunAsPPL != nil && *c.RunAsPPL == 0 {
-		out = append(out, Finding{Rule: "cred.lsa_protection_off", Severity: SevNotable, Technique: "T1562", Confidence: 40,
+		out = append(out, Finding{Rule: "cred.lsa_protection_off", Severity: SevNotable, Technique: "T1685", Confidence: 40,
 			Detail: "LSA protection is switched off explicitly (Lsa\\RunAsPPL = 0): LSASS runs as an ordinary process, which any " +
 				"administrator can read credentials out of"})
 	}
@@ -267,10 +267,10 @@ func defenderEventFindings(ev winEvent) []Finding {
 	switch ev.EventID {
 	case 5001, 5010, 5012:
 		what := map[int]string{5001: "real-time protection", 5010: "scanning for spyware and other unwanted software", 5012: "scanning for viruses"}[ev.EventID]
-		return []Finding{{Rule: "defense.defender_protection_off", Severity: SevSuspect, Technique: "T1562.001", Confidence: 65,
+		return []Finding{{Rule: "defense.defender_protection_off", Severity: SevSuspect, Technique: "T1685", Confidence: 65,
 			Detail: fmt.Sprintf("Microsoft Defender's %s was switched off%s (Defender event %d)", what, when, ev.EventID)}}
 	case 5013:
-		return []Finding{{Rule: "defense.defender_tamper_blocked", Severity: SevSuspect, Technique: "T1562.001", Confidence: 60,
+		return []Finding{{Rule: "defense.defender_tamper_blocked", Severity: SevSuspect, Technique: "T1685", Confidence: 60,
 			Detail: fmt.Sprintf("tamper protection blocked a change to Microsoft Defender's settings%s: %s (Defender event 5013)",
 				when, excerpt(firstNonEmpty(evData(ev, "Value"), evData(ev, "Changed Value"), "the value isn't recorded"), 200))}}
 	case 5007:
@@ -278,12 +278,12 @@ func defenderEventFindings(ev winEvent) []Finding {
 		low := strings.ToLower(nv)
 		switch {
 		case strings.Contains(low, `\exclusions\`):
-			return []Finding{{Rule: "defense.defender_exclusion", Severity: SevSuspect, Technique: "T1562.001", Confidence: 60,
+			return []Finding{{Rule: "defense.defender_exclusion", Severity: SevSuspect, Technique: "T1685", Confidence: 60,
 				Detail: fmt.Sprintf("an exclusion was added to Microsoft Defender%s: %s (Defender event 5007)", when, excerpt(nv, 240))}}
 		case strings.Contains(low, "disablerealtimemonitoring = 0x1") || strings.Contains(low, "disableantispyware = 0x1") ||
 			strings.Contains(low, "disablebehaviormonitoring = 0x1") || strings.Contains(low, "disableioavprotection = 0x1") ||
 			strings.Contains(low, "disablescriptscanning = 0x1"):
-			return []Finding{{Rule: "defense.defender_protection_off", Severity: SevSuspect, Technique: "T1562.001", Confidence: 65,
+			return []Finding{{Rule: "defense.defender_protection_off", Severity: SevSuspect, Technique: "T1685", Confidence: 65,
 				Detail: fmt.Sprintf("Microsoft Defender's protection was switched off%s: %s (Defender event 5007)", when, excerpt(nv, 240))}}
 		}
 	}
@@ -326,7 +326,7 @@ func amsiReport(res *Result, a amsiState, defenderInstalled bool) {
 		}
 	}
 	if len(a.Providers) == 0 && defenderInstalled {
-		out = append(out, Finding{Rule: "defense.amsi_provider_missing", Severity: SevSuspect, Technique: "T1562.001", Confidence: 60,
+		out = append(out, Finding{Rule: "defense.amsi_provider_missing", Severity: SevSuspect, Technique: "T1685", Confidence: 60,
 			Detail: "no antimalware provider is registered with AMSI although Microsoft Defender is installed: scripts, macros and " +
 				"in-memory .NET assemblies go unscanned. Deleting the provider's key under SOFTWARE\\Microsoft\\AMSI\\Providers is an " +
 				"AMSI bypass that survives reboots"})
@@ -399,17 +399,17 @@ func pplFindings(procs []protectedProcess, runAsPPL *uint32) []Finding {
 		label := fmt.Sprintf("%s (pid %d)", p.Name, p.PID)
 		switch {
 		case pplAlways[p.Name]:
-			out = append(out, Finding{Rule: "defense.ppl_stripped", Severity: SevCritical, Technique: "T1562.001", Confidence: 85,
+			out = append(out, Finding{Rule: "defense.ppl_stripped", Severity: SevCritical, Technique: "T1685", Confidence: 85,
 				Detail: label + " runs unprotected, though Windows always starts it as a protected process: something in the " +
 					"kernel cleared its protection (EPROCESS.Protection), as BYOVD tools do before reading, injecting into or " +
 					"ending protected processes"})
 		case p.Name == "lsass.exe" && runAsPPL != nil && (*runAsPPL == 1 || *runAsPPL == 2):
-			out = append(out, Finding{Rule: "defense.ppl_stripped", Severity: SevSuspect, Technique: "T1562.001", Confidence: 70,
+			out = append(out, Finding{Rule: "defense.ppl_stripped", Severity: SevSuspect, Technique: "T1685", Confidence: 70,
 				Detail: fmt.Sprintf("%s runs unprotected although LSA protection is configured (Lsa\\RunAsPPL = %d): a kernel "+
 					"driver that clears LSASS's protection lets credential dumpers read its memory. LSA protection switched on "+
 					"since the last restart also looks like this until the next boot", label, *runAsPPL)})
 		case p.Name == "msmpeng.exe":
-			out = append(out, Finding{Rule: "defense.ppl_stripped", Severity: SevSuspect, Technique: "T1562.001", Confidence: 65,
+			out = append(out, Finding{Rule: "defense.ppl_stripped", Severity: SevSuspect, Technique: "T1685", Confidence: 65,
 				Detail: label + ", Microsoft Defender's engine, runs without its PPL-Antimalware protection: with it cleared from " +
 					"the kernel, the engine can be injected into, suspended or ended like any other process"})
 		}

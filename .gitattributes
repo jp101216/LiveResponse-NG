@@ -5,3 +5,7 @@ internal/intel/data/endpoints.tsv text eol=lf linguist-generated
 # The bundled vulnerable-driver dataset: generated (cmd/drivergen), embedded
 # byte for byte, collapsed in diffs.
 internal/vulndrivers/data/loldrivers.tsv text eol=lf linguist-generated
+# The bundled ATT&CK table: generated (cmd/attackgen), embedded byte for byte.
+internal/attack/data/enterprise.tsv text eol=lf linguist-generated
+# Golden Navigator layers, compared byte for byte.
+internal/navigator/testdata/*.json text eol=lf

@@ -1,0 +1,382 @@
+{
+  "name": "lrng coverage: lab-dc01",
+  "versions": {
+    "attack": "20.1",
+    "navigator": "5.3.2",
+    "layer": "4.5"
+  },
+  "domain": "enterprise-attack",
+  "description": "Techniques expected by profile.md against findings at notable or above from liveresponse-ng 0.21.0 on lab-dc01, collected 2026-11-22T03:04:05Z: expected 6, detected 3 (50%), partial 0, missed 3, extra 2, 2 out of scope.",
+  "sorting": 0,
+  "layout": {
+    "layout": "side",
+    "showID": true,
+    "showName": true,
+    "expandedSubtechniques": "annotated"
+  },
+  "hideDisabled": false,
+  "techniques": [
+    {
+      "techniqueID": "T1003.001",
+      "color": "#dd6b20",
+      "comment": "Missed",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "coverage",
+          "value": "missed"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1003.003",
+      "color": "#2b6cb0",
+      "comment": "Detected. cred.ntds_copy (×2, worst critical)",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "coverage",
+          "value": "detected"
+        },
+        {
+          "name": "findings",
+          "value": "2"
+        },
+        {
+          "name": "highest severity",
+          "value": "critical"
+        },
+        {
+          "name": "highest confidence",
+          "value": "90"
+        },
+        {
+          "name": "rules",
+          "value": "1"
+        },
+        {
+          "name": "collectors",
+          "value": "memory"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1003.006",
+      "color": "#dd6b20",
+      "comment": "Missed",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "coverage",
+          "value": "missed"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1036",
+      "comment": "Out of scope: marked not observable on a host",
+      "enabled": false,
+      "metadata": [
+        {
+          "name": "coverage",
+          "value": "out of scope"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1043",
+      "color": "#a0aec0",
+      "comment": "Extra. misc.retired (notable). Deprecated in ATT&CK v20.1",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "coverage",
+          "value": "extra"
+        },
+        {
+          "name": "findings",
+          "value": "1"
+        },
+        {
+          "name": "highest severity",
+          "value": "notable"
+        },
+        {
+          "name": "highest confidence",
+          "value": "30"
+        },
+        {
+          "name": "rules",
+          "value": "1"
+        },
+        {
+          "name": "collectors",
+          "value": "memory"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1059",
+      "color": "#2b6cb0",
+      "comment": "Detected: through a sub-technique",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "coverage",
+          "value": "detected"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1059.001",
+      "color": "#2b6cb0",
+      "comment": "Detected: counts toward expected T1059. sigma.download_cradle (suspect)",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "coverage",
+          "value": "detected"
+        },
+        {
+          "name": "findings",
+          "value": "1"
+        },
+        {
+          "name": "highest severity",
+          "value": "suspect"
+        },
+        {
+          "name": "highest confidence",
+          "value": "65"
+        },
+        {
+          "name": "rules",
+          "value": "1"
+        },
+        {
+          "name": "collectors",
+          "value": "eventlog"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1071.001",
+      "color": "#2b6cb0",
+      "comment": "Detected: marked out of scope but fired. network.beacon (notable)",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "coverage",
+          "value": "detected"
+        },
+        {
+          "name": "findings",
+          "value": "1"
+        },
+        {
+          "name": "highest severity",
+          "value": "notable"
+        },
+        {
+          "name": "highest confidence",
+          "value": "40"
+        },
+        {
+          "name": "rules",
+          "value": "1"
+        },
+        {
+          "name": "collectors",
+          "value": "memory"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1105",
+      "color": "#a0aec0",
+      "comment": "Extra. sigma.download_cradle (suspect)",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "coverage",
+          "value": "extra"
+        },
+        {
+          "name": "findings",
+          "value": "1"
+        },
+        {
+          "name": "highest severity",
+          "value": "suspect"
+        },
+        {
+          "name": "highest confidence",
+          "value": "65"
+        },
+        {
+          "name": "rules",
+          "value": "1"
+        },
+        {
+          "name": "collectors",
+          "value": "eventlog"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1219",
+      "color": "#dd6b20",
+      "comment": "Missed",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "coverage",
+          "value": "missed"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1566.004",
+      "comment": "Out of scope: marked not observable on a host",
+      "enabled": false,
+      "metadata": [
+        {
+          "name": "coverage",
+          "value": "out of scope"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1685",
+      "color": "#2b6cb0",
+      "comment": "Detected. Expected as T1562.001. defense.amsi_patched (critical), defense.defender_exclusion (suspect). Mapped from T1562.001, revoked in ATT&CK",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "coverage",
+          "value": "detected"
+        },
+        {
+          "name": "findings",
+          "value": "2"
+        },
+        {
+          "name": "highest severity",
+          "value": "critical"
+        },
+        {
+          "name": "highest confidence",
+          "value": "95"
+        },
+        {
+          "name": "rules",
+          "value": "2"
+        },
+        {
+          "name": "collectors",
+          "value": "defenses"
+        }
+      ]
+    }
+  ],
+  "legendItems": [
+    {
+      "label": "Detected",
+      "color": "#2b6cb0"
+    },
+    {
+      "label": "Partial (only the parent fired)",
+      "color": "#fbd38d"
+    },
+    {
+      "label": "Missed",
+      "color": "#dd6b20"
+    },
+    {
+      "label": "Extra (not expected)",
+      "color": "#a0aec0"
+    }
+  ],
+  "metadata": [
+    {
+      "name": "host",
+      "value": "lab-dc01"
+    },
+    {
+      "name": "run_id",
+      "value": "run-1"
+    },
+    {
+      "name": "collected_at",
+      "value": "2026-11-22T03:04:05Z"
+    },
+    {
+      "name": "tool",
+      "value": "liveresponse-ng 0.21.0"
+    },
+    {
+      "name": "attack_mapping",
+      "value": "Enterprise ATT&CK v20.1 (lrng's bundled table)"
+    },
+    {
+      "name": "min_severity",
+      "value": "notable"
+    },
+    {
+      "name": "report_sha256",
+      "value": "abababababababababababababababababababababababababababababababab"
+    },
+    {
+      "name": "expected_file",
+      "value": "profile.md"
+    },
+    {
+      "name": "expected",
+      "value": "6"
+    },
+    {
+      "name": "detected",
+      "value": "3"
+    },
+    {
+      "name": "detection_rate",
+      "value": "50.0%"
+    },
+    {
+      "name": "partial",
+      "value": "0"
+    },
+    {
+      "name": "missed",
+      "value": "3"
+    },
+    {
+      "name": "extra",
+      "value": "2"
+    },
+    {
+      "name": "out_of_scope",
+      "value": "2"
+    },
+    {
+      "name": "expected_unknown",
+      "value": "T8888"
+    },
+    {
+      "name": "qualifying_findings",
+      "value": "9"
+    },
+    {
+      "name": "findings_without_technique",
+      "value": "1"
+    },
+    {
+      "name": "remapped",
+      "value": "T1562.001 -> T1685 (×1)"
+    },
+    {
+      "name": "unknown_techniques",
+      "value": "T9999"
+    }
+  ]
+}

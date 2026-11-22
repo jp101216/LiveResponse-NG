@@ -79,6 +79,6 @@ func wfpFilterFindings(app, layer, match string) []Finding {
 	if match != "equal" || (layer != "ale_auth_connect_v4" && layer != "ale_auth_connect_v6") || !securityAgentNames[baseName(app)] {
 		return nil
 	}
-	return []Finding{{"defense.wfp_security_agent_block", SevSuspect, "T1562.001", 65,
+	return []Finding{{"defense.wfp_security_agent_block", SevSuspect, "T1685", 65,
 		"an outbound authorization BLOCK filter matches security-agent-named executable " + app + "; filter precedence, other conditions and legitimate policy can affect the outcome; this does not establish actual telemetry loss"}}
 }

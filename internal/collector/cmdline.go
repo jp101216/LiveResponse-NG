@@ -278,13 +278,13 @@ var cmdRules = []cmdRule{
 		}
 		return ""
 	}},
-	{"defense.clear_event_logs", SevCritical, "T1070.001", 85, func(c *cmdInput) string {
+	{"defense.clear_event_logs", SevCritical, "T1685.005", 85, func(c *cmdInput) string {
 		if reWevtClear.MatchString(c.lower) || strings.Contains(c.text(), "clear-eventlog") {
 			return "clears Windows event logs"
 		}
 		return ""
 	}},
-	{"defense.disable_defender", SevSuspect, "T1562.001", 80, func(c *cmdInput) string {
+	{"defense.disable_defender", SevSuspect, "T1685", 80, func(c *cmdInput) string {
 		t := c.text()
 		switch {
 		case strings.Contains(t, "set-mppreference") && reMpDisable.MatchString(t):
@@ -298,7 +298,7 @@ var cmdRules = []cmdRule{
 		}
 		return ""
 	}},
-	{"defense.firewall_disabled", SevSuspect, "T1562.004", 75, func(c *cmdInput) string {
+	{"defense.firewall_disabled", SevSuspect, "T1686", 75, func(c *cmdInput) string {
 		t := c.text()
 		switch {
 		case c.tok("netsh") && c.has("advfirewall") && c.has("state") && c.has("off"):
@@ -351,7 +351,7 @@ var cmdRules = []cmdRule{
 		}
 		return ""
 	}},
-	{"defense.powershell_downgrade", SevSuspect, "T1562.010", 65, func(c *cmdInput) string {
+	{"defense.powershell_downgrade", SevSuspect, "T1689", 65, func(c *cmdInput) string {
 		if rePSDowngrade.MatchString(c.lower) {
 			return "starts PowerShell 2.0, which has no script-block logging, no AMSI and no Constrained Language enforcement (a downgrade attack)"
 		}

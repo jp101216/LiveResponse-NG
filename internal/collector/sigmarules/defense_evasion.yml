@@ -16,7 +16,7 @@ detection:
     condition: selection and verbs
 tags:
     - attack.defense_evasion
-    - attack.t1070.001
+    - attack.t1685.005
 level: high
 ---
 title: Shadow Copy Deletion
@@ -56,7 +56,7 @@ detection:
     condition: selection and flags
 tags:
     - attack.defense_evasion
-    - attack.t1562.001
+    - attack.t1685
 level: high
 ---
 title: Event Log Cleared Near A Service Install
@@ -73,7 +73,7 @@ detection:
     condition: install | near cleared
 tags:
     - attack.defense_evasion
-    - attack.t1070.001
+    - attack.t1685.005
 level: high
 ---
 title: Microsoft Defender Real-Time Protection Change
@@ -88,5 +88,5 @@ detection:
     condition: selection
 tags:
     - attack.defense_evasion
-    - attack.t1562.001
+    - attack.t1685
 level: high

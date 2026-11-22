@@ -7,6 +7,9 @@
 /drivergen
 /drivergen.exe
 /drivers.json
+/attackgen
+/attackgen.exe
+/enterprise-attack.json
 *.test
 
 # Rust build output

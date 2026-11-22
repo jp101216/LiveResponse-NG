@@ -16,7 +16,7 @@ modules, eBPF and the systemd journal behind the same interface.
 *The [report viewer](#report-viewer) on a lab VM seeded with harmless
 lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 
-> **Status:** v0.22.0. On **Linux**, a default run covers processes, network
+> **Status:** v0.23.0. On **Linux**, a default run covers processes, network
 > (TCP + UDP, with per-socket process attribution via `/proc`), loaded modules,
 > local accounts (with SSH keys' forced commands), persistence (cron, anacron, `at`,
 > systemd, ld.so.preload, rc.local, XDG autostart, shell startup files, PAM, sudo
@@ -27,7 +27,9 @@ lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 > journalctl, and the AI agents' configuration (MCP servers, hooks, instruction
 > files with hidden text) — judged by about 70 Linux-specific path, process,
 > network, kernel, log and command-line detections, with AI module A
-> (LLM-callout detection) running too; see [Platform support](#platform-support).
+> (LLM-callout detection) running too. As root, [watch mode](#watch-mode-beaconing)
+> records a window before the snapshot and scores it for beaconing, as on
+> Windows; see [Platform support](#platform-support).
 >
 > On **Windows**, a default run covers processes (with a process-tree,
 > command-line analysis, offline Authenticode verification that names the

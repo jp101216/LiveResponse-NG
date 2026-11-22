@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.23.0
+
 Watch mode on Linux. `-watch` now records on Linux as root, with the same
 scoring, rules, saved streams and replay as on Windows. No new
 dependencies; report schema remains 1.2.

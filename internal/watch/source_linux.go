@@ -29,10 +29,14 @@ const (
 	pollInterval = 200 * time.Millisecond
 	// packetWake bounds how long the capture loop sleeps in a read, so a
 	// finished socket scan is used (and the next one started) promptly.
-	packetWake      = 20 * time.Millisecond
-	packetRcvBuf    = 16 << 20
-	procConnRcvBuf  = 8 << 20
-	minScanGap      = 100 * time.Millisecond
+	packetWake     = 20 * time.Millisecond
+	packetRcvBuf   = 16 << 20
+	procConnRcvBuf = 8 << 20
+	// Full socket scans start as soon as one is needed, paid for from a
+	// budget that refills at 5% of wall time up to a quarter second: bursts
+	// are answered at once, and a long run stays within 5% of a core.
+	scanShare       = 0.05
+	scanBurst       = 250 * time.Millisecond
 	fastScanBudget  = 2048 // fd links a fast lookup may read
 	fastCandidates  = 32
 	recentWithin    = time.Minute
@@ -363,20 +367,18 @@ func capture(ctx context.Context, fd int, tr *tracker, own *linuxOwners) (map[st
 	oob := make([]byte, syscall.CmsgSpace(16)+syscall.CmsgSpace(4)+64)
 	results := make(chan scanResult, 1)
 	scanning := false
-	var lastScan time.Time
-	gap := minScanGap
+	budget := newScanBudget(scanShare, scanBurst, time.Now())
 	lastTick := time.Now()
 	var drops uint32
 	var scans int64
 	var scanMax time.Duration
 	install := func(r scanResult) {
 		scanning = false
-		lastScan = time.Now()
+		budget.spend(r.took, time.Now())
 		scans++
 		if r.took > scanMax {
 			scanMax = r.took
 		}
-		gap = max(minScanGap, 20*r.took) // full scans stay under ~5% of a core
 		own.sockets = r.sockets
 		tr.scanned(own.ownerOf, r.started)
 	}
@@ -417,7 +419,7 @@ func capture(ctx context.Context, fd int, tr *tracker, own *linuxOwners) (map[st
 			install(r)
 		default:
 		}
-		if own.wantScan && !scanning && now.Sub(lastScan) >= gap {
+		if own.wantScan && !scanning && budget.ready(now) {
 			own.wantScan, scanning = false, true
 			go func() { results <- fullScan() }()
 		}

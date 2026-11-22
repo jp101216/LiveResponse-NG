@@ -15,8 +15,8 @@ dependencies; report schema remains 1.2.
   keeps only outbound TCP SYNs, outbound UDP datagram headers and DNS queries
   and answers; sock_diag and `/proc/<pid>/fd` name the process behind each
   one. Recently started processes and recent socket owners are tried first,
-  then a scan of every process, at most every 100 ms and within about 5% of a
-  core. Nothing is loaded into the kernel but the socket filter. About 0.1%
+  then a scan of every process, started as soon as one is needed and paced
+  by a budget that keeps scanning within about 5% of a core. Nothing is loaded into the kernel but the socket filter. About 0.1%
   of a core idle.
 - **DNS on Linux.** Each lookup is paired with its answer, or times out
   after 5 seconds. A lookup that a local resolver (systemd-resolved,

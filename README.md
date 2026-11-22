@@ -1345,10 +1345,11 @@ datagrams, and the first 4 KB of DNS queries and answers; everything else
 stays in the kernel, and no payload beyond DNS is kept. sock_diag names the
 socket behind each packet's addresses, and `/proc/<pid>/fd` says which process
 holds it: processes started in the last minute and recent socket owners
-first, then a scan of every process, which runs at most every 100 ms and
-never more than about 5% of a core. Each lookup is paired with its answer. A
-lookup a local resolver (systemd-resolved, dnsmasq) forwards upstream counts
-once, for the program that asked. A lookup whose socket closed before its
+first, then a scan of every process, which starts as soon as one is needed
+and is paced by a budget that keeps scanning within about 5% of a core.
+Each lookup is paired with its answer. A lookup a local resolver
+(systemd-resolved, dnsmasq) forwards upstream counts once, for the program
+that asked. A lookup whose socket closed before its
 owner was found is credited to the program that next connects to one of its
 answers. A curl loop, a new process for every check-in, is attributed and
 scored as one program, which the Linux CI job checks on every run.

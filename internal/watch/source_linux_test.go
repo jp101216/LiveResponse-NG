@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -99,11 +100,22 @@ func TestLinuxSourceLive(t *testing.T) {
 	_, _ = d.Write(wireQuery(0x4242, "lrng-live-test.example.com", 16))
 	time.Sleep(hold)
 	d.Close()
-	truePath, err := exec.LookPath("true")
+	// A process start is matched by PID and by the image the kernel names:
+	// where sleep is a link to a multi-call binary, that binary.
+	sleepPath, err := exec.LookPath("sleep")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := exec.Command(truePath).Run(); err != nil {
+	sleepImage, err := filepath.EvalSymlinks(sleepPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(sleepPath, "0.2")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	childPID := uint32(child.Process.Pid)
+	if err := child.Wait(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -136,11 +148,14 @@ func TestLinuxSourceLive(t *testing.T) {
 				t.Errorf("lookup: %+v", e)
 			}
 			dns++
-		case e.Kind == ProcStart && strings.HasSuffix(e.Image, "/true"):
+		case e.Kind == ProcStart && e.PID == childPID:
+			if e.Image != sleepImage || e.PPID != self || !strings.Contains(e.CmdLine, "0.2") {
+				t.Errorf("process start: %+v, want image %s", e, sleepImage)
+			}
 			spawn++
 		}
 	}
-	if tcp != 3 || udp != 3 || dns != 1 || spawn < 1 {
+	if tcp != 3 || udp != 3 || dns != 1 || spawn != 1 {
 		t.Errorf("tcp %d udp %d dns %d spawn %d; meta %v errors %v", tcp, udp, dns, spawn, rec.Window.Meta, rec.Window.Errors)
 	}
 	t.Logf("meta: %v", rec.Window.Meta)

@@ -68,7 +68,13 @@ func main() {
 		caseName    = flag.String("case-name", "", "name for an offline case workspace")
 		compareCase = flag.Bool("compare", false, "compare two -case-report inputs in before/after order; requires -same-host")
 		sameHost    = flag.Bool("same-host", false, "attest that the two comparison reports describe the same machine (a hostname alone is insufficient)")
+		nav         navOptions
 	)
+	flag.StringVar(&nav.Out, "navigator", "", "also write an ATT&CK Navigator layer of the findings to this path, plus <path>.sha256")
+	flag.StringVar(&nav.From, "navigator-from", "", "offline: build a Navigator layer from a saved JSON report and exit (to -navigator, or stdout); works on any OS")
+	flag.StringVar(&nav.Min, "navigator-min", "", "lowest severity in the Navigator layer: info, notable, suspect or critical (default notable)")
+	flag.StringVar(&nav.Expect, "expect", "", "expected techniques (a Navigator layer, or any text/Markdown file of T#### IDs): makes the layer a coverage map")
+	flag.Float64Var(&nav.ExpectMin, "expect-min", 0, "with -expect, exit with status 3 when under this percentage of expected techniques is detected")
 	var caseReports []string
 	flag.Func("case-report", "import an existing LRNG JSON report into an offline case; repeat for each report (max 16)", func(path string) error {
 		if path == "" {
@@ -115,6 +121,11 @@ func main() {
 	flag.Visit(func(f *flag.Flag) { explicit = append(explicit, f.Name) })
 	usageErrorOn(validateUIOptions(*ui, explicit))
 	usageErrorOn(validateCaseOptions(cfg, caseReports, *caseName, *compareCase, *sameHost, explicit))
+	for _, name := range explicit {
+		nav.ExpectSet = nav.ExpectSet || name == "expect-min"
+	}
+	usageErrorOn(validateNavigatorOptions(nav, explicit))
+	usageErrorOn(checkLayerPath(nav.Out, cfg.Output))
 
 	if *evtxOffline != "" && (cfg.Adaptive || cfg.TraceOnly || cfg.CloudOnly) {
 		usageErrorOn(errors.New("-evtx cannot be combined with -adaptive, -trace-only or -cloud-only"))
@@ -164,6 +175,13 @@ func main() {
 			Warn: func(message string) { fmt.Fprintln(os.Stderr, output.TerminalSafe(message)) },
 		}))
 		return
+	case nav.From != "":
+		below, err := doNavigatorFrom(nav, cfg)
+		exitOn(err)
+		if below {
+			os.Exit(exitFindings)
+		}
+		return
 	case len(caseReports) > 0:
 		summary, err := doCase(ctx, cfg, caseReports, *caseName, *compareCase, *sameHost)
 		exitOn(err)
@@ -189,7 +207,9 @@ func main() {
 	case *evtxOffline != "" || cfg.TraceOnly || cfg.CloudOnly:
 		rep, err := doEvtxOffline(ctx, cfg, *evtxOffline)
 		exitOn(err)
-		if failOnMet(rep.Summary, cfg.FailOn) {
+		below, err := navigatorAfterRun(rep, nav, cfg)
+		exitOn(err)
+		if failOnMet(rep.Summary, cfg.FailOn) || below {
 			os.Exit(exitFindings)
 		}
 		return
@@ -197,7 +217,9 @@ func main() {
 
 	rep, err := doRun(ctx, cfg)
 	exitOn(err)
-	if failOnMet(rep.Summary, cfg.FailOn) {
+	below, err := navigatorAfterRun(rep, nav, cfg)
+	exitOn(err)
+	if failOnMet(rep.Summary, cfg.FailOn) || below {
 		os.Exit(exitFindings)
 	}
 }
@@ -295,9 +317,13 @@ Usage: lrng [flags]
   lrng -adaptive -adaptive-budget 15s -out host.json   bounded follow-up of suspect local executables
   lrng -case-report host1.json -case-report host2.json -case-name IR-42 -format html -out case.html
   lrng -case-report before.json -case-report after.json -compare -same-host -format html -out comparison.html
+  lrng -out host.json -navigator host-layer.json   also write an ATT&CK Navigator layer of the findings
+  lrng -navigator-from host.json -navigator layer.json   offline: a layer from a saved report (any OS)
+  lrng -navigator-from host.json -expect profile.md -expect-min 60 -navigator coverage.json
+                                       coverage of an emulation plan: detected, partial, missed, extra
   lrng -list                           collectors available on this OS
 
-Exit status: 0 done, 1 error, 2 bad usage, 3 -fail-on threshold met.
+Exit status: 0 done, 1 error, 2 bad usage, 3 -fail-on or -expect-min threshold met.
 Ctrl+C or SIGTERM stops collection and still writes the report; a second one
 aborts at once (exit status 130).
 

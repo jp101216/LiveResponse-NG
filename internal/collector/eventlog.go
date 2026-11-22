@@ -272,8 +272,22 @@ func sigmaMeta(rs *SigmaRuleset) map[string]any {
 		m["rules_failed"] = len(rs.Failed)
 		m["failed"] = boundedList(rs.Failed, sigmaMetaListMax)
 	}
+	// A finding carries one technique; rules tagged with several list them
+	// all here (rule -> techniques), bounded like the lists above.
+	techniques := map[string][]string{}
+	for _, r := range rs.rules {
+		if len(r.allTech) > 1 && len(techniques) < sigmaMetaTechniquesMax {
+			techniques["sigma."+r.id] = append([]string(nil), r.allTech...)
+		}
+	}
+	if len(techniques) > 0 {
+		m["techniques"] = techniques
+	}
 	return m
 }
+
+// sigmaMetaTechniquesMax bounds meta.sigma.techniques.
+const sigmaMetaTechniquesMax = 2000
 
 // boundedList returns at most max entries of list, ending with an
 // "… and N more" marker when it had to cut.
@@ -546,7 +560,7 @@ func eventFindings(ev winEvent) []Finding {
 	switch ev.EventID {
 	case 1102: // Security audit log cleared
 		out = append(out, Finding{
-			Rule: "defense.clear_event_logs", Severity: SevCritical, Technique: "T1070.001", Confidence: 85,
+			Rule: "defense.clear_event_logs", Severity: SevCritical, Technique: "T1685.005", Confidence: 85,
 			Detail: "the Security audit log was cleared" + whoBy(ev),
 		})
 	case 104: // an event log file was cleared
@@ -555,7 +569,7 @@ func eventFindings(ev winEvent) []Finding {
 			what = fmt.Sprintf("the %s log was cleared", logName)
 		}
 		out = append(out, Finding{
-			Rule: "defense.clear_event_logs", Severity: SevCritical, Technique: "T1070.001", Confidence: 80,
+			Rule: "defense.clear_event_logs", Severity: SevCritical, Technique: "T1685.005", Confidence: 80,
 			Detail: what + whoBy(ev),
 		})
 	case 7045: // a service was installed

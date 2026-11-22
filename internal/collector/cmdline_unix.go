@@ -56,10 +56,10 @@ func analyzeUnixCommandLine(source, image, cmd string) []Finding {
 	// shell history.
 	switch {
 	case wipesSystemLogs(lc):
-		add("defense.clear_linux_logs", SevSuspect, "T1070.002", 70,
+		add("defense.clear_linux_logs", SevSuspect, "T1685.006", 70,
 			"deletes, truncates or empties system logs under /var/log")
 	case journalVacuum(lc):
-		add("defense.clear_linux_logs", SevNotable, "T1070.002", 45,
+		add("defense.clear_linux_logs", SevNotable, "T1685.006", 45,
 			"vacuums the systemd journal (journalctl --vacuum-*), discarding older log history")
 	}
 	if clearsShellHistory(lc) {

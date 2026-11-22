@@ -282,7 +282,7 @@ impl Report {
             out.push(hit(
                 "defense.amsi_hwbp",
                 sev,
-                "T1562.001",
+                "T1685",
                 conf,
                 first.addr,
                 format!(
@@ -296,7 +296,7 @@ impl Report {
             out.push(hit(
                 "defense.etw_hwbp",
                 sev,
-                "T1562.006",
+                "T1685",
                 conf,
                 first.addr,
                 format!(

@@ -80,7 +80,8 @@ type sigmaRule struct {
 	title     string
 	level     Severity
 	conf      int
-	technique string
+	technique string   // the first ATT&CK technique tag: what the finding carries
+	allTech   []string // every ATT&CK technique tag, first one included (meta.sigma.techniques)
 	logFilter func(winEvent) bool
 	searches  map[string]*sigmaSearch
 	names     []string // the search identifiers, sorted
@@ -1146,6 +1147,7 @@ func compileSigmaRule(doc *yamlNode) (*sigmaRule, string) {
 	}
 
 	level, conf := sigmaLevel(doc.get("level").scalar())
+	techniques := sigmaTechniques(doc.get("tags"))
 	title := doc.get("title").scalar()
 	id := slug(title)
 	if id == "" {
@@ -1159,7 +1161,8 @@ func compileSigmaRule(doc *yamlNode) (*sigmaRule, string) {
 		title:     firstNonEmpty(title, doc.get("id").scalar(), "(untitled)"),
 		level:     level,
 		conf:      conf,
-		technique: sigmaTechnique(doc.get("tags")),
+		technique: firstTechnique(techniques),
+		allTech:   techniques,
 		logFilter: compileLogFilter(doc.get("logsource")),
 		searches:  searches,
 		names:     sortedSearchNames(searches),
@@ -1751,17 +1754,38 @@ func sigmaLevel(s string) (Severity, int) {
 	return SevNotable, 40
 }
 
-func sigmaTechnique(tags *yamlNode) string {
+// sigmaTechniques returns a rule's ATT&CK technique tags (attack.t1059.001
+// -> T1059.001) in tag order, without duplicates. A finding carries the
+// first; the rest are listed in meta.sigma.techniques for exports that map a
+// finding to every technique its rule names.
+func sigmaTechniques(tags *yamlNode) []string {
 	if tags == nil || tags.Kind != yamlSeq {
-		return ""
+		return nil
 	}
+	var out []string
+	seen := map[string]bool{}
 	for _, t := range tags.Seq {
 		s := strings.ToLower(t.scalar())
-		if strings.HasPrefix(s, "attack.t") {
-			return strings.ToUpper(strings.TrimPrefix(s, "attack."))
+		if !strings.HasPrefix(s, "attack.t") {
+			continue
 		}
+		id := strings.ToUpper(strings.TrimPrefix(s, "attack."))
+		if !sigmaTechRe.MatchString(id) || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
 	}
-	return ""
+	return out
+}
+
+var sigmaTechRe = regexp.MustCompile(`^T\d{4}(\.\d{3})?$`)
+
+func firstTechnique(list []string) string {
+	if len(list) == 0 {
+		return ""
+	}
+	return list[0]
 }
 
 func slug(s string) string {

@@ -52,7 +52,7 @@ LXARM := $(DIST)/linux-arm64
         linux linux-arm64 \
         sidecar-windows sidecar-windows-x86 sidecar-linux sidecar-linux-arm64 \
         release release-windows release-linux viewer-dist checksums \
-        intelgen intel-data drivergen driver-data \
+        intelgen intel-data drivergen driver-data attackgen attack-data \
         test test-race wine-test vet check-windows-rs fmt-check lint audit check clean
 
 help: ## Show this help
@@ -154,6 +154,23 @@ driver-data: drivergen ## Regenerate the vulnerable-driver dataset (expects LOLD
 	./drivergen$(GOEXE) -v -in drivers.json -source "LOLDrivers drivers.json, fetched $$(date -u +%Y-%m-%d)" \
 		-out internal/vulndrivers/data/loldrivers.tsv
 
+## ---- ATT&CK technique table -----------------------------------------------
+
+attackgen: ## Build the ATT&CK table generator -> ./attackgen
+	$(GOBUILD) -o attackgen$(GOEXE) ./cmd/attackgen
+
+# Regenerate the bundled ATT&CK table (internal/attack/data/enterprise.tsv)
+# that the Navigator export maps findings with, and the viewer's tactic strip.
+# Fetch the source first (on a networked workstation):
+#   curl -LO https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json
+# then `make attack-data`, review the diff (go test ./internal/attack fails if
+# a rule names a technique the new release revoked), commit, and rebuild lrng.
+attack-data: attackgen ## Regenerate the ATT&CK table and the viewer's tactics (expects enterprise-attack.json in CWD)
+	./attackgen$(GOEXE) -v -in enterprise-attack.json \
+		-source "mitre-attack/attack-stix-data enterprise-attack.json, fetched $$(date -u +%Y-%m-%d)" \
+		-out internal/attack/data/enterprise.tsv -viewer viewer/lrng-viewer.html
+	go test ./viewer -update -run TestContentSecurityPolicy
+
 ## ---- Release ----------------------------------------------------------------
 
 WINDOWS_RELEASE := windows windows-x86 windows-arm64 sidecar-windows sidecar-windows-x86
@@ -219,5 +236,5 @@ audit: ## Known-vuln scan: govulncheck (Go) + cargo-audit (Rust, must be install
 check: fmt-check lint check-windows-rs test ## Everything CI should run
 
 clean: ## Remove build outputs
-	rm -rf $(DIST) $(BINARY) $(BINARY).exe $(SIDECAR) $(SIDECAR).exe intelgen intelgen.exe drivergen drivergen.exe
+	rm -rf $(DIST) $(BINARY) $(BINARY).exe $(SIDECAR) $(SIDECAR).exe intelgen intelgen.exe drivergen drivergen.exe attackgen attackgen.exe
 	cargo clean --manifest-path $(SIDECAR_MANIFEST)

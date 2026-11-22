@@ -28,7 +28,7 @@ func TestJudgeExclusion(t *testing.T) {
 	}
 	for _, c := range cases {
 		f := judgeExclusion(c.e)
-		if f.Rule != "defense.defender_exclusion" || f.Severity != c.sev || f.Technique != "T1562.001" || !strings.Contains(f.Detail, c.want) {
+		if f.Rule != "defense.defender_exclusion" || f.Severity != c.sev || f.Technique != "T1685" || !strings.Contains(f.Detail, c.want) {
 			t.Errorf("%+v: got [%s] %s", c.e, f.Severity, f.Detail)
 		}
 	}

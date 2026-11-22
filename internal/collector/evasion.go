@@ -102,7 +102,7 @@ func runtimeEnvFindings(where string, env map[string]string, resolve func(clsid 
 	var out []Finding
 	for _, name := range []string{"COMPLUS_ETWENABLED", "DOTNET_ETWENABLED"} {
 		if v, ok := env[name]; ok && strings.TrimSpace(v) == "0" {
-			out = append(out, Finding{Rule: "defense.dotnet_etw_disabled", Severity: SevSuspect, Technique: "T1562.006", Confidence: 75,
+			out = append(out, Finding{Rule: "defense.dotnet_etw_disabled", Severity: SevSuspect, Technique: "T1685", Confidence: 75,
 				Detail: fmt.Sprintf("%s sets %s=0: the .NET runtime stops writing its ETW events, so EDR no longer sees which "+
 					"assemblies a process loads. It is set before running offensive .NET tools in memory", where, name)})
 			break
@@ -152,7 +152,7 @@ func judgeAMSIProvider(clsid, dll string) (Finding, bool) {
 		if baseName(path) == "mpoav.dll" && strings.Contains(path, `\windows defender`) {
 			return Finding{}, false
 		}
-		return Finding{Rule: "defense.amsi_provider_hijacked", Severity: SevSuspect, Technique: "T1562.001", Confidence: 75,
+		return Finding{Rule: "defense.amsi_provider_hijacked", Severity: SevSuspect, Technique: "T1685", Confidence: 75,
 			Detail: fmt.Sprintf("Microsoft Defender's AMSI provider {%s} is registered to %s rather than Defender's MpOav.dll: the "+
 				"scripts AMSI hands to Defender go to that DLL instead", id, firstNonEmpty(dll, "no DLL at all"))}, true
 	}
@@ -256,7 +256,7 @@ func psEngineFindings(ev winEvent) []Finding {
 		return nil
 	}
 	host := firstNonEmpty(psEngineField(text, "HostApplication"), psEngineField(text, "HostName"), "unrecorded")
-	return []Finding{{Rule: "defense.powershell_downgrade", Severity: SevSuspect, Technique: "T1562.010", Confidence: 65,
+	return []Finding{{Rule: "defense.powershell_downgrade", Severity: SevSuspect, Technique: "T1689", Confidence: 65,
 		Detail: fmt.Sprintf("PowerShell's 2.0 engine started%s (host: %s). Version 2 has no script-block logging, no AMSI and no "+
 			"Constrained Language enforcement, which is why intruders ask for it (powershell -version 2); it is native only on "+
 			"Windows 7 without later Windows Management Framework updates", eventTime(ev), excerpt(host, 200))}}

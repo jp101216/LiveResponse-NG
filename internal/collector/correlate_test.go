@@ -159,7 +159,7 @@ func TestCorrelateLogClearRange(t *testing.T) {
 		Records: []Record{{
 			Fields: map[string]any{"event_id": 1102, "channel": "Security"},
 			Findings: []Finding{{
-				Rule: "defense.clear_event_logs", Severity: SevCritical, Technique: "T1070.001",
+				Rule: "defense.clear_event_logs", Severity: SevCritical, Technique: "T1685.005",
 				Confidence: 85, Detail: "the Security audit log was cleared by evil",
 			}},
 		}},

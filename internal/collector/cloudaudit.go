@@ -90,7 +90,7 @@ func ParseCloudAuditFiles(ctx context.Context, paths []string, opts CloudAuditOp
 			if f["status"] == "success" {
 				switch f["category"] {
 				case "logging_disabled":
-					fs = append(fs, Finding{"llm.logging_disabled", SevSuspect, "T1562.008", 65, "a supplied audit event reports successful deletion of model invocation logging configuration; verify authorization and remaining logging coverage"})
+					fs = append(fs, Finding{"llm.logging_disabled", SevSuspect, "T1685.002", 65, "a supplied audit event reports successful deletion of model invocation logging configuration; verify authorization and remaining logging coverage"})
 				case "enable":
 					fs = append(fs, Finding{"llm.service_or_deployment_enabled", SevNotable, "T1496", 35, "a supplied audit event reports model-service enablement, access configuration or deployment creation/update; authorized provisioning has the same shape"})
 				}

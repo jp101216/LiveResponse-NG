@@ -172,7 +172,7 @@ func collectModules(ctx context.Context, opts RunOptions) (Result, error) {
 			findings = append(findings, Finding{
 				Rule:       "modules.unusual_path",
 				Severity:   set.sev,
-				Technique:  "T1574.002",
+				Technique:  "T1574.001",
 				Confidence: set.conf,
 				Detail: fmt.Sprintf("%s (pid %d) has %d module(s) loaded from %s: %s",
 					p.name, p.pid, len(set.mods), set.mods[0].why, strings.Join(paths, ", ")),

@@ -268,7 +268,7 @@ func (ci codeIntegrity) findings() []Finding {
 	var out []Finding
 	if ci.Blocklist != nil && *ci.Blocklist == 0 {
 		out = append(out, Finding{
-			Rule: "defense.driver_blocklist_disabled", Severity: SevSuspect, Technique: "T1562.001", Confidence: 60,
+			Rule: "defense.driver_blocklist_disabled", Severity: SevSuspect, Technique: "T1685", Confidence: 60,
 			Detail: "Microsoft's vulnerable driver blocklist is switched off (" + blocklistKey + ` VulnerableDriverBlocklistEnable = 0): ` +
 				"drivers it would block can load. Attackers switch it off before bringing their own vulnerable driver",
 		})

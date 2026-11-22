@@ -1,0 +1,257 @@
+{
+  "name": "lrng findings: lab-dc01",
+  "versions": {
+    "attack": "20.1",
+    "navigator": "5.3.2",
+    "layer": "4.5"
+  },
+  "domain": "enterprise-attack",
+  "description": "Findings at notable or above from liveresponse-ng 0.21.0 on lab-dc01, collected 2026-11-22T03:04:05Z. Score is the highest severity that hit the technique: 1 notable, 2 suspect, 3 critical.",
+  "sorting": 3,
+  "layout": {
+    "layout": "side",
+    "showID": true,
+    "showName": true,
+    "expandedSubtechniques": "annotated"
+  },
+  "hideDisabled": false,
+  "techniques": [
+    {
+      "techniqueID": "T1003.003",
+      "score": 3,
+      "comment": "cred.ntds_copy (×2, worst critical)",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "findings",
+          "value": "2"
+        },
+        {
+          "name": "highest severity",
+          "value": "critical"
+        },
+        {
+          "name": "highest confidence",
+          "value": "90"
+        },
+        {
+          "name": "rules",
+          "value": "1"
+        },
+        {
+          "name": "collectors",
+          "value": "memory"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1043",
+      "score": 1,
+      "comment": "misc.retired (notable). Deprecated in ATT&CK v20.1",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "findings",
+          "value": "1"
+        },
+        {
+          "name": "highest severity",
+          "value": "notable"
+        },
+        {
+          "name": "highest confidence",
+          "value": "30"
+        },
+        {
+          "name": "rules",
+          "value": "1"
+        },
+        {
+          "name": "collectors",
+          "value": "memory"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1059.001",
+      "score": 2,
+      "comment": "sigma.download_cradle (suspect)",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "findings",
+          "value": "1"
+        },
+        {
+          "name": "highest severity",
+          "value": "suspect"
+        },
+        {
+          "name": "highest confidence",
+          "value": "65"
+        },
+        {
+          "name": "rules",
+          "value": "1"
+        },
+        {
+          "name": "collectors",
+          "value": "eventlog"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1071.001",
+      "score": 1,
+      "comment": "network.beacon (notable)",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "findings",
+          "value": "1"
+        },
+        {
+          "name": "highest severity",
+          "value": "notable"
+        },
+        {
+          "name": "highest confidence",
+          "value": "40"
+        },
+        {
+          "name": "rules",
+          "value": "1"
+        },
+        {
+          "name": "collectors",
+          "value": "memory"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1105",
+      "score": 2,
+      "comment": "sigma.download_cradle (suspect)",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "findings",
+          "value": "1"
+        },
+        {
+          "name": "highest severity",
+          "value": "suspect"
+        },
+        {
+          "name": "highest confidence",
+          "value": "65"
+        },
+        {
+          "name": "rules",
+          "value": "1"
+        },
+        {
+          "name": "collectors",
+          "value": "eventlog"
+        }
+      ]
+    },
+    {
+      "techniqueID": "T1685",
+      "score": 3,
+      "comment": "defense.amsi_patched (critical), defense.defender_exclusion (suspect). Mapped from T1562.001, revoked in ATT&CK",
+      "enabled": true,
+      "metadata": [
+        {
+          "name": "findings",
+          "value": "2"
+        },
+        {
+          "name": "highest severity",
+          "value": "critical"
+        },
+        {
+          "name": "highest confidence",
+          "value": "95"
+        },
+        {
+          "name": "rules",
+          "value": "2"
+        },
+        {
+          "name": "collectors",
+          "value": "defenses"
+        }
+      ]
+    }
+  ],
+  "gradient": {
+    "colors": [
+      "#fde68a",
+      "#f59e0b",
+      "#b91c1c"
+    ],
+    "minValue": 1,
+    "maxValue": 3
+  },
+  "legendItems": [
+    {
+      "label": "Notable",
+      "color": "#fde68a"
+    },
+    {
+      "label": "Suspect",
+      "color": "#f59e0b"
+    },
+    {
+      "label": "Critical",
+      "color": "#b91c1c"
+    }
+  ],
+  "metadata": [
+    {
+      "name": "host",
+      "value": "lab-dc01"
+    },
+    {
+      "name": "run_id",
+      "value": "run-1"
+    },
+    {
+      "name": "collected_at",
+      "value": "2026-11-22T03:04:05Z"
+    },
+    {
+      "name": "tool",
+      "value": "liveresponse-ng 0.21.0"
+    },
+    {
+      "name": "attack_mapping",
+      "value": "Enterprise ATT&CK v20.1 (lrng's bundled table)"
+    },
+    {
+      "name": "min_severity",
+      "value": "notable"
+    },
+    {
+      "name": "report_sha256",
+      "value": "abababababababababababababababababababababababababababababababab"
+    },
+    {
+      "name": "qualifying_findings",
+      "value": "9"
+    },
+    {
+      "name": "findings_without_technique",
+      "value": "1"
+    },
+    {
+      "name": "remapped",
+      "value": "T1562.001 -> T1685 (×1)"
+    },
+    {
+      "name": "unknown_techniques",
+      "value": "T9999"
+    }
+  ]
+}

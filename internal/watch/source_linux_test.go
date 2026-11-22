@@ -73,6 +73,18 @@ func TestLinuxSourceLive(t *testing.T) {
 
 	const hold = 30 * time.Millisecond
 	tcpTo := netip.MustParseAddrPort(ln.Addr().String())
+	// A connection closed at once leaves a full scan running as the next ones
+	// open, as background traffic does on a busy host: they must still be
+	// named, so the next scan can't wait out a fixed gap.
+	decoy, err := net.Listen("tcp", netip.AddrPortFrom(host, 0).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer decoy.Close()
+	if c, err := net.Dial("tcp", decoy.Addr().String()); err == nil {
+		c.Close()
+	}
+	time.Sleep(2 * time.Millisecond)
 	// Each socket stays open a little while, as one crossing a real network
 	// would: the source names a socket's process while the socket is open.
 	for i := 0; i < 3; i++ {

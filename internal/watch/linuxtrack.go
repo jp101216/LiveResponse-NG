@@ -439,6 +439,39 @@ func (t *tracker) flush(now time.Time) {
 	}
 }
 
+// scanBudget paces full socket scans: one may start whenever the budget is
+// above zero, each spends its own running time, and the budget refills at
+// share of wall time, up to burst.
+type scanBudget struct {
+	share  float64
+	burst  time.Duration
+	tokens time.Duration
+	at     time.Time
+}
+
+func newScanBudget(share float64, burst time.Duration, now time.Time) *scanBudget {
+	return &scanBudget{share: share, burst: burst, tokens: burst, at: now}
+}
+
+func (b *scanBudget) refill(now time.Time) {
+	if d := now.Sub(b.at); d > 0 {
+		b.tokens = min(b.burst, b.tokens+time.Duration(float64(d)*b.share))
+		b.at = now
+	}
+}
+
+// ready says whether a scan may start now.
+func (b *scanBudget) ready(now time.Time) bool {
+	b.refill(now)
+	return b.tokens > 0
+}
+
+// spend charges a finished scan's running time.
+func (b *scanBudget) spend(took time.Duration, now time.Time) {
+	b.refill(now)
+	b.tokens -= took
+}
+
 // stats are the tracker's counters, for the window's meta.
 func (t *tracker) stats() map[string]int64 {
 	out := make(map[string]int64, len(t.n))

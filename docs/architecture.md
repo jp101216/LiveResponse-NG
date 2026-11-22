@@ -787,8 +787,12 @@ socket's inode is matched to a process through `/proc/<pid>/fd`: first the
 holder already known for that inode (rechecked by its fd link), then the fds
 of processes started in the last minute and of recent socket owners, within
 a budget of links. A miss waits for a scan of every process, run on another
-goroutine at most every max(100 ms, 20 × the last scan's time). A socket
-gone before that scan is unattributed (PID 0). Owners found are cached by
+goroutine as soon as one is needed. Scans are paced by a budget, not a fixed
+gap: each spends its running time, and the budget refills at 5% of wall time
+up to a quarter second, so a burst of new sockets is answered at once and a
+long run stays within 5% of a core. (A fixed gap after each scan let sockets
+opened just after an unrelated scan close before the next.) A socket gone
+before its scan is unattributed (PID 0). Owners found are cached by
 address pair for 30 seconds, so a busy flow costs one map lookup per packet.
 The tracker also pairs DNS queries with answers by client, server and ID,
 drops a resolver's upstream copy of a lookup a program asked it seconds

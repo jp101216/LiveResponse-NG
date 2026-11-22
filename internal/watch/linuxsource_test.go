@@ -682,3 +682,50 @@ func TestTrackerBeaconFromShortLivedProcesses(t *testing.T) {
 		t.Errorf("no beacon: %+v", res.Records)
 	}
 }
+
+func TestScanBudget(t *testing.T) {
+	t0 := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	b := newScanBudget(0.05, 250*time.Millisecond, t0)
+	// A burst: back-to-back 50 ms scans until the quarter second is spent.
+	now, n := t0, 0
+	for b.ready(now) && n < 100 {
+		b.spend(50*time.Millisecond, now)
+		n++
+	}
+	if n != 5 {
+		t.Errorf("a burst ran %d scans, want 5", n)
+	}
+	// Spent, it waits for a refill at 5% of wall time (50 ms of scanning a
+	// second); any refill lets the next scan start, which then repays it.
+	if b.ready(now) {
+		t.Error("ready with nothing left")
+	}
+	if !b.ready(now.Add(500 * time.Millisecond)) {
+		t.Error("not ready after half a second")
+	}
+	b.spend(50*time.Millisecond, now.Add(500*time.Millisecond))
+	if b.ready(now.Add(900 * time.Millisecond)) {
+		t.Error("an overdrawn budget let a scan start before repaying")
+	}
+	if !b.ready(now.Add(1100 * time.Millisecond)) {
+		t.Error("not ready once repaid")
+	}
+	// Under constant demand, scanning stays near 5% of the time.
+	b = newScanBudget(0.05, 250*time.Millisecond, t0)
+	var spent time.Duration
+	for now = t0; now.Before(t0.Add(time.Minute)); now = now.Add(10 * time.Millisecond) {
+		if b.ready(now) {
+			b.spend(20*time.Millisecond, now)
+			spent += 20 * time.Millisecond
+		}
+	}
+	if share := spent.Seconds() / 60; share > 0.06 || share < 0.04 {
+		t.Errorf("scanned %.1f%% of a minute", 100*share)
+	}
+	// The budget never banks more than its burst.
+	b = newScanBudget(0.05, 250*time.Millisecond, t0)
+	b.ready(t0.Add(time.Hour))
+	if b.tokens != 250*time.Millisecond {
+		t.Errorf("banked %v", b.tokens)
+	}
+}

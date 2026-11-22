@@ -42,6 +42,16 @@ report schema remains 1.2 (a new `watch` result).
   held events at most, with what was dropped counted in the result; the
   recording's CPU time and heap are recorded too.
 
+### Changed
+
+- **ATT&CK v20's prompt-injection technique.** `prompt.injection` (the
+  sidecar's file and memory scan) moves from T1059 to T1698, Indirect Prompt
+  Injection, and so do `ai.hidden_instructions`' critical cases (instructions
+  smuggled to an agent in Unicode tag characters or variation selectors);
+  its bidirectional and zero-width cases stay T1027. No rule maps to T1699
+  (direct injection, typed into a model's interface) or T1700 (AI-enabled
+  exfiltration) yet.
+
 ### Notes
 
 - Linux watch mode follows in 0.23.0; on Linux `-watch` says so and exits.

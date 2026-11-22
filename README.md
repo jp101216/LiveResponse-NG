@@ -16,7 +16,7 @@ modules, eBPF and the systemd journal behind the same interface.
 *The [report viewer](#report-viewer) on a lab VM seeded with harmless
 lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 
-> **Status:** v0.20.0. On **Linux**, a default run covers processes, network
+> **Status:** v0.21.0. On **Linux**, a default run covers processes, network
 > (TCP + UDP, with per-socket process attribution via `/proc`), loaded modules,
 > local accounts (with SSH keys' forced commands), persistence (cron, anacron, `at`,
 > systemd, ld.so.preload, rc.local, XDG autostart, shell startup files, PAM, sudo
@@ -55,7 +55,9 @@ lookalikes of common Linux attacker techniques (see [Demo](#demo)).*
 > logs up against the live state. That's about 250 named detections, each mapped to MITRE ATT&CK, plus
 > your own Sigma rules (or the bundled pack), an optional super-timeline,
 > indicator (IOC) export and offline endpoint-intelligence attribution
-> (ASN / country / cloud / CDN / hosting / Tor, air-gapped), AI
+> (ASN / country / cloud / CDN / hosting / Tor, air-gapped), an
+> [ATT&CK Navigator layer](#attck-navigator-layers) of the findings (or a
+> coverage map against the techniques a threat profile expects), AI
 > module A (LLM-callout detection), the Rust sidecar with AI module B
 > (embedded-prompt-artifact scanner), and opt-in live process-memory scanning
 > with YARA, memory-structure heuristics, an image-integrity check that finds

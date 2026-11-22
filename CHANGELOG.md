@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.21.0
+
 ATT&CK Navigator export: a layer of the run's findings, written beside the
 report or built offline from a saved one, and a coverage map against the
 techniques an emulation or threat profile expects. Rules now use ATT&CK

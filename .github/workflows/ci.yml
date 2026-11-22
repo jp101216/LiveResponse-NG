@@ -298,6 +298,38 @@ jobs:
                             'defense.stack_jmp_gadget', 'defense.stack_truncated', 'defense.stack_fake_thread_start') {
             if ($r32.summary.by_rule.$rule) { throw "false positive: $rule on a clean 32-bit PowerShell process" }
           }
+      - name: watch mode catches a scripted beacon (live ETW)
+        shell: pwsh
+        run: |
+          # A PowerShell loop connects to a listener on this runner's own LAN address
+          # every 10 seconds while lrng watches for 2 minutes: about 12 check-ins, which
+          # must score as network.beacon from powershell.exe to that address. The saved
+          # stream must rescore to the same finding offline, and the session must be gone.
+          trap { Write-Output ("::error::" + ("$_" -replace '%','%25' -replace "`r",'%0D' -replace "`n",'%0A')); exit 1 }
+          $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress
+          $port = 47123
+          $listener = Start-Process -PassThru -WindowStyle Hidden powershell.exe -ArgumentList '-NoProfile','-Command',
+            "`$l = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Any, $port); `$l.Start(); while (`$true) { `$c = `$l.AcceptTcpClient(); `$c.Close() }"
+          $beacon = Start-Process -PassThru -WindowStyle Hidden powershell.exe -ArgumentList '-NoProfile','-Command',
+            "Start-Sleep 3; while (`$true) { try { `$c = [Net.Sockets.TcpClient]::new(); `$c.Connect('$ip', $port); `$c.Close() } catch {}; Start-Sleep 10 }"
+          try {
+            ./lrng.exe -watch 2m -watch-only -watch-raw beacon.jsonl -out watch.json -quiet
+          } finally {
+            Stop-Process -Id $beacon.Id, $listener.Id -ErrorAction SilentlyContinue
+          }
+          $r = Get-Content watch.json | ConvertFrom-Json
+          $w = $r.results | Where-Object { $_.collector -eq 'watch' }
+          $m = $w.meta
+          Write-Output ("::notice::watch meta: events " + ($m.events | ConvertTo-Json -Compress) + ", cpu " + $m.cpu_seconds + "s (" + $m.cpu_percent_of_one_core + "% of a core), heap " + $m.heap_in_use_bytes + " bytes, ETW lost " + $m.etw_events_lost + ", decode errors " + ($m.decode_errors | ConvertTo-Json -Compress))
+          if ($w.errors) { Write-Output ("::notice::watch errors: " + ($w.errors -join ' | ')) }
+          $hit = @($w.records | Where-Object { $_.findings.rule -contains 'network.beacon' -and $_.fields.remote_addr -eq $ip -and $_.fields.remote_port -eq $port })
+          $hit | ForEach-Object { Write-Output ("::notice::" + ($_.findings | Where-Object rule -eq 'network.beacon').detail) }
+          if ($hit.Count -ne 1) { throw "no network.beacon for the scripted beacon to ${ip}:$port" }
+          if ($hit[0].fields.image_path -notlike '*\powershell.exe') { throw ("beacon attributed to " + $hit[0].fields.image_path) }
+          ./lrng.exe -watch-from beacon.jsonl -out replay.json -quiet
+          $rr = (Get-Content replay.json | ConvertFrom-Json).results | Where-Object { $_.collector -eq 'watch' }
+          if (-not @($rr.records | Where-Object { $_.findings.rule -contains 'network.beacon' -and $_.fields.remote_port -eq $port }).Count) { throw "the saved stream didn't rescore to the beacon" }
+          if (logman query -ets | Select-String 'lrng-watch-') { throw "an lrng-watch ETW session outlived the run" }
 
   linux-release:
     name: Linux release set (static musl sidecars) + live integration

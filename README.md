@@ -1295,6 +1295,131 @@ reproduced and distributed with its permission (see
 
 ---
 
+## Watch mode (beaconing)
+
+A snapshot shows what is connected at one instant; a beacon that sleeps
+between check-ins is usually not. `-watch <duration>` first records the host
+for that long — which process connects where and when, its DNS lookups, the
+processes that start — then runs the normal snapshot, and scores the window
+for check-ins too regular to be a person. Whatever watch mode flags is
+enriched by the same run's hashes, signatures, memory scan and intel.
+
+```powershell
+.\lrng.exe -watch 15m -out E:\case42\HOST01.json        # watch, then the snapshot
+.\lrng.exe -watch 15m -watch-only -watch-raw E:\case42\HOST01-events.jsonl -out E:\case42\HOST01-watch.json
+lrng -watch-from HOST01-events.jsonl -out rescored.json    # offline: rescore a saved stream (any OS)
+```
+
+`15m` is a good starting point: seven check-ins from a 2-minute beacon. The
+window is passive: lrng does nothing else while it records, so its own work
+never shows up as traffic, and its own process is filtered out at the source.
+
+**Sources (Windows, elevated).** A real-time ETW session,
+`lrng-watch-<run_id>`, with three providers: Microsoft-Windows-Kernel-Process
+(process starts and stops), Microsoft-Windows-Kernel-Network (TCP connects,
+accepts, sends and receives, UDP datagrams, IPv4 and IPv6, with the owning
+PID) and Microsoft-Windows-DNS-Client (event 3008: each completed lookup with
+its answers, which name the addresses flows go to). Event fields are decoded
+from the schema TDH reports for each event version, not fixed offsets. ETW
+events carry no payload: watch mode records addresses, ports, sizes and names,
+never content. The session is stopped on exit, Ctrl+C and timeout, and
+sessions left by a crashed run are stopped before a new one starts (Windows
+allows 64). Linux follows in 0.23.0; on Linux, `-watch` stops with that
+message, and `-watch-from` works everywhere.
+
+**What a flow is.** One program (image path plus the snapshot's SHA-256, so a
+restarted program merges) talking to one destination: the registrable domain
+when a lookup in the window answered for the address, otherwise the address
+and port. Connection starts less than a second apart are one check-in; for
+UDP, a datagram after two seconds of quiet starts a new one. Loopback,
+link-local and multicast destinations are ignored.
+
+**The score.** For a flow with at least 6 check-ins (`-watch-min-events`)
+spanning at least three of its intervals, from the intervals' median *m*,
+quartiles *Q1* and *Q3*, and median absolute deviation *MAD*:
+
+| Part | Formula | Weight |
+|---|---|---|
+| Skew | 1 − \|(Q1 + Q3 − 2m) / (Q3 − Q1)\| | 0.35 |
+| Dispersion | max(0, 1 − (MAD / m) / 0.5) | 0.35 |
+| Coverage | min(1, n·m / window) | 0.20 |
+| Size | max(0, 1 − MAD(bytes) / median(bytes)) | 0.10 |
+
+Without byte counts for most check-ins the first three weights are scaled to
+sum to 1. Skew is RITA's Bowley measure: uniform jitter is symmetric, so it
+stays near 1 under heavy jitter while dispersion falls (about 0.8 at ±20%,
+0.5 at ±50%). As in RITA, skew counts as perfect when the median equals a
+quartile, and lrng also treats it so when the quartiles are within a tenth of
+the median of each other, where a second either way is noise. The weights
+were checked by simulation (300 trials per pattern, 15-minute window, no
+sizes; `internal/watch/score_test.go` keeps it as a test):
+
+| Traffic | Median score | Scored 0.65+ |
+|---|---|---|
+| 60 s beacon, ±20% jitter | 0.84 | 98% |
+| 60 s beacon, ±50% jitter | 0.73 | 83% |
+| Random arrivals (Poisson, 60 s mean) | 0.45 | 2% |
+| Lognormal gaps (agent-like, 60 s median) | 0.42 | 5% |
+| Bursty human use | — | 1% |
+
+Each scored flow is a record of the `watch` result with its score and parts,
+check-ins, interval statistics, destination, addresses and byte counts, so a
+finding's score can be checked by hand.
+
+| Rule | Technique | Fires when |
+|---|---|---|
+| `network.beacon` | T1071.001 (web, QUIC), T1071.004 (DNS), else T1071 | a flow scores 0.65 or more |
+| `network.beacon_rotating` | T1008 | a program's check-ins across two or more destinations or transports score 0.65 or more combined, though no single flow does |
+| `dns.periodic_query` | T1071.004 | a program's lookups of one domain score 0.65 or more (not reported again when they belong to a beacon already found) |
+| `dns.tunnel_rate` | T1071.004 | 30 or more unique names a minute under one domain, with mean label entropy of 3.5 bits or more, or mostly TXT or NULL queries |
+| `process.periodic_spawn` | T1053 | the same command line starts 4 or more times at regular intervals |
+
+**Severity.** A score of 0.80 or more is *suspect*, and 0.65 to 0.80 is
+*notable*. One corroborating signal raises it one step (0.80 and up with one
+is *critical*): an unsigned or untrusted image, an image in an unusual folder,
+a memory finding on the same process (`memory.stack_unbacked`, a decoded
+beacon configuration), a QUIC, DoH or direct-DNS finding on it, or with
+`-intel` a destination classified as hosting, Tor or an anonymizer. A reused
+PID running something else doesn't lend its findings.
+
+**Expected noise.** Windows Update, Defender, telemetry, time sync, browsers
+and their updaters, OneDrive, Teams, Office and Slack check in by design. A
+built-in list, each entry pinned to the folder that program installs to (a
+same-named copy elsewhere isn't excused), keeps them from becoming findings;
+`-allow-beacon name.exe,...` adds programs on any path. A snapshot that finds
+the image unsigned or untrusted, or a memory finding on it, overrides the
+list. Excused flows are still recorded, with the reason.
+
+**Safety limits.** Each flow keeps its last 512 check-ins; at most 20,000
+flows and 2 million check-ins, lookups and process starts are held, and past
+that the least active flows are dropped and counted in the result's
+`meta.dropped`. ETW's own losses go in `meta.etw_events_lost`. Event callbacks
+only parse and append; scoring runs once the window closes. The result's meta
+records the recording's CPU time and heap, which the Windows CI job reports
+on every run.
+
+**Saved streams.** `-watch-raw` writes the normalized events as they are
+recorded, as JSON Lines (a header, one line per event, and an end line when
+the window closed cleanly), with a `.sha256`. `-watch-from` rescores one on
+any OS, through the same code as a live run, with its own `-watch-min-events`
+and `-allow-beacon`, and records the stream's SHA-256 in the result. It
+accepts only output, Navigator, `-iocs`, `-intel`, `-timeline` and `-graph`
+flags beside its own.
+
+**Known blind spots.**
+
+- A flow is scored only with 6 check-ins (`-watch-min-events`) spanning at
+  least three of its intervals, so a 1-hour beacon needs a watch of about 6
+  hours.
+- Jitter above about 50% weakens dispersion, and timing that isn't uniform
+  defeats both interval measures. AI agent (MCP) traffic, with lognormal gaps,
+  scores low, so periodic scoring won't misfire on agents, but it won't catch
+  malware that mimics agent timing either; that stays with the AI modules.
+- A reused connection (HTTP keep-alive, a websocket) is one check-in. Timing
+  sends within a connection is a later version's work.
+
+---
+
 ## Endpoint intelligence (offline)
 
 `-intel` adds a synthetic `intel` result that puts a name to the addresses the
@@ -1739,6 +1864,7 @@ lrng -evtx Security.evtx -fail-on critical       # offline triage of one exporte
 .\lrng.exe -iocs -out E:\case42\HOST01.json                # + a deduplicated indicator (IOC) set
 .\lrng.exe -out E:\case42\HOST01.json -navigator E:\case42\HOST01-layer.json   # + an ATT&CK Navigator layer
 lrng -navigator-from HOST01.json -expect profile.md -expect-min 60 -navigator coverage.json   # offline coverage map
+.\lrng.exe -watch 15m -out E:\case42\HOST01.json            # record 15 minutes for beacons, then the snapshot
 .\lrng.exe -fail-on suspect -quiet -out \\share\sweep\%COMPUTERNAME%.json   # exit 3 on findings
 .\lrng.exe -ping-sidecar
 .\lrng.exe -prompt-scan C:\Users\x\Downloads\suspicious.bin
@@ -1772,6 +1898,12 @@ lrng -navigator-from HOST01.json -expect profile.md -expect-min 60 -navigator co
 | `-navigator-min` | `notable` | lowest severity in the layer: `info`, `notable`, `suspect` or `critical` |
 | `-expect` | — | expected techniques (a Navigator layer, or a text/Markdown file of IDs): makes the layer a coverage map |
 | `-expect-min` | — | with `-expect`, exit with status 3 when under this percentage of expected techniques is detected |
+| `-watch` | — | first record processes, connections and DNS for this long (1m to 24h), then run the snapshot; scores [beaconing](#watch-mode-beaconing) (Windows, elevated) |
+| `-watch-only` | off | with `-watch`, skip the snapshot |
+| `-watch-raw` | — | with `-watch`, also save the recorded event stream (JSON Lines), plus `<path>.sha256` |
+| `-watch-from` | — | offline: rescore a stream saved by `-watch-raw` and exit; works on any OS |
+| `-watch-min-events` | 6 | check-ins a flow needs before it is scored (4 to 512) |
+| `-allow-beacon` | — | extra program names whose periodic traffic is expected |
 | `-mem-scan` | — | scan one PID's memory and print the hits |
 | `-mem-*` | | memory-scan options (see [Memory scanning](#memory-scanning-yara)) |
 

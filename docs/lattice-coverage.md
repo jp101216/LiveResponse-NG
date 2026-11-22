@@ -14,7 +14,9 @@ Status:
 - **Out of reach:** not visible to a user-mode responder; the reason is given.
 
 Rules marked *memory* come from the memory scanner, which is opt-in:
-`lrng -collectors default,memory` (or pass `-yara`).
+`lrng -collectors default,memory` (or pass `-yara`). Rules marked *watch* come
+from watch mode (`lrng -watch 15m`, Windows), which records the host before
+the snapshot.
 
 ## The agent itself
 
@@ -22,6 +24,9 @@ Rules marked *memory* come from the memory scanner, which is opt-in:
 |---|---|---|
 | Agent or team-server binary, running or dropped | New | `malware.lattice_agent` (implants collector, Windows and Linux: running images outside system folders, deleted ones through `/proc/<pid>/exe`, executables in Temp, `/tmp`, `/var/tmp`, `/dev/shm`) |
 | HTTP check-in from an unusual folder | Covered | `network.unusual_path_outbound` |
+| Sleep and jitter between check-ins | New *watch* | `network.beacon`: a flow whose check-ins are too regular to be a person, *critical* with a second signal such as an unusual folder or `memory.stack_unbacked` on the same process |
+| Transport and host rotation (HTTP, DNS, QUIC) | New *watch* | `network.beacon_rotating`: a process's check-ins regular across destinations or transports combined; `network.beacon` with transport `quic` for UDP 443 |
+| DNS transport | New *watch* / Covered | `dns.tunnel_rate` (unique high-entropy names or TXT/NULL queries at rate), `dns.periodic_query`; in the snapshot, `network.dns_tunnel` |
 | `sh -c` host fingerprint (`whoami 2>/dev/null \|\| id -un`), `net-enum`, default `shell` | New | `exec.c2_shell_recon` (Linux form: silent-fallback chains, or three or more discovery commands in one shell) |
 
 The family markers come from the agent at commit `6cd2933`. Per-build string

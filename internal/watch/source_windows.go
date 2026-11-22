@@ -682,15 +682,19 @@ func runSource(ctx context.Context, o RecordOptions, started time.Time, sink fun
 		done <- r
 	}
 	stop()
+	returned := false
 	select {
 	case <-done:
+		returned = true
 	case <-time.After(stopWaitForProcessTrace):
 		w.Errors = append(w.Errors, "ProcessTrace didn't return after the session stopped; closing it")
 	}
 	procCloseTrace.Call(u64(trace)...)
-	select {
-	case <-done:
-	case <-time.After(stopWaitForProcessTrace):
+	if !returned {
+		select {
+		case <-done:
+		case <-time.After(stopWaitForProcessTrace):
+		}
 	}
 	runtime.KeepAlive(logfile)
 

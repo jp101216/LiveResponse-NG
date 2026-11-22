@@ -74,7 +74,11 @@ func TestETWSourceDecodesLiveEvents(t *testing.T) {
 	}
 	time.Sleep(4 * time.Second) // let the buffers flush (FlushTimer is 1s)
 	cancel()
+	stopAt := time.Now()
 	r := <-got
+	if took := time.Since(stopAt); took > 5*time.Second {
+		t.Errorf("stopping the session took %s", took)
+	}
 	if r.err != nil {
 		t.Fatal(r.err)
 	}

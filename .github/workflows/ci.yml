@@ -322,6 +322,7 @@ jobs:
           $m = $w.meta
           Write-Output ("::notice::watch meta: events " + ($m.events | ConvertTo-Json -Compress) + ", cpu " + $m.cpu_seconds + "s (" + $m.cpu_percent_of_one_core + "% of a core), heap " + $m.heap_in_use_bytes + " bytes, ETW lost " + $m.etw_events_lost + ", decode errors " + ($m.decode_errors | ConvertTo-Json -Compress))
           if ($w.errors) { Write-Output ("::notice::watch errors: " + ($w.errors -join ' | ')) }
+          if ($m.window_seconds -gt 125) { throw ("the 2-minute window ran " + $m.window_seconds + " s: the session was slow to stop") }
           $hit = @($w.records | Where-Object { $_.findings.rule -contains 'network.beacon' -and $_.fields.remote_addr -eq $ip -and $_.fields.remote_port -eq $port })
           $hit | ForEach-Object { Write-Output ("::notice::" + ($_.findings | Where-Object rule -eq 'network.beacon').detail) }
           if ($hit.Count -ne 1) { throw "no network.beacon for the scripted beacon to ${ip}:$port" }
